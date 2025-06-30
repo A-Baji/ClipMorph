@@ -1,9 +1,9 @@
 import moviepy as mpy
 from moviepy.video.fx import Crop, Resize
+import os
 
 def process_streaming_video(
     input_path,
-    output_path,
     include_cam=True,
     cam_x1=1420,
     cam_y1=790,
@@ -11,7 +11,8 @@ def process_streaming_video(
     cam_height=270
 ):
     clip = mpy.VideoFileClip(input_path)
-    
+    output_path = f"./{clip.filename.split(".")[0]}-SF.mp4"
+
     crop_width = 1080
     crop_height = 1920
     
@@ -58,4 +59,4 @@ def process_streaming_video(
     clip.close()
 
 # Usage
-process_streaming_video("test.mp4", "output_shortform.mp4", False)
+process_streaming_video("test.mp4")
