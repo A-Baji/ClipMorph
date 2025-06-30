@@ -2,7 +2,7 @@ import argparse
 import moviepy as mpy
 from moviepy.video.fx import Crop, Resize
 
-def process_streaming_video(
+def convert_to_short_form(
     input_path,
     include_cam=True,
     cam_x=1420,
@@ -69,7 +69,7 @@ def main():
     parser.add_argument("--cam-height", type=int, default=270, help="Height in pixels of camera feed.")
     args = parser.parse_args()
 
-    process_streaming_video(
+    convert_to_short_form(
         input_path=args.input_path,
         include_cam=args.include_cam,
         cam_x=args.cam_x,
