@@ -10,9 +10,7 @@ def process_streaming_video(input_path, output_path):
     crop_height = clip.h
     
     # Crop the main content (excluding the camera area)
-    # Adjust x_offset to avoid the camera in bottom right
-    # camera_exclusion_width = 300  # Approximate width to exclude camera area
-    available_width = clip.w#- camera_exclusion_width
+    available_width = clip.w
     x_center = available_width // 2
     
     main_cropped = Crop(
@@ -24,32 +22,27 @@ def process_streaming_video(input_path, output_path):
     main_cropped = main_cropped.apply(clip)
     
     # Extract camera feed from bottom right
-    # Adjust these coordinates based on your actual camera position
-    camera_width = 280
-    camera_height = 210
-    camera_x = clip.w - camera_width - 20  # 20px from right edge
-    camera_y = clip.h - camera_height - 20  # 20px from bottom
-    
+    camera_x1 = 1420
+    camera_y1 = 790
+    camera_width = 480
+    camera_height = 270
+
     camera_feed = Crop(
+        x1=camera_x1,
+        y1=camera_y1,
         width=camera_width,
-        height=camera_height,
-        x_center=camera_x + camera_width//2,
-        y_center=camera_y + camera_height//2
+        height=camera_height
     )
     camera_feed = camera_feed.apply(clip)
     
-    # Resize camera feed for top overlay (make it smaller)
-    camera_resized = Resize(width=180)
+    # Resize camera feed for top overlay
+    camera_resized = Resize(width=crop_width)
     camera_resized = camera_resized.apply(camera_feed)
-    
-    # Position camera at top center of the cropped video
-    cam_final_x = crop_width//2 - camera_resized.w//2
-    cam_final_y = 20
     
     # Composite the main video with camera overlay
     final_video = mpy.CompositeVideoClip([
         main_cropped,
-        # camera_resized.with_position((cam_final_x, cam_final_y))
+        camera_resized.with_position(("center", "top"))
     ])
     
     # Write the result
