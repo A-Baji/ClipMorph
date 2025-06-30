@@ -1,8 +1,8 @@
 from clipmorph.cli import parse_args
 from clipmorph.convert import convert_to_short_form
-from clipmorph.upload_youtube import upload_to_youtube
-from clipmorph.upload_instagram import upload_to_instagram
-from clipmorph.upload_tiktok import upload_to_tiktok
+from clipmorph.upload.youtube import upload_to_youtube
+from clipmorph.upload.instagram import upload_to_instagram
+from clipmorph.upload.tiktok import upload_to_tiktok
 from clipmorph.utils import delete_file
 
 from dotenv import load_dotenv
@@ -22,6 +22,17 @@ def main():
     )
 
 
+    # Confirm upload
+    if not getattr(args, 'skip_confirm', False) and not getattr(args, 'no_confirm', False):
+        confirm = input("\nUpload to all platforms? (y/n): ").strip().lower()
+        if confirm != 'y':
+            print("Aborted upload.")
+            return
+
+    # Upload to all platforms
+    upload_to_youtube(output_path)
+    upload_to_instagram(output_path)
+    upload_to_tiktok(output_path)
 
     # Cleanup if requested
     if getattr(args, 'clean', False):
