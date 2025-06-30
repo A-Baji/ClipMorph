@@ -1,6 +1,5 @@
 import moviepy as mpy
 from moviepy.video.fx import Crop, Resize
-import os
 
 def process_streaming_video(
     input_path,
