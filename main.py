@@ -1,36 +1,38 @@
 import moviepy as mpy
 from moviepy.video.fx import Crop, Resize
 
-def process_streaming_video(input_path, output_path, include_cam=True):
+def process_streaming_video(
+    input_path,
+    output_path,
+    include_cam=True,
+    cam_x1=1420,
+    cam_y1=790,
+    cam_width=480,
+    cam_height=270
+):
     clip = mpy.VideoFileClip(input_path)
     
     crop_width = 1080
     crop_height = 1920
     
     if include_cam:
-        # Extract camera feed from bottom right
-        camera_x1 = 1420
-        camera_y1 = 790
-        camera_width = 480
-        camera_height = 270
-
-        # Crop the camera feed
-        camera_feed = Crop(
-            x1=camera_x1,
-            y1=camera_y1,
-            width=camera_width,
-            height=camera_height
+        # Extract cam feed from bottom right
+        cam_feed = Crop(
+            x1=cam_x1,
+            y1=cam_y1,
+            width=cam_width,
+            height=cam_height
         )
-        camera_feed = camera_feed.apply(clip)
+        cam_feed = cam_feed.apply(clip)
         
-        # Resize camera feed to match crop width
-        camera_resized = Resize(width=crop_width)
-        camera_resized = camera_resized.apply(camera_feed)
-        cam_height = camera_resized.h
+        # Resize cam feed to match crop width
+        cam_resized = Resize(width=crop_width)
+        cam_resized = cam_resized.apply(cam_feed)
+        cam_height = cam_resized.h
     else:
         cam_height = 607
 
-    # Resize the clip to fit under the camera feed
+    # Resize the clip to fit under the cam feed
     clip_resized = Resize(height=crop_height - cam_height)
     clip_resized = clip_resized.apply(clip)
     
@@ -44,8 +46,8 @@ def process_streaming_video(input_path, output_path, include_cam=True):
     clip_cropped = clip_cropped.apply(clip_resized)
     
     if include_cam:
-        # Stack clips vertically: camera on top, clip below
-        final_video = mpy.clips_array([[camera_resized], [clip_cropped]])
+        # Stack clips vertically: cam on top, clip below
+        final_video = mpy.clips_array([[cam_resized], [clip_cropped]])
     else:
         final_video = clip_cropped
     
