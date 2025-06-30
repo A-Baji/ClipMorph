@@ -2,24 +2,10 @@ import moviepy as mpy
 from moviepy.video.fx import Crop, Resize
 
 def process_streaming_video(input_path, output_path):
-    # Load the original video
     clip = mpy.VideoFileClip(input_path)
     
-    # Main content crop (9:16 aspect ratio)
-    crop_width = int(clip.h * 9 / 16)  # ~608px for 1080p
-    crop_height = clip.h
-    
-    # Crop the main content (excluding the camera area)
-    available_width = clip.w
-    x_center = available_width // 2
-    
-    main_cropped = Crop(
-        width=crop_width,
-        height=crop_height,
-        x_center=x_center,
-        y_center=clip.h // 2
-    )
-    main_cropped = main_cropped.apply(clip)
+    crop_width = 1080
+    crop_height = 1920
     
     # Extract camera feed from bottom right
     camera_x1 = 1420
@@ -27,6 +13,7 @@ def process_streaming_video(input_path, output_path):
     camera_width = 480
     camera_height = 270
 
+    # Crop the camera feed
     camera_feed = Crop(
         x1=camera_x1,
         y1=camera_y1,
@@ -35,15 +22,25 @@ def process_streaming_video(input_path, output_path):
     )
     camera_feed = camera_feed.apply(clip)
     
-    # Resize camera feed for top overlay
+    # Resize camera feed to match crop width
     camera_resized = Resize(width=crop_width)
     camera_resized = camera_resized.apply(camera_feed)
     
-    # Composite the main video with camera overlay
-    final_video = mpy.CompositeVideoClip([
-        main_cropped,
-        camera_resized.with_position(("center", "top"))
-    ])
+    # Resize the clip to fit under the camera feed
+    clip_resized = Resize(height=crop_height - camera_resized.h)
+    clip_resized = clip_resized.apply(clip)
+    
+    # Crop the clip
+    clip_cropped = Crop(
+        width=crop_width,
+        height=clip_resized.h,
+        x_center=clip_resized.w // 2,
+        y_center=clip_resized.h // 2
+    )
+    clip_cropped = clip_cropped.apply(clip_resized)
+    
+    # Stack clips vertically: camera on top, clip below
+    final_video = mpy.clips_array([[camera_resized], [clip_cropped]])
     
     # Write the result
     final_video.write_videofile(output_path, codec='libx264', audio_codec='aac')
