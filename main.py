@@ -1,16 +1,17 @@
+import argparse
 import moviepy as mpy
 from moviepy.video.fx import Crop, Resize
 
 def process_streaming_video(
     input_path,
     include_cam=True,
-    cam_x1=1420,
-    cam_y1=790,
+    cam_x=1420,
+    cam_y=790,
     cam_width=480,
     cam_height=270
 ):
     clip = mpy.VideoFileClip(input_path)
-    output_path = f"./{clip.filename.split(".")[0]}-SF.mp4"
+    output_path = f"./{clip.filename.split('.')[0]}-SF.mp4"
 
     crop_width = 1080
     crop_height = 1920
@@ -18,8 +19,8 @@ def process_streaming_video(
     if include_cam:
         # Extract cam feed from bottom right
         cam_feed = Crop(
-            x1=cam_x1,
-            y1=cam_y1,
+            x1=cam_x,
+            y1=cam_y,
             width=cam_width,
             height=cam_height
         )
@@ -57,5 +58,26 @@ def process_streaming_video(
     # Clean up
     clip.close()
 
-# Usage
-process_streaming_video("test.mp4")
+
+def main():
+    parser = argparse.ArgumentParser(description="Convert a streaming video into short-form content.")
+    parser.add_argument("input_path", help="Path to the input video file.")
+    parser.add_argument("--no-cam", dest="include_cam", action="store_false", help="Exclude the camera feed from the output.")
+    parser.add_argument("--cam-x", type=int, default=1420, help="Top left x coordinate of camera feed.")
+    parser.add_argument("--cam-y", type=int, default=790, help="Top left y coordinate of camera feed.")
+    parser.add_argument("--cam-width", type=int, default=480, help="Width in pixels of camera feed.")
+    parser.add_argument("--cam-height", type=int, default=270, help="Height in pixels of camera feed.")
+    args = parser.parse_args()
+
+    process_streaming_video(
+        input_path=args.input_path,
+        include_cam=args.include_cam,
+        cam_x=args.cam_x,
+        cam_y=args.cam_y,
+        cam_width=args.cam_width,
+        cam_height=args.cam_height
+    )
+
+
+if __name__ == "__main__":
+    main()
