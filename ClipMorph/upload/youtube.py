@@ -1,6 +1,85 @@
-from clipmorph.auth.youtube import authenticate_youtube
+import os
+import sys
+import time
+import random
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaFileUpload
+from clipmorph.auth.youtube import get_youtube_credentials
 
-def upload_to_youtube(video_path):
-    authenticate_youtube()
-    print(f"[YouTube] Uploading {video_path} to YouTube Shorts... (placeholder)")
-    # Placeholder: actual upload logic would go here
+MAX_RETRIES = 3
+RETRIABLE_STATUS_CODES = [500, 502, 503, 504]
+
+
+def get_authenticated_service():
+    creds = get_youtube_credentials()
+    return build("youtube", "v3", credentials=creds)
+
+
+def resumable_upload(request):
+    response = None
+    error = None
+    retry = 0
+    while response is None:
+        try:
+            print("[YouTube] Uploading file...")
+            status, response = request.next_chunk()
+            if response is not None:
+                if 'id' in response:
+                    print(f"[YouTube] Video id '{response['id']}' was successfully uploaded.")
+                else:
+                    print(f"[YouTube] The upload failed with an unexpected response: {response}")
+        except HttpError as e:
+            if e.resp.status in RETRIABLE_STATUS_CODES:
+                error = f"A retriable HTTP error {e.resp.status} occurred:\n{e.content}"
+            else:
+                raise
+        except Exception as e:
+            error = f"A retriable error occurred: {e}"
+        if error is not None:
+            print(error)
+            retry += 1
+            if retry > MAX_RETRIES:
+                print("[YouTube] No longer attempting to retry.")
+                break
+            max_sleep = 2 ** retry
+            sleep_seconds = random.random() * max_sleep
+            print(f"[YouTube] Sleeping {sleep_seconds:.2f} seconds and then retrying...")
+            time.sleep(sleep_seconds)
+            error = None
+
+
+def upload_to_youtube(video_path, title="YouTube Shorts Upload", description="Uploaded via API", category="22", keywords="", privacy_status="private"):
+    """
+    Uploads a video to YouTube using the Data API v3.
+    Args:
+        video_path (str): Path to the video file.
+        title (str): Video title.
+        description (str): Video description.
+        category (str): Numeric video category (default: 22 for People & Blogs).
+        keywords (str): Comma-separated keywords.
+        privacy_status (str): 'public', 'private', or 'unlisted'.
+    """
+    youtube = get_authenticated_service()
+    tags = [k.strip() for k in keywords.split(",") if k.strip()] if keywords else None
+    body = {
+        'snippet': {
+            'title': title,
+            'description': description,
+            'tags': tags,
+            'categoryId': category
+        },
+        'status': {
+            'privacyStatus': privacy_status
+        }
+    }
+    media = MediaFileUpload(video_path, chunksize=-1, resumable=True)
+    request = youtube.videos().insert(
+        part=','.join(body.keys()),
+        body=body,
+        media_body=media
+    )
+    resumable_upload(request)
+
+# Example usage:
+# upload_to_youtube('test.mp4', title='Test Shorts', description='Shorts upload', keywords='shorts,api', privacy_status='private')
