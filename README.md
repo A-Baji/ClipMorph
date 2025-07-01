@@ -7,7 +7,7 @@ Automatically convert videos into short-form format and upload them to various p
   - [x] Add option to crop camera or other sections to display at the top [#1](/../../issues/1)
   - [ ] Replace black bars with blurred background fill [#8](/../../issues/8)
 * [ ] Upload to social media platforms [#5](/../../issues/5)
-  - [ ] Youtube shorts [#10](/../../issues/10)
+  - [x] Youtube shorts [#10](/../../issues/10)
   - [ ] Instagram reels [#11](/../../issues/11)
   - [ ] Tiktok [#12](/../../issues/12)
 * [ ] Transcript processing [#15](/../../issues/15)
