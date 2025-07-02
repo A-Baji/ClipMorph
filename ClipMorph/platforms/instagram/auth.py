@@ -10,6 +10,7 @@ Required .env variables:
 # Handles Instagram authentication logic
 
 import os
+import logging
 
 
 def authenticate_instagram():
@@ -17,9 +18,9 @@ def authenticate_instagram():
     app_secret = os.getenv("INSTAGRAM_APP_SECRET")
     access_token = os.getenv("INSTAGRAM_ACCESS_TOKEN")
     user_id = os.getenv("INSTAGRAM_USER_ID")
-    print("[Instagram] Authenticating with provided credentials...")
+    logging.info("[Instagram] Authenticating with provided credentials...")
     # Placeholder: actual authentication logic would go here
     if not all([app_id, app_secret, access_token, user_id]):
-        print("[Instagram] Missing required credentials!")
+        logging.warning("[Instagram] Missing required credentials!")
     else:
-        print("[Instagram] Authentication successful (placeholder)")
+        logging.info("[Instagram] Authentication successful (placeholder)")

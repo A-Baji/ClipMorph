@@ -1,5 +1,6 @@
 import time
 import random
+import logging
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 from clipmorph.platforms.youtube.auth import authenticate_youtube
@@ -14,13 +15,13 @@ def resumable_upload(request):
     retry = 0
     while response is None:
         try:
-            print("[YouTube] Uploading file...")
+            logging.info("[YouTube] Uploading file...")
             status, response = request.next_chunk()
             if response is not None:
                 if 'id' in response:
-                    print(f"[YouTube] Video id '{response['id']}' was successfully uploaded.")
+                    logging.info(f"[YouTube] Video id '{response['id']}' was successfully uploaded.")
                 else:
-                    print(f"[YouTube] The upload failed with an unexpected response: {response}")
+                    logging.error(f"[YouTube] The upload failed with an unexpected response: {response}")
         except HttpError as e:
             if e.resp.status in RETRIABLE_STATUS_CODES:
                 error = f"A retriable HTTP error {e.resp.status} occurred:\n{e.content}"
@@ -29,14 +30,14 @@ def resumable_upload(request):
         except Exception as e:
             error = f"A retriable error occurred: {e}"
         if error is not None:
-            print(error)
+            logging.warning(error)
             retry += 1
             if retry > MAX_RETRIES:
-                print("[YouTube] No longer attempting to retry.")
+                logging.error("[YouTube] No longer attempting to retry.")
                 break
             max_sleep = 2 ** retry
             sleep_seconds = random.random() * max_sleep
-            print(f"[YouTube] Sleeping {sleep_seconds:.2f} seconds and then retrying...")
+            logging.info(f"[YouTube] Sleeping {sleep_seconds:.2f} seconds and then retrying...")
             time.sleep(sleep_seconds)
             error = None
 

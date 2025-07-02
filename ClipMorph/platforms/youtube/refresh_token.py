@@ -1,4 +1,5 @@
 import os
+import logging
 from google_auth_oauthlib.flow import InstalledAppFlow
 
 
@@ -18,5 +19,5 @@ def generate_refresh_token():
         scopes
     )
     creds = flow.run_local_server(port=0, prompt='select_account')
-    print("Refresh token:", creds.refresh_token)
+    logging.info(f"Refresh token: {creds.refresh_token}")
     return creds.refresh_token

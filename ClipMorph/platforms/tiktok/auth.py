@@ -10,6 +10,7 @@ Required .env variables:
 # Handles TikTok authentication logic
 
 import os
+import logging
 
 
 def authenticate_tiktok():
@@ -17,9 +18,9 @@ def authenticate_tiktok():
     client_secret = os.getenv("TIKTOK_CLIENT_SECRET")
     access_token = os.getenv("TIKTOK_ACCESS_TOKEN")
     open_id = os.getenv("TIKTOK_OPEN_ID")
-    print("[TikTok] Authenticating with provided credentials...")
+    logging.info("[TikTok] Authenticating with provided credentials...")
     # Placeholder: actual authentication logic would go here
     if not all([client_key, client_secret, access_token, open_id]):
-        print("[TikTok] Missing required credentials!")
+        logging.warning("[TikTok] Missing required credentials!")
     else:
-        print("[TikTok] Authentication successful (placeholder)")
+        logging.info("[TikTok] Authentication successful (placeholder)")

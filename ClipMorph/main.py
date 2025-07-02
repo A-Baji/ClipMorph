@@ -6,12 +6,13 @@ from clipmorph.platforms.tiktok.upload import upload_to_tiktok
 from clipmorph.utils import delete_file
 
 from dotenv import load_dotenv
+import logging
 
 def main():
     load_dotenv()
     args = parse_args()
 
-    # Convert video
+    logging.info("Converting video to short-form format...")
     output_path = convert_to_short_form(
         input_path=args.input_path,
         include_cam=args.include_cam,
@@ -20,12 +21,13 @@ def main():
         cam_width=args.cam_width,
         cam_height=args.cam_height
     )
+    logging.info(f"Saved converted video to {output_path}")
 
     # Confirm upload
     if not getattr(args, 'skip_confirm', False) and not getattr(args, 'no_confirm', False):
         confirm = input("\nUpload to all platforms? (y/n): ").strip().lower()
         if confirm != 'y':
-            print("Aborted upload.")
+            logging.info("Aborted upload.")
             return
 
     # Upload to all platforms
