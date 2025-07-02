@@ -1,8 +1,8 @@
 from clipmorph.cli import parse_args
 from clipmorph.convert import convert_to_short_form
-from clipmorph.upload.youtube import upload_to_youtube
-from clipmorph.upload.instagram import upload_to_instagram
-from clipmorph.upload.tiktok import upload_to_tiktok
+from clipmorph.platforms.youtube.upload import upload_to_youtube
+from clipmorph.platforms.instagram.upload import upload_to_instagram
+from clipmorph.platforms.tiktok.upload import upload_to_tiktok
 from clipmorph.utils import delete_file
 
 from dotenv import load_dotenv
@@ -20,7 +20,6 @@ def main():
         cam_width=args.cam_width,
         cam_height=args.cam_height
     )
-
 
     # Confirm upload
     if not getattr(args, 'skip_confirm', False) and not getattr(args, 'no_confirm', False):

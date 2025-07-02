@@ -1,4 +1,4 @@
-from clipmorph.auth.instagram import authenticate_instagram
+from clipmorph.platforms.instagram.auth import authenticate_instagram
 
 def upload_to_instagram(video_path):
     authenticate_instagram()

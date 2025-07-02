@@ -1,19 +1,11 @@
-import os
-import sys
 import time
 import random
-from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
-from clipmorph.auth.youtube import get_youtube_credentials
+from clipmorph.platforms.youtube.auth import authenticate_youtube
 
 MAX_RETRIES = 3
 RETRIABLE_STATUS_CODES = [500, 502, 503, 504]
-
-
-def get_authenticated_service():
-    creds = get_youtube_credentials()
-    return build("youtube", "v3", credentials=creds)
 
 
 def resumable_upload(request):
@@ -60,7 +52,7 @@ def upload_to_youtube(video_path, title="YouTube Shorts Upload", description="Up
         keywords (str): Comma-separated keywords.
         privacy_status (str): 'public', 'private', or 'unlisted'.
     """
-    youtube = get_authenticated_service()
+    youtube = authenticate_youtube()
     tags = [k.strip() for k in keywords.split(",") if k.strip()] if keywords else None
     body = {
         'snippet': {
@@ -80,6 +72,3 @@ def upload_to_youtube(video_path, title="YouTube Shorts Upload", description="Up
         media_body=media
     )
     resumable_upload(request)
-
-# Example usage:
-# upload_to_youtube('test.mp4', title='Test Shorts', description='Shorts upload', keywords='shorts,api', privacy_status='private')

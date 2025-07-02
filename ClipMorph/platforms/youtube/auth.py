@@ -11,8 +11,9 @@ Required .env variables:
 import os
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
 
-def get_youtube_credentials():
+def authenticate_youtube():
     """
     Returns a valid Credentials object for YouTube Data API v3 using environment variables.
     Expects YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, YOUTUBE_REFRESH_TOKEN.
@@ -34,4 +35,4 @@ def get_youtube_credentials():
     )
     if not creds.valid and creds.expired and creds.refresh_token:
         creds.refresh(Request())
-    return creds
+    return build("youtube", "v3", credentials=creds)

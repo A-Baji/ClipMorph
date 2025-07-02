@@ -1,4 +1,4 @@
-from clipmorph.auth.tiktok import authenticate_tiktok
+from clipmorph.platforms.tiktok.auth import authenticate_tiktok
 
 def upload_to_tiktok(video_path):
     authenticate_tiktok()
