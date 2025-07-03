@@ -19,9 +19,13 @@ def resumable_upload(request):
             status, response = request.next_chunk()
             if response is not None:
                 if 'id' in response:
-                    logging.info(f"[YouTube] Video id '{response['id']}' was successfully uploaded.")
+                    logging.info(
+                        f"[YouTube] Video id '{response['id']}' was successfully uploaded."
+                    )
                 else:
-                    logging.error(f"[YouTube] The upload failed with an unexpected response: {response}")
+                    logging.error(
+                        f"[YouTube] The upload failed with an unexpected response: {response}"
+                    )
         except HttpError as e:
             if e.resp.status in RETRIABLE_STATUS_CODES:
                 error = f"A retriable HTTP error {e.resp.status} occurred:\n{e.content}"
@@ -35,14 +39,21 @@ def resumable_upload(request):
             if retry > MAX_RETRIES:
                 logging.error("[YouTube] No longer attempting to retry.")
                 break
-            max_sleep = 2 ** retry
+            max_sleep = 2**retry
             sleep_seconds = random.random() * max_sleep
-            logging.info(f"[YouTube] Sleeping {sleep_seconds:.2f} seconds and then retrying...")
+            logging.info(
+                f"[YouTube] Sleeping {sleep_seconds:.2f} seconds and then retrying..."
+            )
             time.sleep(sleep_seconds)
             error = None
 
 
-def upload_to_youtube(video_path, title="YouTube Shorts Upload", description="Uploaded via API", category="22", keywords="", privacy_status="private"):
+def upload_to_youtube(video_path,
+                      title="YouTube Shorts Upload",
+                      description="Uploaded via API",
+                      category="22",
+                      keywords="",
+                      privacy_status="private"):
     """
     Uploads a video to YouTube using the Data API v3.
     Args:
@@ -54,7 +65,8 @@ def upload_to_youtube(video_path, title="YouTube Shorts Upload", description="Up
         privacy_status (str): 'public', 'private', or 'unlisted'.
     """
     youtube = authenticate_youtube()
-    tags = [k.strip() for k in keywords.split(",") if k.strip()] if keywords else None
+    tags = [k.strip() for k in keywords.split(",")
+            if k.strip()] if keywords else None
     body = {
         'snippet': {
             'title': title,
@@ -67,9 +79,7 @@ def upload_to_youtube(video_path, title="YouTube Shorts Upload", description="Up
         }
     }
     media = MediaFileUpload(video_path, chunksize=-1, resumable=True)
-    request = youtube.videos().insert(
-        part=','.join(body.keys()),
-        body=body,
-        media_body=media
-    )
+    request = youtube.videos().insert(part=','.join(body.keys()),
+                                      body=body,
+                                      media_body=media)
     resumable_upload(request)

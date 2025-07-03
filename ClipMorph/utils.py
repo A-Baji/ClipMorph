@@ -1,6 +1,7 @@
 import os
 import logging
 
+
 def delete_file(filepath):
     """Delete a file if it exists."""
     try:
