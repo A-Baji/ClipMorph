@@ -42,18 +42,18 @@ def convert_to_short_form(input_path,
 
             bg_full = Resize(height=crop_height).apply(clip)
             bg_blur = bg_full.transform(blur_frame)
-            bg_blur = Crop(width=crop_width,
-                           height=crop_height,
-                           x_center=bg_full.w // 2,
-                           y_center=bg_full.h // 2).apply(bg_blur)
+            bg_blur_cropped = Crop(width=crop_width,
+                                   height=crop_height,
+                                   x_center=bg_full.w // 2,
+                                   y_center=bg_full.h // 2).apply(bg_blur)
 
             bg_h = cam_h // 2
             bg_blur_top = Crop(x1=0, y1=0, width=crop_width,
-                               height=bg_h).apply(bg_blur)
+                               height=bg_h).apply(bg_blur_cropped)
             bg_blur_bot = Crop(x1=0,
                                y1=bg_h + main_clip.h,
                                width=crop_width,
-                               height=bg_h).apply(bg_blur)
+                               height=bg_h).apply(bg_blur_cropped)
             final_video = mpy.clips_array([[bg_blur_top], [main_clip],
                                            [bg_blur_bot]])
         else:
