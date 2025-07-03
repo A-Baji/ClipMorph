@@ -1,5 +1,6 @@
 import moviepy as mpy
 from moviepy.video.fx import Crop, Resize
+import cv2
 
 def convert_to_short_form(
     input_path,
@@ -30,7 +31,7 @@ def convert_to_short_form(
         cam_resized = cam_resized.apply(cam_feed)
         cam_height = cam_resized.h
     else:
-        cam_height = 607
+        cam_height = 608
 
     # Resize the clip to fit under the cam feed
     clip_resized = Resize(height=crop_height - cam_height)
@@ -44,13 +45,31 @@ def convert_to_short_form(
         y_center=clip_resized.h // 2
     )
     clip_cropped = clip_cropped.apply(clip_resized)
+
+    if not include_cam:
+        def blur_frame(get_frame, t):
+            frame = get_frame(t)
+            # Convert RGB (MoviePy) to BGR (OpenCV)
+            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            # Apply Gaussian blur; kernel size must be odd and positive
+            blurred_bgr = cv2.GaussianBlur(frame_bgr, (51, 51), sigmaX=0)
+            # Convert back to RGB for MoviePy
+            blurred_rgb = cv2.cvtColor(blurred_bgr, cv2.COLOR_BGR2RGB)
+            return blurred_rgb
+        bg_blur = clip_resized.transform(blur_frame)
+
+        bg_blur = Crop(
+            width=crop_width,
+            height=clip_resized.h,
+            x_center=clip_resized.w // 2,
+            y_center=clip_resized.h // 2
+        ).apply(bg_blur)
     
     if include_cam:
-        # Stack clips vertically: cam on top, clip below
         final_video = mpy.clips_array([[cam_resized], [clip_cropped]])
     else:
-        final_video = clip_cropped
-    
+        final_video = bg_blur
+
     # Write the result
     final_video.write_videofile(output_path, codec='libx264', audio_codec='aac')
     
