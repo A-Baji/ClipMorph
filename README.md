@@ -2,10 +2,10 @@
 Automatically convert videos into short-form format and upload them to various platforms
 
 ## Feature Checklist
-* [ ] Crop videos into short-form [#9](/../../issues/9)
+* [x] Convert videos into short-form [#9](/../../issues/9)
   - [x] Crop main contain to fit 9:16 ratio [#2](/../../issues/2)
   - [x] Add option to crop camera or other sections to display at the top [#1](/../../issues/1)
-  - [ ] Replace black bars with blurred background fill [#8](/../../issues/8)
+  - [x] Replace black bars with blurred background fill [#8](/../../issues/8)
 * [ ] Upload to social media platforms [#5](/../../issues/5)
   - [x] Youtube shorts [#10](/../../issues/10)
   - [ ] Instagram reels [#11](/../../issues/11)
