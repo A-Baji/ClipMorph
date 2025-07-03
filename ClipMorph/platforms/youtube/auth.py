@@ -1,13 +1,3 @@
-"""
-YouTube Authentication
-Required .env variables:
-- YOUTUBE_CLIENT_ID
-- YOUTUBE_CLIENT_SECRET
-- YOUTUBE_REFRESH_TOKEN
-"""
-
-# Handles YouTube authentication logic
-
 import os
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
