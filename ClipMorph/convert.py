@@ -23,19 +23,16 @@ def convert_to_short_form(
             y1=cam_y,
             width=cam_width,
             height=cam_height
-        )
-        cam_feed = cam_feed.apply(clip)
+        ).apply(clip)
         
         # Resize cam feed to match crop width
-        cam_resized = Resize(width=crop_width)
-        cam_resized = cam_resized.apply(cam_feed)
+        cam_resized = Resize(width=crop_width).apply(cam_feed)
         cam_height = cam_resized.h
     else:
         cam_height = 608
 
     # Resize the clip to fit under the cam feed
-    clip_resized = Resize(height=crop_height - cam_height)
-    clip_resized = clip_resized.apply(clip)
+    clip_resized = Resize(height=crop_height - cam_height).apply(clip)
     
     # Crop the clip
     clip_cropped = Crop(
@@ -43,8 +40,7 @@ def convert_to_short_form(
         height=clip_resized.h,
         x_center=clip_resized.w // 2,
         y_center=clip_resized.h // 2
-    )
-    clip_cropped = clip_cropped.apply(clip_resized)
+    ).apply(clip_resized)
 
     if not include_cam:
         def blur_frame(get_frame, t):
@@ -56,19 +52,36 @@ def convert_to_short_form(
             # Convert back to RGB for MoviePy
             blurred_rgb = cv2.cvtColor(blurred_bgr, cv2.COLOR_BGR2RGB)
             return blurred_rgb
+        
+        clip_resized = Resize(height=crop_height).apply(clip)
+
         bg_blur = clip_resized.transform(blur_frame)
 
         bg_blur = Crop(
             width=crop_width,
-            height=clip_resized.h,
+            height=crop_height,
             x_center=clip_resized.w // 2,
             y_center=clip_resized.h // 2
+        ).apply(bg_blur)
+
+        bg_blur_top = Crop(
+            x1=0,
+            y1=0,
+            width=crop_width,
+            height=cam_height // 2
+        ).apply(bg_blur)
+
+        bg_blur_bot = Crop(
+            x1=0,
+            y1=cam_height // 2 + clip_cropped.h,
+            width=crop_width,
+            height=cam_height // 2
         ).apply(bg_blur)
     
     if include_cam:
         final_video = mpy.clips_array([[cam_resized], [clip_cropped]])
     else:
-        final_video = bg_blur
+        final_video = mpy.clips_array([[bg_blur_top], [clip_cropped], [bg_blur_bot]])
 
     # Write the result
     final_video.write_videofile(output_path, codec='libx264', audio_codec='aac')
