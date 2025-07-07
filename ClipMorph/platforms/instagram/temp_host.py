@@ -1,3 +1,4 @@
+import logging
 import requests
 
 
@@ -20,10 +21,9 @@ def upload_to_0x0(video_path: str) -> tuple[str, str]:
 
     resp.raise_for_status()
     public_url = resp.text.strip()
-    print(resp.headers)
     token = resp.headers.get("X-Token")
-    if not token:
-        raise RuntimeError("X-Token not returned")
+
+    logging.info(F"Uploaded to 0x0: {public_url}, token: {token}")
 
     return public_url, token
 
@@ -32,7 +32,6 @@ def delete_from_0x0(file_url: str, token: str) -> None:
     """
     Deletes the file at file_url using the management token.
     """
-    # Note: file_url ends in e.g. "/AbCd.mp4"
     resp = requests.post(file_url,
                          files={
                              "token": (None, token),
@@ -40,3 +39,4 @@ def delete_from_0x0(file_url: str, token: str) -> None:
                          },
                          headers={"User-Agent": "curl/7.85.0"})
     resp.raise_for_status()
+    logging.info(resp.text.strip())

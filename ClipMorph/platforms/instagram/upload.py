@@ -1,7 +1,9 @@
+import logging
 import requests
 import time
 
 from clipmorph.platforms.instagram.auth import get_page_access_token, get_ig_user_id
+from clipmorph.platforms.instagram.temp_host import upload_to_0x0, delete_from_0x0
 
 
 def create_reel_container(ig_user_id,
@@ -52,16 +54,24 @@ def wait_for_processing(creation_id, access_token, timeout=120):
         if status == 'FINISHED':
             return True
         elif status == 'ERROR':
-            raise Exception(f"Video processing failed: {resp.json()}")
+            logging.error(f"Video processing failed: {resp.json()}")
+            return False
         time.sleep(5)
     raise TimeoutError("Timed out waiting for video processing.")
 
 
 def upload_to_instagram(video_path, caption="Uploaded via API"):
+    video_url, token = upload_to_0x0(video_path)
+    print(video_url, token)
+
     page_token = get_page_access_token()
     ig_user_id = get_ig_user_id(page_token)
-    creation_id = create_reel_container(ig_user_id, video_path, caption,
+    creation_id = create_reel_container(ig_user_id, video_url, caption,
                                         page_token)
-    wait_for_processing(creation_id, page_token)
-    media_id = publish_media(ig_user_id, creation_id, page_token)
-    print("Published Reel with media ID:", media_id)
+
+    if wait_for_processing(creation_id, page_token):
+        media_id = publish_media(ig_user_id, creation_id, page_token)
+        logging.info(f"Published Reel with media ID: {media_id}")
+
+    if token:
+        delete_from_0x0(video_url, token)
