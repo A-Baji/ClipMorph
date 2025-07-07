@@ -1,7 +1,7 @@
 import requests
 import time
 
-from clipmorph.platforms.instagram.auth import get_user_access_token, get_page_access_token, get_ig_user_id
+from clipmorph.platforms.instagram.auth import get_page_access_token, get_ig_user_id
 
 
 def create_reel_container(ig_user_id,
@@ -58,8 +58,7 @@ def wait_for_processing(creation_id, access_token, timeout=120):
 
 
 def upload_to_instagram(video_path, caption="Uploaded via API"):
-    user_token = get_user_access_token()
-    page_token = get_page_access_token(user_token)
+    page_token = get_page_access_token()
     ig_user_id = get_ig_user_id(page_token)
     creation_id = create_reel_container(ig_user_id, video_path, caption,
                                         page_token)

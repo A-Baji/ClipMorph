@@ -20,3 +20,14 @@ def generate_refresh_token():
     creds = flow.run_local_server(port=0, prompt='select_account')
     logging.info(f"Refresh token: {creds.refresh_token}")
     return creds.refresh_token
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    try:
+        refresh_token = generate_refresh_token()
+        logging.info(
+            f"Set YOUTUBE_REFRESH_TOKEN={refresh_token} in your .env file")
+    except Exception as e:
+        logging.error(f"Error generating refresh token: {e}")
+        raise
