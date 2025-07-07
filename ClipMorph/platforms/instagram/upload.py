@@ -1,48 +1,68 @@
-import logging
-import os
 import requests
+import time
 
-from clipmorph.platforms.instagram.auth import authenticate_instagram, GRAPH_BASE
-from clipmorph.platforms.instagram.temp_host import upload_to_0x0
-
-logging.basicConfig(level=logging.INFO)
-
-logging.basicConfig(level=logging.INFO)
+from clipmorph.platforms.instagram.auth import get_user_access_token, get_page_access_token, get_ig_user_id
 
 
-def upload_to_instagram(video_path: str, caption: str = "") -> dict:
-    # 1. Authenticate
-    access_token, user_id = authenticate_instagram()
-
-    # 2. Upload to 0x0.st
-    # result = upload_to_0x0(video_path)
-    video_url = "https://0x0.st/80Jg.mp4"
-    logging.info(f"[0x0.st] Hosted URL: {video_url}")
-
-    # 3. Create Reels container
-    create_endpoint = f"{GRAPH_BASE}/{user_id}/media"
-    params_create = {
-        "media_type": "REELS",
-        "video_url": video_url,
-        "caption": caption,
-        "access_token": access_token
+def create_reel_container(ig_user_id,
+                          video_url,
+                          caption,
+                          access_token,
+                          share_to_feed=True,
+                          thumb_offset=None):
+    """
+    Creates a media container for a Reel.
+    """
+    url = f"https://graph.facebook.com/v23.0/{ig_user_id}/media"
+    payload = {
+        'media_type': 'REELS',
+        'video_url': video_url,
+        'caption': caption,
+        'access_token': access_token,
+        'share_to_feed': 'true' if share_to_feed else 'false',
     }
-    logging.info("[Instagram] Creating Reels media container…")
-    resp_create = requests.post(create_endpoint, params=params_create)
-    resp_create.raise_for_status()
-    creation_id = resp_create.json().get("id")
-    if not creation_id:
-        logging.error(
-            f"[Instagram] Container creation failed: {resp_create.text}")
-        raise RuntimeError("Failed to create media container")
+    if thumb_offset is not None:
+        payload['thumb_offset'] = str(thumb_offset)
+    resp = requests.post(url, data=payload)
+    resp.raise_for_status()
+    return resp.json()['id']
 
-    # 4. Publish the Reel
-    publish_endpoint = f"{GRAPH_BASE.replace("instagram", "facebook")}/{user_id}/media_publish"
-    params_publish = {"creation_id": creation_id, "access_token": access_token}
-    logging.info("[Instagram] Publishing Reels…")
-    resp_publish = requests.post(publish_endpoint, params=params_publish)
-    resp_publish.raise_for_status()
 
-    publish_response = resp_publish.json()
-    logging.info(f"[Instagram] Publish response: {publish_response}")
-    return publish_response
+def publish_media(ig_user_id, creation_id, access_token):
+    """
+    Publishes the media container to Instagram as a Reel.
+    """
+    url = f"https://graph.facebook.com/v23.0/{ig_user_id}/media_publish"
+    payload = {'creation_id': creation_id, 'access_token': access_token}
+    resp = requests.post(url, data=payload)
+    resp.raise_for_status()
+    return resp.json()['id']
+
+
+def wait_for_processing(creation_id, access_token, timeout=120):
+    """
+    Polls the media container status until it's finished processing.
+    """
+    url = f"https://graph.facebook.com/v23.0/{creation_id}?fields=status_code&access_token={access_token}"
+    start = time.time()
+    while time.time() - start < timeout:
+        resp = requests.get(url)
+        resp.raise_for_status()
+        status = resp.json().get('status_code')
+        if status == 'FINISHED':
+            return True
+        elif status == 'ERROR':
+            raise Exception(f"Video processing failed: {resp.json()}")
+        time.sleep(5)
+    raise TimeoutError("Timed out waiting for video processing.")
+
+
+def upload_to_instagram(video_path, caption="Uploaded via API"):
+    user_token = get_user_access_token()
+    page_token = get_page_access_token(user_token)
+    ig_user_id = get_ig_user_id(page_token)
+    creation_id = create_reel_container(ig_user_id, video_path, caption,
+                                        page_token)
+    wait_for_processing(creation_id, page_token)
+    media_id = publish_media(ig_user_id, creation_id, page_token)
+    print("Published Reel with media ID:", media_id)
