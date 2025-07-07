@@ -3,7 +3,8 @@ import requests
 import time
 
 from clipmorph.platforms.instagram.auth import get_page_access_token, get_ig_user_id
-from clipmorph.platforms.instagram.temp_host import upload_to_0x0, delete_from_0x0
+from clipmorph.platforms.instagram.temp_host import upload_video, delete_video
+from clipmorph.platforms.youtube.auth import authenticate_google
 
 
 def create_reel_container(ig_user_id,
@@ -61,7 +62,9 @@ def wait_for_processing(creation_id, access_token, timeout=120):
 
 
 def upload_to_instagram(video_path, caption="Uploaded via API"):
-    video_url, token = upload_to_0x0(video_path)
+    google_creds = authenticate_google(
+        ["https://www.googleapis.com/auth/devstorage.read_write"])
+    video_url = upload_video(video_path, google_creds)
 
     page_token = get_page_access_token()
     ig_user_id = get_ig_user_id(page_token)
@@ -72,5 +75,4 @@ def upload_to_instagram(video_path, caption="Uploaded via API"):
         media_id = publish_media(ig_user_id, creation_id, page_token)
         logging.info(f"Published Reel with media ID: {media_id}")
 
-    if token:
-        delete_from_0x0(video_url, token)
+    delete_video(video_path, google_creds)

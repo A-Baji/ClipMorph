@@ -9,8 +9,8 @@ def generate_refresh_token():
     flow = InstalledAppFlow.from_client_config(
         {
             "installed": {
-                "client_id": os.getenv("YOUTUBE_CLIENT_ID"),
-                "client_secret": os.getenv("YOUTUBE_CLIENT_SECRET"),
+                "client_id": os.getenv("GOOGLE_CLIENT_ID"),
+                "client_secret": os.getenv("GOOGLE_CLIENT_SECRET"),
                 "redirect_uris":
                 ["urn:ietf:wg:oauth:2.0:oob", "http://localhost"],
                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
@@ -27,7 +27,7 @@ if __name__ == "__main__":
     try:
         refresh_token = generate_refresh_token()
         logging.info(
-            f"Set YOUTUBE_REFRESH_TOKEN={refresh_token} in your .env file")
+            f"Set GOOGLE_REFRESH_TOKEN={refresh_token} in your .env file")
     except Exception as e:
         logging.error(f"Error generating refresh token: {e}")
         raise
