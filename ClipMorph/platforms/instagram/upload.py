@@ -62,7 +62,6 @@ def wait_for_processing(creation_id, access_token, timeout=120):
 
 def upload_to_instagram(video_path, caption="Uploaded via API"):
     video_url, token = upload_to_0x0(video_path)
-    print(video_url, token)
 
     page_token = get_page_access_token()
     ig_user_id = get_ig_user_id(page_token)
