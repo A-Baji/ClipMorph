@@ -3,7 +3,7 @@ import random
 import logging
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
-from clipmorph.platforms.youtube.auth import authenticate_google
+from clipmorph.platforms.youtube.auth import authenticate_youtube
 from googleapiclient.discovery import build
 
 MAX_RETRIES = 3
@@ -65,8 +65,7 @@ def upload_to_youtube(video_path,
         keywords (str): Comma-separated keywords.
         privacy_status (str): 'public', 'private', or 'unlisted'.
     """
-    creds = authenticate_google(
-        ["https://www.googleapis.com/auth/youtube.upload"])
+    creds = authenticate_youtube()
     youtube = build("youtube", "v3", credentials=creds)
     tags = [k.strip() for k in keywords.split(",")
             if k.strip()] if keywords else None
