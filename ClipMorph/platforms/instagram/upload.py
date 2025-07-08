@@ -61,31 +61,41 @@ def wait_for_processing(creation_id, access_token, timeout=120):
 
 
 def upload_to_instagram(video_path, caption="Uploaded via API"):
-    logging.info("Starting Instagram Reels upload...")
+    logging.info("[Instagram] Starting Instagram Reels upload...")
     google_creds = authenticate_google()
-    logging.info("Authenticated with Google for temporary video hosting.")
+    logging.info(
+        "[Instagram] Authenticated to Cloud Storage with Google for temporary video hosting."
+    )
     video_url = upload_video(video_path, google_creds)
-    logging.info(f"Uploaded video to temporary host: {video_url}")
+    logging.info(f"[Instagram] Uploaded video to temporary host: {video_url}")
 
     page_token = get_page_access_token()
-    logging.info("Fetched Instagram page access token.")
+    logging.info("[Instagram] Fetched Instagram page access token.")
     ig_user_id = get_ig_user_id(page_token)
-    logging.info(f"Fetched Instagram user ID: {ig_user_id}")
+    logging.info(f"[Instagram] Fetched Instagram user ID: {ig_user_id}")
     creation_id = create_reel_container(ig_user_id, video_url, caption,
                                         page_token)
-    logging.info(f"Created Instagram Reel container with ID: {creation_id}")
+    logging.info(
+        f"[Instagram] Created Instagram Reel container with ID: {creation_id}")
 
     try:
+        logging.info("[Instagram] Processing video...")
         if wait_for_processing(creation_id, page_token):
-            logging.info("Video processing finished. Publishing Reel...")
+            logging.info(
+                "[Instagram] Video processing finished. Publishing Reel...")
             media_id = publish_media(ig_user_id, creation_id, page_token)
-            logging.info(f"Published Reel with media ID: {media_id}")
+            logging.info(
+                f"[Instagram] Published Reel with media ID: {media_id}")
         else:
-            logging.error("Video processing failed or returned error status.")
+            logging.error(
+                "[Instagram] Video processing failed or returned error status."
+            )
     except TimeoutError as e:
-        logging.error(f"Timeout while waiting for video processing: {e}")
+        logging.error(
+            f"[Instagram] Timeout while waiting for video processing: {e}")
     except Exception as e:
-        logging.error(f"Unexpected error during Instagram upload: {e}")
+        logging.error(
+            f"[Instagram] Unexpected error during Instagram upload: {e}")
     finally:
         delete_video(video_path, google_creds)
-        logging.info("Cleaned up temporary hosted video.")
+        logging.info("[Instagram] Cleaned up temporary hosted video.")
