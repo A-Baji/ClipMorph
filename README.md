@@ -8,7 +8,7 @@ Automatically convert videos into short-form format and upload them to various p
   - [x] Replace black bars with blurred background fill [#8](/../../issues/8)
 * [ ] Upload to social media platforms [#5](/../../issues/5)
   - [x] Youtube shorts [#10](/../../issues/10)
-  - [ ] Instagram reels [#11](/../../issues/11)
+  - [x] Instagram reels [#11](/../../issues/11)
   - [ ] Tiktok [#12](/../../issues/12)
 * [ ] Transcript processing [#15](/../../issues/15)
   - [ ] Mute curse words [#13](/../../issues/13)
