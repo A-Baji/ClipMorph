@@ -14,7 +14,7 @@ def parse_args():
     parser.add_argument("--clean",
                         "-c",
                         action="store_true",
-                        help="Delete original video after upload.")
+                        help="Delete output video after upload.")
     parser.add_argument("--no-cam",
                         dest="include_cam",
                         action="store_false",
