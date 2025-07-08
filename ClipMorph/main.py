@@ -23,16 +23,18 @@ def main():
     logging.info(f"Saved converted video to {output_path}")
 
     # Confirm upload
-    if not getattr(args, 'skip_confirm', False) and not getattr(
-            args, 'no_confirm', False):
+    if not getattr(args, 'no_confirm', False):
         confirm = input("\nUpload to all platforms? (y/n): ").strip().lower()
         if confirm != 'y':
             logging.info("Aborted upload.")
             return
 
     # Upload to all platforms
+    print("----------------")
     upload_to_youtube(output_path)
+    print("----------------")
     upload_to_instagram(output_path)
+    print("----------------")
     upload_to_tiktok(output_path)
 
     # Cleanup if requested

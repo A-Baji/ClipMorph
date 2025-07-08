@@ -4,6 +4,7 @@ import logging
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 from clipmorph.platforms.youtube.auth import authenticate_youtube
+from googleapiclient.discovery import build
 
 MAX_RETRIES = 3
 RETRIABLE_STATUS_CODES = [500, 502, 503, 504]
@@ -15,7 +16,7 @@ def resumable_upload(request):
     retry = 0
     while response is None:
         try:
-            logging.info("[YouTube] Uploading file...")
+            logging.info("[YouTube] Uploading video...")
             status, response = request.next_chunk()
             if response is not None:
                 if 'id' in response:
@@ -64,9 +65,15 @@ def upload_to_youtube(video_path,
         keywords (str): Comma-separated keywords.
         privacy_status (str): 'public', 'private', or 'unlisted'.
     """
-    youtube = authenticate_youtube()
+    logging.info("[YouTube] Starting Youtube shorts upload...")
+    creds = authenticate_youtube()
+    logging.info("[YouTube] Authenticated to YouTube with Google API.")
+    youtube = build("youtube", "v3", credentials=creds)
     tags = [k.strip() for k in keywords.split(",")
             if k.strip()] if keywords else None
+    logging.info(
+        f"[YouTube] Preparing video metadata: title='{title}', category='{category}', privacy='{privacy_status}'"
+    )
     body = {
         'snippet': {
             'title': title,
@@ -79,6 +86,7 @@ def upload_to_youtube(video_path,
         }
     }
     media = MediaFileUpload(video_path, chunksize=-1, resumable=True)
+    logging.info(f"[YouTube] Created MediaFileUpload for: {video_path}")
     request = youtube.videos().insert(part=','.join(body.keys()),
                                       body=body,
                                       media_body=media)

@@ -1,27 +1,16 @@
-"""
-YouTube Authentication
-Required .env variables:
-- YOUTUBE_CLIENT_ID
-- YOUTUBE_CLIENT_SECRET
-- YOUTUBE_REFRESH_TOKEN
-"""
-
-# Handles YouTube authentication logic
-
 import os
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
 
 
 def authenticate_youtube():
     """
     Returns a valid Credentials object for YouTube Data API v3 using environment variables.
-    Expects YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, YOUTUBE_REFRESH_TOKEN.
+    Expects GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN.
     """
-    client_id = os.getenv("YOUTUBE_CLIENT_ID")
-    client_secret = os.getenv("YOUTUBE_CLIENT_SECRET")
-    refresh_token = os.getenv("YOUTUBE_REFRESH_TOKEN")
+    client_id = os.getenv("GOOGLE_CLIENT_ID")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+    refresh_token = os.getenv("GOOGLE_REFRESH_TOKEN")
 
     if not all([client_id, client_secret, refresh_token]):
         raise RuntimeError(
@@ -37,4 +26,4 @@ def authenticate_youtube():
         scopes=["https://www.googleapis.com/auth/youtube.upload"])
     if not creds.valid and creds.expired and creds.refresh_token:
         creds.refresh(Request())
-    return build("youtube", "v3", credentials=creds)
+    return creds
