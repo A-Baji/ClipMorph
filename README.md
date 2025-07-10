@@ -9,7 +9,7 @@ Automatically convert videos into short-form format and upload them to various p
 * [ ] Upload to social media platforms [#5](/../../issues/5)
   - [x] Youtube shorts [#10](/../../issues/10)
   - [x] Instagram reels [#11](/../../issues/11)
-  - [ ] Tiktok [#12](/../../issues/12)
+  - [x] Tiktok [#12](/../../issues/12)
   - [ ] Twitter [#12](/../../issues/19)
 * [ ] Transcript processing [#15](/../../issues/15)
   - [ ] Mute curse words [#13](/../../issues/13)
