@@ -1,26 +1,23 @@
-"""
-TikTok Authentication
-Required .env variables:
-- TIKTOK_CLIENT_KEY
-- TIKTOK_CLIENT_SECRET
-- TIKTOK_ACCESS_TOKEN
-- TIKTOK_OPEN_ID
-"""
-
-# Handles TikTok authentication logic
-
 import os
-import logging
+import requests
+
+TOKEN_URL = 'https://open.tiktokapis.com/v2/oauth/token/'
+
+TIKTOK_CLIENT_KEY = os.getenv('TIKTOK_CLIENT_KEY')
+TIKTOK_CLIENT_SECRET = os.getenv('TIKTOK_CLIENT_SECRET')
+TIKTOK_REFRESH_TOKEN = os.getenv('TIKTOK_REFRESH_TOKEN')
 
 
-def authenticate_tiktok():
-    client_key = os.getenv("TIKTOK_CLIENT_KEY")
-    client_secret = os.getenv("TIKTOK_CLIENT_SECRET")
-    access_token = os.getenv("TIKTOK_ACCESS_TOKEN")
-    open_id = os.getenv("TIKTOK_OPEN_ID")
-    logging.info("[TikTok] Authenticating with provided credentials...")
-    # Placeholder: actual authentication logic would go here
-    if not all([client_key, client_secret, access_token, open_id]):
-        logging.warning("[TikTok] Missing required credentials!")
-    else:
-        logging.info("[TikTok] Authentication successful (placeholder)")
+def refresh_access_token():
+    data = {
+        'client_key': TIKTOK_CLIENT_KEY,
+        'client_secret': TIKTOK_CLIENT_SECRET,
+        'grant_type': 'refresh_token',
+        'refresh_token': TIKTOK_REFRESH_TOKEN
+    }
+    headers = {'Content-Type': 'application/x-www-form-urlencoded'}
+    response = requests.post(TOKEN_URL, data=data, headers=headers)
+    response.raise_for_status()
+    resp_json = response.json()
+
+    return resp_json.get('access_token')
