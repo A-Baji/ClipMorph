@@ -23,6 +23,12 @@ def convert_to_short_form(input_path,
                             height=cam_height).apply(clip)
             cam_resized = Resize(width=crop_width).apply(cam_feed)
             cam_h = cam_resized.h
+
+            # If cam_h is odd, resize again to height+1 to ensure even height
+            if cam_h % 2 != 0:
+                cam_resized = Resize(
+                    (crop_width, cam_h + 1)).apply(cam_resized)
+                cam_h = cam_resized.h
         else:
             cam_h = crop_height - clip_height
 
@@ -59,7 +65,6 @@ def convert_to_short_form(input_path,
         else:
             final_video = mpy.clips_array([[cam_resized], [main_clip]])
 
-        final_video = Resize(width=1080, height=1920).apply(final_video)
         final_video.write_videofile(output_path,
                                     codec='libx264',
                                     audio_codec='aac')
