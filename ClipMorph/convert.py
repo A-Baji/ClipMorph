@@ -59,6 +59,7 @@ def convert_to_short_form(input_path,
         else:
             final_video = mpy.clips_array([[cam_resized], [main_clip]])
 
+        final_video = Resize(width=1080, height=1920).apply(final_video)
         final_video.write_videofile(output_path,
                                     codec='libx264',
                                     audio_codec='aac')
