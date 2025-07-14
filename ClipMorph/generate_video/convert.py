@@ -11,7 +11,7 @@ def convert_to_short_form(input_path,
                           cam_height=270,
                           clip_height=1312):
     with mpy.VideoFileClip(input_path) as clip:
-        output_path = f"./{clip.filename.split('.')[0]}-SF.mp4"
+        output_path = f"{clip.filename.split('.')[0]}-SF.mp4"
 
         crop_width = 1080
         crop_height = 1920
