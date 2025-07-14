@@ -3,6 +3,7 @@ from clipmorph.convert import convert_to_short_form
 from clipmorph.platforms.youtube.upload import upload_to_youtube
 from clipmorph.platforms.instagram.upload import upload_to_instagram
 from clipmorph.platforms.tiktok.upload import upload_to_tiktok
+from clipmorph.platforms.twitter.upload import upload_to_twitter
 from clipmorph.utils import delete_file
 
 from dotenv import load_dotenv
@@ -36,6 +37,8 @@ def main():
     upload_to_instagram(output_path)
     print("----------------")
     upload_to_tiktok(output_path)
+    print("----------------")
+    upload_to_twitter(output_path)
 
     # Cleanup if requested
     if getattr(args, 'clean', False):
