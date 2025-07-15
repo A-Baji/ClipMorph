@@ -14,7 +14,10 @@ def extract_audio(input_path):
 
 def transcribe_audio(model='base.en'):
     model = whisper.load_model(model)
-    result = model.transcribe(AUDIO_PATH, word_timestamps=True, fp16=False)
+    result = model.transcribe(AUDIO_PATH,
+                              word_timestamps=True,
+                              fp16=False,
+                              language='en')
     return result[
         'segments']  # Each segment contains text, start, end, and words with timings
 
