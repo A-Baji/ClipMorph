@@ -6,6 +6,77 @@ from clipmorph.generate_video import CENSORED_AUDIO_PATH
 from clipmorph.generate_video.transcript import parse_srt
 
 
+def set_audio(clip):
+    audio = mpy.AudioFileClip(CENSORED_AUDIO_PATH)
+    return clip.with_audio(audio)
+
+
+def process_camera_feed(clip, cam_x, cam_y, cam_width, cam_height, crop_width):
+    cam_feed = Crop(x1=cam_x, y1=cam_y, width=cam_width,
+                    height=cam_height).apply(clip)
+    cam_resized = Resize(width=crop_width).apply(cam_feed)
+    cam_h = cam_resized.h
+    if cam_h % 2 != 0:
+        cam_resized = Resize((crop_width, cam_h + 1)).apply(cam_resized)
+        cam_h = cam_resized.h
+    return cam_resized, cam_h
+
+
+def process_main_clip(clip, crop_height, cam_h, crop_width):
+    main_clip = Resize(height=crop_height - cam_h).apply(clip)
+    main_clip = Crop(width=crop_width,
+                     height=main_clip.h,
+                     x_center=main_clip.w // 2,
+                     y_center=main_clip.h // 2).apply(main_clip)
+    return main_clip
+
+
+def blur_background(clip, crop_width, crop_height, cam_h, main_clip):
+
+    def blur_frame(get_frame, t):
+        frame = get_frame(t)
+        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        blurred_bgr = cv2.GaussianBlur(frame_bgr, (51, 51), sigmaX=0)
+        return cv2.cvtColor(blurred_bgr, cv2.COLOR_BGR2RGB)
+
+    bg_full = Resize(height=crop_height).apply(clip)
+    bg_blur = bg_full.transform(blur_frame)
+    bg_blur_cropped = Crop(width=crop_width,
+                           height=crop_height,
+                           x_center=bg_full.w // 2,
+                           y_center=bg_full.h // 2).apply(bg_blur)
+
+    bg_h = cam_h // 2
+    bg_blur_top = Crop(x1=0, y1=0, width=crop_width,
+                       height=bg_h).apply(bg_blur_cropped)
+    bg_blur_bot = Crop(x1=0,
+                       y1=bg_h + main_clip.h,
+                       width=crop_width,
+                       height=bg_h).apply(bg_blur_cropped)
+
+    final_video = mpy.clips_array([[bg_blur_top], [main_clip], [bg_blur_bot]])
+    return final_video
+
+
+def overlay_subtitles(final_video):
+    subs = parse_srt()
+    subtitle_clips = []
+    for sub in subs:
+        txt_clip = (mpy.TextClip(
+            text=sub['text'],
+            font_size=36,
+            color='white',
+            stroke_color='black',
+            stroke_width=2,
+            method='caption',
+            size=(int(final_video.w * 0.9), None)).with_start(
+                sub['start']).with_end(sub['end']).with_position(
+                    ('center', 'bottom')))
+        subtitle_clips.append(txt_clip)
+    final = mpy.CompositeVideoClip([final_video, *subtitle_clips])
+    return final
+
+
 def convert_to_short_form(input_path,
                           include_cam=True,
                           cam_x=1420,
@@ -15,81 +86,28 @@ def convert_to_short_form(input_path,
                           clip_height=1312):
     with mpy.VideoFileClip(input_path) as clip:
         output_path = f"{clip.filename.split('.')[0]}-converted.mp4"
-        audio = mpy.AudioFileClip(CENSORED_AUDIO_PATH)
-        clip = clip.with_audio(audio)
+        clip = set_audio(clip)
 
         crop_width = 1080
         crop_height = 1920
 
         if include_cam:
-            cam_feed = Crop(x1=cam_x,
-                            y1=cam_y,
-                            width=cam_width,
-                            height=cam_height).apply(clip)
-            cam_resized = Resize(width=crop_width).apply(cam_feed)
-            cam_h = cam_resized.h
-
-            # If cam_h is odd, resize again to height+1 to ensure even height
-            if cam_h % 2 != 0:
-                cam_resized = Resize(
-                    (crop_width, cam_h + 1)).apply(cam_resized)
-                cam_h = cam_resized.h
+            cam_resized, cam_h = process_camera_feed(clip, cam_x, cam_y,
+                                                     cam_width, cam_height,
+                                                     crop_width)
         else:
             cam_h = crop_height - clip_height
 
-        main_clip = Resize(height=crop_height - cam_h).apply(clip)
-        main_clip = Crop(width=crop_width,
-                         height=main_clip.h,
-                         x_center=main_clip.w // 2,
-                         y_center=main_clip.h // 2).apply(main_clip)
+        main_clip = process_main_clip(clip, crop_height, cam_h, crop_width)
 
         if not include_cam:
-
-            def blur_frame(get_frame, t):
-                frame = get_frame(t)
-                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                blurred_bgr = cv2.GaussianBlur(frame_bgr, (51, 51), sigmaX=0)
-                return cv2.cvtColor(blurred_bgr, cv2.COLOR_BGR2RGB)
-
-            bg_full = Resize(height=crop_height).apply(clip)
-            bg_blur = bg_full.transform(blur_frame)
-            bg_blur_cropped = Crop(width=crop_width,
-                                   height=crop_height,
-                                   x_center=bg_full.w // 2,
-                                   y_center=bg_full.h // 2).apply(bg_blur)
-
-            bg_h = cam_h // 2
-            bg_blur_top = Crop(x1=0, y1=0, width=crop_width,
-                               height=bg_h).apply(bg_blur_cropped)
-            bg_blur_bot = Crop(x1=0,
-                               y1=bg_h + main_clip.h,
-                               width=crop_width,
-                               height=bg_h).apply(bg_blur_cropped)
-            final_video = mpy.clips_array([[bg_blur_top], [main_clip],
-                                           [bg_blur_bot]])
+            final_video = blur_background(clip, crop_width, crop_height, cam_h,
+                                          main_clip)
         else:
             final_video = mpy.clips_array([[cam_resized], [main_clip]])
 
-        # Overlay subtitles
-        subs = parse_srt()
-        subtitle_clips = []
-        for sub in subs:
-            txt_clip = (mpy.TextClip(
-                text=sub['text'],
-                font_size=36,
-                color='white',
-                stroke_color='black',
-                stroke_width=2,
-                method='caption',
-                size=(int(final_video.w * 0.9), None)).with_start(
-                    sub['start']).with_end(sub['end']).with_position(
-                        ('center', 'bottom')))
-            subtitle_clips.append(txt_clip)
-
-        final = mpy.CompositeVideoClip([final_video, *subtitle_clips])
-        final.write_videofile("audio_test-final.mp4",
-                              codec='libx264',
-                              audio_codec='aac')
+        final = overlay_subtitles(final_video)
+        final.write_videofile(output_path, codec='libx264', audio_codec='aac')
         final.close()
 
         return output_path
