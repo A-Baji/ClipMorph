@@ -2,18 +2,21 @@ import moviepy as mpy
 from moviepy.video.fx import Crop, Resize
 import cv2
 
-from clipmorph.generate_video import CONVERTED_VIDEO_PATH
+from clipmorph.generate_video import CENSORED_AUDIO_PATH
+from clipmorph.generate_video.transcript import parse_srt
 
 
-def convert_to_short_form(input_video,
+def convert_to_short_form(input_path,
                           include_cam=True,
                           cam_x=1420,
                           cam_y=790,
                           cam_width=480,
                           cam_height=270,
                           clip_height=1312):
-    with mpy.VideoFileClip(input_video) as clip:
-        output_path = CONVERTED_VIDEO_PATH
+    with mpy.VideoFileClip(input_path) as clip:
+        output_path = f"{clip.filename.split('.')[0]}-converted.mp4"
+        audio = mpy.AudioFileClip(CENSORED_AUDIO_PATH)
+        clip = clip.with_audio(audio)
 
         crop_width = 1080
         crop_height = 1920
@@ -67,7 +70,26 @@ def convert_to_short_form(input_video,
         else:
             final_video = mpy.clips_array([[cam_resized], [main_clip]])
 
-        final_video.write_videofile(output_path,
-                                    codec='libx264',
-                                    audio_codec='aac')
+        # Overlay subtitles
+        subs = parse_srt()
+        subtitle_clips = []
+        for sub in subs:
+            txt_clip = (mpy.TextClip(
+                text=sub['text'],
+                font_size=36,
+                color='white',
+                stroke_color='black',
+                stroke_width=2,
+                method='caption',
+                size=(int(final_video.w * 0.9), None)).with_start(
+                    sub['start']).with_end(sub['end']).with_position(
+                        ('center', 'bottom')))
+            subtitle_clips.append(txt_clip)
+
+        final = mpy.CompositeVideoClip([final_video, *subtitle_clips])
+        final.write_videofile("audio_test-final.mp4",
+                              codec='libx264',
+                              audio_codec='aac')
+        final.close()
+
         return output_path

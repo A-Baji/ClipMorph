@@ -3,42 +3,33 @@ import os
 from clipmorph.generate_video import AUDIO_PATH, CENSORED_AUDIO_PATH, SRT_PATH
 from clipmorph.generate_video.censor import detect_profanity, mute_audio
 from clipmorph.generate_video.convert import convert_to_short_form
-from clipmorph.generate_video.subtitles import generate_srt, replace_audio_and_overlay_subs
-from clipmorph.generate_video.transcript import extract_audio, transcribe_audio
+from clipmorph.generate_video.transcript import extract_audio, transcribe_audio, generate_srt
 from clipmorph.utils import delete_file
 
 
 def conversion_pipeline(args):
     input_path = args.input_path
-    file_name = os.path.splitext(os.path.basename(input_path))[0]
-    final_output = f"{file_name}-final.mp4"
 
-    logging.info("Converting video to short-form format...")
-
-    # 1. Extract audio and transcribe
+    logging.info("Extracting and transcribing audio from video...")
     extract_audio(input_path)
     segments = transcribe_audio()
 
-    # 2. Detect and mute cursewords
+    logging.info("Detecting and censoring profanity in audio...")
     intervals = detect_profanity(segments)
     mute_audio(intervals)
-
     delete_file(AUDIO_PATH)
 
-    # 3. Generate subtitles
+    logging.info("Generating subtitles .srt file from transcription...")
     generate_srt(segments)
 
-    # 4. Convert video to short-form format (no audio replacement yet)
-    convert_to_short_form(input_path=input_path,
-                          include_cam=args.include_cam,
-                          cam_x=args.cam_x,
-                          cam_y=args.cam_y,
-                          cam_width=args.cam_width,
-                          cam_height=args.cam_height)
-
-    # 5. Replace audio and overlay/attach subtitles
-    replace_audio_and_overlay_subs(final_output)
-
+    logging.info(
+        "Converting video to short-form format and overlaying subtitles...")
+    final_output = convert_to_short_form(input_path=input_path,
+                                         include_cam=args.include_cam,
+                                         cam_x=args.cam_x,
+                                         cam_y=args.cam_y,
+                                         cam_width=args.cam_width,
+                                         cam_height=args.cam_height)
     delete_file(CENSORED_AUDIO_PATH)
     delete_file(SRT_PATH)
 

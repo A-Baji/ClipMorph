@@ -2,7 +2,7 @@ import librosa
 import soundfile as sf
 from better_profanity import profanity
 
-from clipmorph.generate_video import AUDIO_PATH
+from clipmorph.generate_video import AUDIO_PATH, CENSORED_AUDIO_PATH
 
 
 def detect_profanity(segments, custom_words=None):
@@ -16,10 +16,10 @@ def detect_profanity(segments, custom_words=None):
     return profane_intervals
 
 
-def mute_audio(intervals, output_path):
+def mute_audio(intervals):
     y, sr = librosa.load(AUDIO_PATH, sr=None)
     for start, end in intervals:
         start_sample = int(start * sr)
         end_sample = int(end * sr)
         y[start_sample:end_sample] = 0
-    sf.write(output_path, y, sr)
+    sf.write(CENSORED_AUDIO_PATH, y, sr)
