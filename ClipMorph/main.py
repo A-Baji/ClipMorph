@@ -1,9 +1,5 @@
 from clipmorph.cli import parse_args
-from clipmorph.generate_video.assemble import replace_audio_and_overlay_subs
-from clipmorph.generate_video.censor import detect_profanity, mute_audio
-from clipmorph.generate_video.convert import convert_to_short_form
-from clipmorph.generate_video.subtitles import generate_srt
-from clipmorph.generate_video.transcript import extract_audio, transcribe_audio
+from clipmorph.generate_video.pipeline import conversion_pipeline
 from clipmorph.platforms.youtube.upload import upload_to_youtube
 from clipmorph.platforms.instagram.upload import upload_to_instagram
 from clipmorph.platforms.tiktok.upload import upload_to_tiktok
@@ -18,38 +14,7 @@ def main():
     load_dotenv()
     args = parse_args()
 
-    input_video = args.input_path
-    audio_path = "audio.wav"
-    censored_audio_path = "audio_censored.wav"
-    srt_path = "subtitles.srt"
-
-    logging.info("Converting video to short-form format...")
-
-    # 1. Extract audio and transcribe
-    extract_audio(input_video, audio_path)
-    segments = transcribe_audio(audio_path)
-
-    # 2. Detect and mute cursewords
-    intervals = detect_profanity(segments)
-    mute_audio(audio_path, intervals, censored_audio_path)
-
-    # 3. Generate subtitles
-    generate_srt(segments, srt_path)
-
-    # 4. Convert video to short-form format (no audio replacement yet)
-    temp_video = convert_to_short_form(input_path=input_video,
-                                       include_cam=args.include_cam,
-                                       cam_x=args.cam_x,
-                                       cam_y=args.cam_y,
-                                       cam_width=args.cam_width,
-                                       cam_height=args.cam_height)
-    final_output = f"final-{temp_video}"
-
-    # 5. Replace audio and overlay/attach subtitles
-    replace_audio_and_overlay_subs(temp_video, censored_audio_path, srt_path,
-                                   final_output)
-
-    logging.info(f"Saved converted video to {final_output}")
+    final_output = conversion_pipeline(args)
 
     # Confirm upload
     if not getattr(args, 'no_confirm', False):
@@ -59,14 +24,14 @@ def main():
             return
 
     # Upload to all platforms
-    print("----------------")
-    upload_to_youtube(final_output)
-    print("----------------")
-    upload_to_instagram(final_output)
-    print("----------------")
-    upload_to_tiktok(final_output)
-    print("----------------")
-    upload_to_twitter(final_output)
+    # print("----------------")
+    # upload_to_youtube(final_output)
+    # print("----------------")
+    # upload_to_instagram(final_output)
+    # print("----------------")
+    # upload_to_tiktok(final_output)
+    # print("----------------")
+    # upload_to_twitter(final_output)
 
     # Cleanup if requested
     if getattr(args, 'clean', False):

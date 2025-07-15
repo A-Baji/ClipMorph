@@ -2,16 +2,18 @@ import moviepy as mpy
 from moviepy.video.fx import Crop, Resize
 import cv2
 
+from clipmorph.generate_video import CONVERTED_VIDEO_PATH
 
-def convert_to_short_form(input_path,
+
+def convert_to_short_form(input_video,
                           include_cam=True,
                           cam_x=1420,
                           cam_y=790,
                           cam_width=480,
                           cam_height=270,
                           clip_height=1312):
-    with mpy.VideoFileClip(input_path) as clip:
-        output_path = f"{clip.filename.split('.')[0]}-SF.mp4"
+    with mpy.VideoFileClip(input_video) as clip:
+        output_path = CONVERTED_VIDEO_PATH
 
         crop_width = 1080
         crop_height = 1920
