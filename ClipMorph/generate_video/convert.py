@@ -61,18 +61,25 @@ def blur_background(clip, crop_width, crop_height, cam_h, main_clip):
 def overlay_subtitles(final_video):
     subs = parse_srt()
     subtitle_clips = []
+
     for sub in subs:
         txt_clip = (mpy.TextClip(
-            text=sub['text'],
-            font_size=36,
-            color='white',
-            stroke_color='black',
-            stroke_width=2,
-            method='caption',
-            size=(int(final_video.w * 0.9), None)).with_start(
-                sub['start']).with_end(sub['end']).with_position(
-                    ('center', 'bottom')))
+            text=sub["text"][9:23],
+            color="#ffffff",
+            font=None,
+            stroke_color="black",
+            stroke_width=12,
+            method="label",
+            size=(int(final_video.w * 0.8), None),
+            text_align="center",
+            horizontal_align="center",
+            vertical_align="center",
+            margin=(0, 50),
+        ).with_start(sub["start"]).with_end(sub["end"]).with_position(
+            ("center", int(final_video.h * 0.60))))
+
         subtitle_clips.append(txt_clip)
+
     final = mpy.CompositeVideoClip([final_video, *subtitle_clips])
     return final
 
@@ -107,7 +114,7 @@ def convert_to_short_form(input_path,
             final_video = mpy.clips_array([[cam_resized], [main_clip]])
 
         final = overlay_subtitles(final_video)
-        final.write_videofile(output_path, codec='libx264', audio_codec='aac')
+        final.write_videofile(output_path, codec="libx264", audio_codec="aac")
         final.close()
 
         return output_path
