@@ -64,7 +64,7 @@ def overlay_subtitles(final_video):
 
     for sub in subs:
         txt_clip = (mpy.TextClip(
-            text=sub["text"][9:23],
+            text=sub["text"],
             color="#ffffff",
             font=None,
             stroke_color="black",
