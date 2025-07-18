@@ -11,12 +11,12 @@ from clipmorph.utils import delete_file
 def conversion_pipeline(args):
     input_path = args.input_path
 
-    logging.info("[Audio 1/3] Extracting audio from video...")
+    logging.info("[Audio 1/1] Extracting audio from video...")
     extract_audio(input_path)
-    logging.info("[Audio 2/3] Enhancing dialogue in audio...")
-    enhance_dialogue()
-    logging.info("[Audio 3/3] Applying Voice Activity Detection (VAD)...")
-    apply_vad()
+    # logging.info("[Audio 2/3] Enhancing dialogue in audio...")
+    # enhance_dialogue()
+    # logging.info("[Audio 3/3] Applying Voice Activity Detection (VAD)...")
+    # apply_vad()
 
     logging.info("[Subtitles 1/2] Transcribing audio...")
     segments = transcribe_audio()

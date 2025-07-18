@@ -7,6 +7,5 @@ opencv-python==4.11.0.86
 tweepy==4.16.0
 librosa==0.11.0
 better_profanity==0.7.0
-vosk==0.3.45
 soundfile==0.13.1
 openai-whisper==20250625

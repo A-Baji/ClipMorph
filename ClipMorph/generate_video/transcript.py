@@ -1,7 +1,7 @@
 import re
 import whisper
 import torch
-from clipmorph.generate_video import SRT_PATH, VAD_AUDIO_PATH
+from clipmorph.generate_video import SRT_PATH, VAD_AUDIO_PATH, AUDIO_PATH
 
 GAMING_PROMPT = """
 This is gaming commentary containing:
@@ -9,36 +9,35 @@ This is gaming commentary containing:
 - Casual conversation between players
 - Expressions of frustration or excitement
 - Player usernames and game-specific terms
+- Phrases and words that get cut off and should be displayed with a dash, e.g., "What the f-", NOT "What the f -"
+- Exclamatory words or phrases that should be displayed in all caps, e.g., "WHAT", "WOW" or "NO WAY".
+- Profanity that should NOT be censored.
 """
 
 
-def smooth_timestamps(segments, min_duration=0.3):
-    for segment in segments:
-        for word in segment.get('words', []):
-            if word['end'] - word['start'] < min_duration:
-                word['end'] = word['start'] + min_duration
-    return segments
-
-
 def transcribe_audio(model='medium.en'):
-
     model = whisper.load_model(
         model, device="cuda" if torch.cuda.is_available() else "cpu")
+
     result = model.transcribe(
-        VAD_AUDIO_PATH,
+        AUDIO_PATH,
         task='transcribe',
         word_timestamps=True,
         fp16=False,
         language='en',
+        initial_prompt=GAMING_PROMPT,  # Context hint
         temperature=0.0,  # More deterministic results
         beam_size=5,  # Better search for optimal transcription
         best_of=5,  # Multiple attempts for better accuracy
         patience=1.0,  # Wait for better completions
         condition_on_previous_text=True,  # Context awareness
-        initial_prompt=GAMING_PROMPT,  # Context hint
-        suppress_tokens=[-1]  # Suppress specific unwanted tokens
+        suppress_tokens=[-1],  # Suppress specific unwanted tokens
+        no_speech_threshold=0.7,  # Default is 0.6; raise to 0.8 to be stricter
+        logprob_threshold=-1.0,  # Ignore segments where it's unsure
+        compression_ratio_threshold=2.6  # Helps reduce hallucinations
     )
-    segments = smooth_timestamps(result['segments'])
+
+    segments = result['segments']
     return segments
 
 

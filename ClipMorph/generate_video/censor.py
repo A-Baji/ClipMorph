@@ -6,7 +6,7 @@ from clipmorph.generate_video import AUDIO_PATH, CENSORED_AUDIO_PATH
 
 
 def detect_profanity(segments, custom_words=None):
-    profanity.load_censor_words(custom_words)
+    profanity.load_censor_words(custom_words, whitelist_words=["god"])
     profane_intervals = []
     for seg in segments:
         for word_info in seg['words']:
