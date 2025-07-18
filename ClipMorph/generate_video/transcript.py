@@ -12,7 +12,8 @@ This is gaming commentary containing:
 - Casual conversation between players
 - Expressions of frustration or excitement
 - Player usernames and game-specific terms
-- Phrases and words that get cut off and should be displayed with a dash, e.g., "What the f-", NOT "What the f -"
+- In-game dialogue that should be ignored
+- Phrases and words that have been cut off and should be displayed with a dash, e.g., "What the f-", NOT "What the f -"
 - Exclamatory words or phrases that should be displayed in all caps, e.g., "WHAT", "WOW" or "NO WAY".
 - Profanity that should NOT be censored.
 """
