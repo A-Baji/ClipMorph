@@ -1,29 +1,41 @@
 import logging
 import os
-from clipmorph.generate_video import AUDIO_PATH, CENSORED_AUDIO_PATH, SRT_PATH
+from clipmorph.generate_video import AUDIO_PATH, ENHANCED_AUDIO_PATH, VAD_AUDIO_PATH, CENSORED_AUDIO_PATH, SRT_PATH
+from clipmorph.generate_video.audio import extract_audio, enhance_dialogue, apply_vad
+from clipmorph.generate_video.transcript import transcribe_audio, generate_srt
 from clipmorph.generate_video.censor import detect_profanity, mute_audio
 from clipmorph.generate_video.convert import convert_to_short_form
-from clipmorph.generate_video.transcript import extract_audio, transcribe_audio, generate_srt
 from clipmorph.utils import delete_file
 
 
 def conversion_pipeline(args):
     input_path = args.input_path
 
-    logging.info("Extracting and transcribing audio from video...")
+    logging.info("[Audio 1/3] Extracting audio from video...")
     extract_audio(input_path)
-    segments = transcribe_audio()
+    logging.info("[Audio 2/3] Enhancing dialogue in audio...")
+    enhance_dialogue()
+    logging.info("[Audio 3/3] Applying Voice Activity Detection (VAD)...")
+    apply_vad()
 
-    logging.info("Detecting and censoring profanity in audio...")
+    logging.info("[Subtitles 1/2] Transcribing audio...")
+    segments = transcribe_audio()
+    logging.info("[Subtitles 2/2] Generating subtitles (.srt)...")
+    generate_srt(segments)
+    delete_file(ENHANCED_AUDIO_PATH)
+    delete_file(VAD_AUDIO_PATH)
+
+    logging.info("[Profanity 1/3] Detecting profanity in audio...")
     intervals = detect_profanity(segments)
+    logging.info("[Profanity 2/3] Muting profane audio segments...")
     mute_audio(intervals)
+    logging.info("[Profanity 3/3] Censoring subtitles...")
+    # TODO: Censor subtitles
     delete_file(AUDIO_PATH)
 
-    logging.info("Generating subtitles .srt file from transcription...")
-    generate_srt(segments)
-
     logging.info(
-        "Converting video to short-form format and overlaying subtitles...")
+        "[Editing 1/1] Converting video to short-form format and overlaying subtitles..."
+    )
     final_output = convert_to_short_form(input_path=input_path,
                                          include_cam=args.include_cam,
                                          cam_x=args.cam_x,

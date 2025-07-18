@@ -1,24 +1,45 @@
-# audio_transcript.py
 import re
-from moviepy import VideoFileClip
 import whisper
+import torch
+from clipmorph.generate_video import SRT_PATH, VAD_AUDIO_PATH
 
-from clipmorph.generate_video import AUDIO_PATH, SRT_PATH
+GAMING_PROMPT = """
+This is gaming commentary containing:
+- Gaming terminology and slang
+- Casual conversation between players
+- Expressions of frustration or excitement
+- Player usernames and game-specific terms
+"""
 
 
-def extract_audio(input_path):
-    clip = VideoFileClip(input_path)
-    clip.audio.write_audiofile(AUDIO_PATH)
-    clip.close()
+def smooth_timestamps(segments, min_duration=0.3):
+    for segment in segments:
+        for word in segment.get('words', []):
+            if word['end'] - word['start'] < min_duration:
+                word['end'] = word['start'] + min_duration
+    return segments
 
 
-def transcribe_audio(model='base.en'):
-    model = whisper.load_model(model)
-    result = model.transcribe(AUDIO_PATH,
-                              word_timestamps=True,
-                              fp16=False,
-                              language='en')
-    return result['segments']
+def transcribe_audio(model='medium.en'):
+
+    model = whisper.load_model(
+        model, device="cuda" if torch.cuda.is_available() else "cpu")
+    result = model.transcribe(
+        VAD_AUDIO_PATH,
+        task='transcribe',
+        word_timestamps=True,
+        fp16=False,
+        language='en',
+        temperature=0.0,  # More deterministic results
+        beam_size=5,  # Better search for optimal transcription
+        best_of=5,  # Multiple attempts for better accuracy
+        patience=1.0,  # Wait for better completions
+        condition_on_previous_text=True,  # Context awareness
+        initial_prompt=GAMING_PROMPT,  # Context hint
+        suppress_tokens=[-1]  # Suppress specific unwanted tokens
+    )
+    segments = smooth_timestamps(result['segments'])
+    return segments
 
 
 def generate_srt(segments):
