@@ -18,8 +18,7 @@ def transcribe_audio(model='base.en'):
                               word_timestamps=True,
                               fp16=False,
                               language='en')
-    return result[
-        'segments']  # Each segment contains text, start, end, and words with timings
+    return result['segments']
 
 
 def generate_srt(segments):
@@ -39,7 +38,7 @@ def generate_srt(segments):
                 f.write(
                     f"{format_time(words[0]['start'])} --> {format_time(words[-1]['end'])}\n"
                 )
-                f.write(f"{"".join(w["word"] for w in words)}\n\n")
+                f.write(f"{''.join(w['word'] for w in words)}\n\n")
                 idx += 1
 
 
