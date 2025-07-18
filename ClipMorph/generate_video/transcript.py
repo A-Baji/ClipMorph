@@ -39,7 +39,7 @@ def generate_srt(segments):
                 f.write(
                     f"{format_time(words[0]['start'])} --> {format_time(words[-1]['end'])}\n"
                 )
-                f.write(f"{" ".join(w["word"] for w in words)}\n\n")
+                f.write(f"{"".join(w["word"] for w in words)}\n\n")
                 idx += 1
 
 
