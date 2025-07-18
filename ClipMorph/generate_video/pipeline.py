@@ -1,7 +1,7 @@
 import logging
 import os
 from clipmorph.generate_video import AUDIO_PATH, ENHANCED_AUDIO_PATH, VAD_AUDIO_PATH, CENSORED_AUDIO_PATH, SRT_PATH
-from clipmorph.generate_video.audio import extract_audio, enhance_dialogue, apply_vad
+from clipmorph.generate_video.audio import extract_audio
 from clipmorph.generate_video.transcript import transcribe_audio, generate_srt
 from clipmorph.generate_video.censor import detect_profanity, mute_audio
 from clipmorph.generate_video.convert import convert_to_short_form
@@ -13,10 +13,6 @@ def conversion_pipeline(args):
 
     logging.info("[Audio 1/1] Extracting audio from video...")
     extract_audio(input_path)
-    # logging.info("[Audio 2/3] Enhancing dialogue in audio...")
-    # enhance_dialogue()
-    # logging.info("[Audio 3/3] Applying Voice Activity Detection (VAD)...")
-    # apply_vad()
 
     logging.info("[Subtitles 1/2] Transcribing audio...")
     segments = transcribe_audio()
