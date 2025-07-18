@@ -1,6 +1,6 @@
 import logging
 import os
-from clipmorph.generate_video import AUDIO_PATH, ENHANCED_AUDIO_PATH, VAD_AUDIO_PATH, CENSORED_AUDIO_PATH, SRT_PATH
+from clipmorph.generate_video import AUDIO_PATH, CENSORED_AUDIO_PATH, SRT_PATH
 from clipmorph.generate_video.audio import extract_audio
 from clipmorph.generate_video.transcript import transcribe_audio, generate_srt
 from clipmorph.generate_video.censor import detect_profanity, mute_audio
@@ -18,8 +18,6 @@ def conversion_pipeline(args):
     segments = transcribe_audio()
     logging.info("[Subtitles 2/2] Generating subtitles (.srt)...")
     generate_srt(segments)
-    delete_file(ENHANCED_AUDIO_PATH)
-    delete_file(VAD_AUDIO_PATH)
 
     logging.info("[Profanity 1/3] Detecting profanity in audio...")
     intervals = detect_profanity(segments)

@@ -1,5 +1,3 @@
 AUDIO_PATH = "audio.wav"
-ENHANCED_AUDIO_PATH = "audio_enhanced.wav"
-VAD_AUDIO_PATH = "audio_vad.wav"
 CENSORED_AUDIO_PATH = "audio_censored.wav"
 SRT_PATH = "subtitles.srt"

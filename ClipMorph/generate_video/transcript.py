@@ -3,7 +3,7 @@ import re
 import whisperx
 import torch
 import whisperx.diarize
-from clipmorph.generate_video import SRT_PATH, VAD_AUDIO_PATH, AUDIO_PATH
+from clipmorph.generate_video import SRT_PATH, AUDIO_PATH
 
 GAMING_PROMPT = """
 This is gaming commentary containing:
