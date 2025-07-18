@@ -2,7 +2,8 @@ import os
 import re
 import whisperx
 import torch
-import whisperx.diarize
+import gc
+
 from clipmorph.generate_video import SRT_PATH, AUDIO_PATH
 
 GAMING_PROMPT = """
@@ -18,35 +19,66 @@ This is gaming commentary containing:
 
 
 def transcribe_audio(model_size="large-v3"):
+    # 1. Device/precision settings
     device = "cuda" if torch.cuda.is_available() else "cpu"
     compute_type = "float16" if device == "cuda" else "int8"
 
+    # 2. Load and preprocess audio
+    audio = whisperx.load_audio(AUDIO_PATH)
+
+    # 3. Load WhisperX ASR model and transcribe
     model = whisperx.load_model(model_size,
                                 device=device,
                                 compute_type=compute_type,
                                 language="en",
-                                asr_options={"initial_prompt": GAMING_PROMPT})
+                                asr_options={
+                                    "initial_prompt": GAMING_PROMPT,
+                                    "beam_size": 5,
+                                    "best_of": 5,
+                                    "condition_on_previous_text": True,
+                                    "no_speech_threshold": 0.7,
+                                    "compression_ratio_threshold": 2.6
+                                })
 
-    result = model.transcribe(AUDIO_PATH, batch_size=16)
+    result = model.transcribe(audio, batch_size=16)
 
+    # 4. Release ASR model to free GPU memory
+    del model
+    gc.collect()
+    if device == "cuda":
+        torch.cuda.empty_cache()
+
+    # 5. Load alignment model and align segments
     model_a, metadata = whisperx.load_align_model(language_code="en",
                                                   device=device)
-    result_aligned = whisperx.align(result["segments"], model_a, metadata,
-                                    AUDIO_PATH, device)
+    result_aligned = whisperx.align(result["segments"],
+                                    model_a,
+                                    metadata,
+                                    audio,
+                                    device,
+                                    return_char_alignments=False)
 
-    hf_token = os.environ.get("HUGGING_FACE_ACCESS_TOKEN")
+    # 6. Release alignment model
+    del model_a
+    gc.collect()
+    if device == "cuda":
+        torch.cuda.empty_cache()
+
+    # 7. Retrieve Hugging Face token for diarization
+    hf_token = os.getenv("HUGGING_FACE_ACCESS_TOKEN")
     if not hf_token:
         raise RuntimeError(
             "HUGGING_FACE_ACCESS_TOKEN environment variable is not set")
 
-    diarize_pipeline = whisperx.diarize.DiarizationPipeline(
+    diarize_model = whisperx.diarize.DiarizationPipeline(
         use_auth_token=hf_token, device=device)
-    diarize_df = diarize_pipeline(AUDIO_PATH)
+    diarize_segments = diarize_model(audio)
 
-    segments_with_speakers = whisperx.diarize.assign_word_speakers(
-        diarize_df, result_aligned)
+    # 8. Assign speakers to aligned segments
+    result_final = whisperx.diarize.assign_word_speakers(
+        diarize_segments, result_aligned)
 
-    return segments_with_speakers['segments']
+    return result_final["segments"]
 
 
 def generate_srt(segments):
@@ -60,14 +92,20 @@ def generate_srt(segments):
     with open(SRT_PATH, 'w', encoding='utf-8') as f:
         idx = 1
         for seg in segments:
-            for i in range(0, len(seg['words']), 3):
-                words = seg['words'][i:i + 3]
-                f.write(f"{idx}\n")
-                f.write(
-                    f"{format_time(words[0]['start'])} --> {format_time(words[-1]['end'])}\n"
-                )
-                f.write(f"{' '.join(w['word'] for w in words)}\n\n")
-                idx += 1
+            speaker = seg['speaker']
+            # for i in range(0, len(seg['words']), 3):
+            #     words = seg['words'][i:i + 3]
+            #     f.write(f"{idx}\n")
+            #     f.write(
+            #         f"{format_time(words[0]['start'])} --> {format_time(words[-1]['end'])}\n"
+            #     )
+            #     f.write(f"{' '.join(w['word'] for w in words)}\n\n")
+            #     idx += 1
+            f.write(f"{idx}\n")
+            f.write(
+                f"{format_time(seg['start'])} --> {format_time(seg['end'])}\n")
+            f.write(f"{speaker}: {seg['text']}\n\n")
+            idx += 1
 
 
 def parse_srt():
