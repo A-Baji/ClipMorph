@@ -33,11 +33,14 @@ def generate_srt(segments):
     with open(SRT_PATH, 'w', encoding='utf-8') as f:
         idx = 1
         for seg in segments:
-            f.write(f"{idx}\n")
-            f.write(
-                f"{format_time(seg['start'])} --> {format_time(seg['end'])}\n")
-            f.write(f"{seg['text']}\n\n")
-            idx += 1
+            for i in range(0, len(seg['words']), 3):
+                words = seg['words'][i:i + 3]
+                f.write(f"{idx}\n")
+                f.write(
+                    f"{format_time(words[0]['start'])} --> {format_time(words[-1]['end'])}\n"
+                )
+                f.write(f"{" ".join(w["word"] for w in words)}\n\n")
+                idx += 1
 
 
 def parse_srt():

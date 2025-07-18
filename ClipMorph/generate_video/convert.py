@@ -67,16 +67,17 @@ def overlay_subtitles(final_video):
             text=sub["text"],
             color="#ffffff",
             font=None,
+            font_size=70,
             stroke_color="black",
             stroke_width=12,
-            method="label",
+            method="caption",
             size=(int(final_video.w * 0.8), None),
             text_align="center",
             horizontal_align="center",
             vertical_align="center",
             margin=(0, 50),
         ).with_start(sub["start"]).with_end(sub["end"]).with_position(
-            ("center", int(final_video.h * 0.60))))
+            ("center", int(final_video.h * 0.70))))
 
         subtitle_clips.append(txt_clip)
 
