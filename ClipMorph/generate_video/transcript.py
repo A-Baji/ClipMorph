@@ -1,7 +1,6 @@
 import os
 import re
 import whisperx
-import torch
 import gc
 
 from clipmorph.generate_video import SRT_PATH, AUDIO_PATH
@@ -21,8 +20,8 @@ This is gaming commentary containing:
 
 def transcribe_audio(model_size="large-v3"):
     # 1. Device/precision settings
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    compute_type = "float16" if device == "cuda" else "int8"
+    device = "cpu"
+    compute_type = "int8"
 
     # 2. Load and preprocess audio
     audio = whisperx.load_audio(AUDIO_PATH)
@@ -36,18 +35,17 @@ def transcribe_audio(model_size="large-v3"):
                                     "initial_prompt": GAMING_PROMPT,
                                     "beam_size": 5,
                                     "best_of": 5,
+                                    "patience": 1.0,
                                     "condition_on_previous_text": True,
                                     "no_speech_threshold": 0.7,
                                     "compression_ratio_threshold": 2.6
                                 })
 
-    result = model.transcribe(audio, batch_size=16)
+    result = model.transcribe(audio, batch_size=4)
 
     # 4. Release ASR model to free GPU memory
     del model
     gc.collect()
-    if device == "cuda":
-        torch.cuda.empty_cache()
 
     # 5. Load alignment model and align segments
     model_a, metadata = whisperx.load_align_model(language_code="en",
@@ -62,8 +60,6 @@ def transcribe_audio(model_size="large-v3"):
     # 6. Release alignment model
     del model_a
     gc.collect()
-    if device == "cuda":
-        torch.cuda.empty_cache()
 
     # 7. Retrieve Hugging Face token for diarization
     hf_token = os.getenv("HUGGING_FACE_ACCESS_TOKEN")
