@@ -1,4 +1,5 @@
 import gc
+import logging
 import os
 import re
 from typing import Any, Dict, List
@@ -38,7 +39,7 @@ Segments to analyze:
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def transcribe_audio_whisper(audio_path: str) -> List[Dict[str, Any]]:
+def get_transcription_segments(audio_path: str) -> List[Dict[str, Any]]:
     model = whisper.load_model("large-v3", device=DEVICE)
     audio = whisperx.load_audio(audio_path)
     try:
@@ -47,7 +48,7 @@ def transcribe_audio_whisper(audio_path: str) -> List[Dict[str, Any]]:
             word_timestamps=True,
             task='transcribe',
             language='en',
-            initial_prompt=GAMING_PROMPT,
+            # initial_prompt=GAMING_PROMPT,
             temperature=0.0,  # Deterministic output
             beam_size=5,
             best_of=5,
@@ -63,8 +64,8 @@ def transcribe_audio_whisper(audio_path: str) -> List[Dict[str, Any]]:
         gc.collect()
 
 
-def align_segments_whisperx(segments: List[Dict[str, Any]],
-                            audio_path: str) -> List[Dict[str, Any]]:
+def align_segments(segments: List[Dict[str, Any]],
+                   audio_path: str) -> List[Dict[str, Any]]:
     audio = whisperx.load_audio(audio_path)
     model_a, metadata = whisperx.load_align_model(language_code="en",
                                                   device=DEVICE)
@@ -85,9 +86,8 @@ def diarize_assign_speakers(aligned_segments: List[Dict[str, Any]],
                             audio_path: str) -> List[Dict[str, Any]]:
     hf_token = os.getenv("HUGGING_FACE_ACCESS_TOKEN")
     if not hf_token:
-        print(
-            "WARNING: HUGGING_FACE_ACCESS_TOKEN not set, skipping diarization."
-        )
+        logging.warning(
+            "HUGGING_FACE_ACCESS_TOKEN not set, skipping diarization.")
         return aligned_segments
     diarizer = whisperx.diarize.DiarizationPipeline(use_auth_token=hf_token,
                                                     device=DEVICE)
@@ -102,7 +102,7 @@ def diarize_assign_speakers(aligned_segments: List[Dict[str, Any]],
         gc.collect()
 
 
-def flatten_word_level_segments(
+def group_words_into_phrases(
         aligned_segments: List[Dict[str, Any]],
         max_gap: float = 0.2,
         end_padding: float = 0.175) -> List[Dict[str, Any]]:
@@ -174,20 +174,35 @@ def filter_gaming_content(
                 ]
                 print(result)
                 return result
-        print("Warning: LLM filtering fallback, returning unfiltered phrases.")
+        logging.warning(
+            "LLM filtering fallback, returning unfiltered phrases.")
         return phrases
     except Exception as e:
-        print(f"Content filtering failed: {e}")
+        logging.error(f"Content filtering failed: {e}")
         return phrases
 
 
 def transcribe_audio():
-    segments = transcribe_audio_whisper(AUDIO_PATH)
-    aligned_segments = align_segments_whisperx(segments, AUDIO_PATH)
-    diarized_segments = diarize_assign_speakers(aligned_segments, AUDIO_PATH)
-    phrase_segments = flatten_word_level_segments(diarized_segments)
-    filtered_segments = filter_gaming_content(phrase_segments)
-    return filtered_segments
+    logging.info("Transcribing audio into segments...")
+    segments = get_transcription_segments(AUDIO_PATH)
+
+    logging.info("Aligning segments with audio...")
+    aligned_segments = align_segments(segments, AUDIO_PATH)
+    if not aligned_segments:
+        logging.warning(
+            "Failed to align segments. This usually means the transcription contained invalid/incorrect speech segments."
+        )
+        return []
+
+    logging.info("Diarizing and assigning speakers to segments...")
+    diarized_segments = diarize_assign_speakers(segments, AUDIO_PATH)
+
+    logging.info("Filtering out gaming content segments...")
+    filtered_segments = filter_gaming_content(diarized_segments)
+
+    logging.info("Grouping words into phrases...")
+    phrase_segments = group_words_into_phrases(filtered_segments)
+    return phrase_segments
 
 
 def write_srt_file(phrases: List[Dict[str, Any]]):
