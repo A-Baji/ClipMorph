@@ -1,14 +1,11 @@
 import gc
 import os
 import re
-import tempfile
+from typing import Any, Dict, List
 
-import nemo.collections.speechlm2 as slm
-import soundfile as sf
 import torch
+import whisper
 import whisperx
-from whisperx.diarize import assign_word_speakers
-from whisperx.diarize import DiarizationPipeline
 
 from clipmorph.generate_video import AUDIO_PATH
 from clipmorph.generate_video import SRT_PATH
@@ -25,156 +22,212 @@ This is gaming commentary containing:
 - Profanity that should NOT be censored.
 """
 
+LOGIC_CHECK_PROMPT = """
+Analyze each transcript segment and classify as either player commentary (YES) or not player commentary (NO).
+Exclude:
+- In-game NPC dialogue, system messages, and announcers, which typicially use formal language
+- Nonsensical or garbled text due to poor audio quality
+- Background noise transcriptions
+- Menu sounds or UI interactions
 
-def transcribe_audio():
-    """
-    Transcribe audio using WhisperX preprocessing + NVIDIA Canary-Qwen-2.5B transcription
-    with speaker diarization, with automatic device detection.
-    """
+Return only a JSON array of booleans matching the input order.
 
-    # Automatic device detection
-    DEVICE = "cuda" if torch.cuda.is_available(
-    ) else "mps" if torch.backends.mps.is_available() else "cpu"
+Segments to analyze:
+"""
 
-    # 1. Load and preprocess audio using WhisperX
-    sr = 16000
-    audio = whisperx.load_audio(AUDIO_PATH, sr)
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # 2. Load NVIDIA Canary-Qwen-2.5B model
-    print("Loading NVIDIA Canary-Qwen-2.5B model...")
-    model = slm.models.SALM.from_pretrained("nvidia/canary-qwen-2.5b").to(
-        DEVICE).eval()
 
-    # 3. Save preprocessed audio to temporary file for Canary model
-    with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
-        sf.write(tmp_file.name, audio, sr)
-        temp_audio_path = tmp_file.name
+def transcribe_audio_whisper(audio_path: str) -> List[Dict[str, Any]]:
+    model = whisper.load_model("large-v3", device=DEVICE)
+    audio = whisperx.load_audio(audio_path)
+    try:
+        result = model.transcribe(
+            audio,
+            word_timestamps=True,
+            task='transcribe',
+            language='en',
+            initial_prompt=GAMING_PROMPT,
+            temperature=0.0,  # Deterministic output
+            beam_size=5,
+            best_of=5,
+            patience=1.0,
+            condition_on_previous_text=True,
+            suppress_tokens=[-1],
+            no_speech_threshold=0.7,
+            logprob_threshold=-1.0,
+            compression_ratio_threshold=2.6)
+        return result['segments']
+    finally:
+        del model
+        gc.collect()
 
-    # 4. Transcribe with Canary-Qwen-2.5B using official method
-    prompt = [{
-        "role": "user",
-        "content":
-        f"Transcribe the following gaming commentary: {model.audio_locator_tag}\n\n{GAMING_PROMPT}",
-        "audio": [temp_audio_path]
-    }]
 
-    answer_ids = model.generate(prompts=[prompt],
-                                max_new_tokens=896,
-                                temperature=0.3,
-                                do_sample=False)
-
-    transcription = model.tokenizer.ids_to_text(answer_ids[0].cpu()).strip()
-
-    # 5. Release Canary model to free memory
-    del model
-    gc.collect()
-    if DEVICE == "cuda":
-        torch.cuda.empty_cache()
-
-    # 6. Clean up temporary file
-    os.unlink(temp_audio_path)
-
-    # 7. Create segments structure for alignment
-    print("Loading WhisperX alignment model for word-level timestamps...")
+def align_segments_whisperx(segments: List[Dict[str, Any]],
+                            audio_path: str) -> List[Dict[str, Any]]:
+    audio = whisperx.load_audio(audio_path)
     model_a, metadata = whisperx.load_align_model(language_code="en",
                                                   device=DEVICE)
+    try:
+        aligned = whisperx.align(segments,
+                                 model_a,
+                                 metadata,
+                                 audio,
+                                 DEVICE,
+                                 return_char_alignments=False)
+        return aligned['segments']
+    finally:
+        del model_a
+        gc.collect()
 
-    # Create pseudo-segments for alignment
-    pseudo_segments = [{
-        "start": 0.0,
-        "end": len(audio) / sr,
-        "text": transcription
-    }]
 
-    result_aligned = whisperx.align(pseudo_segments,
-                                    model_a,
-                                    metadata,
-                                    audio,
-                                    DEVICE,
-                                    return_char_alignments=False)
-
-    # 8. Release alignment model
-    del model_a
-    gc.collect()
-    if DEVICE == "cuda":
-        torch.cuda.empty_cache()
-
-    # 9. Get Hugging Face token for diarization
+def diarize_assign_speakers(aligned_segments: List[Dict[str, Any]],
+                            audio_path: str) -> List[Dict[str, Any]]:
     hf_token = os.getenv("HUGGING_FACE_ACCESS_TOKEN")
     if not hf_token:
-        raise RuntimeError(
-            "HUGGING_FACE_ACCESS_TOKEN environment variable is not set")
-
-    # 10. Load improved diarization pipeline (pyannote 3.x)
-    print("Loading speaker diarization model...")
+        print(
+            "WARNING: HUGGING_FACE_ACCESS_TOKEN not set, skipping diarization."
+        )
+        return aligned_segments
+    diarizer = whisperx.diarize.DiarizationPipeline(use_auth_token=hf_token,
+                                                    device=DEVICE)
+    audio = whisperx.load_audio(audio_path)
     try:
-        # Try newer pyannote speaker-diarization-3.1 for better performance
-        from pyannote.audio import Pipeline
-        diarize_model = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1", use_auth_token=hf_token)
-        diarize_model.to(DEVICE)
-        diarize_segments = diarize_model({"audio": AUDIO_PATH})
-    except:
-        # Fallback to WhisperX diarization pipeline
-        diarize_model = DiarizationPipeline(use_auth_token=hf_token,
-                                            device=DEVICE)
-        diarize_segments = diarize_model(audio)
-
-    # 11. Assign speakers to aligned segments
-    print("Assigning speakers to segments...")
-    result_final = assign_word_speakers(diarize_segments, result_aligned)
-
-    # 12. Release diarization model
-    del diarize_model
-    gc.collect()
-    if DEVICE == "cuda":
-        torch.cuda.empty_cache()
-
-    return result_final["segments"]
+        diarize_segs = diarizer(audio)
+        result = whisperx.diarize.assign_word_speakers(
+            diarize_segs, {"segments": aligned_segments})
+        return result["segments"]
+    finally:
+        del diarizer
+        gc.collect()
 
 
-def generate_srt(segments):
+def flatten_word_level_segments(
+        aligned_segments: List[Dict[str, Any]],
+        max_gap: float = 0.2,
+        end_padding: float = 0.175) -> List[Dict[str, Any]]:
+    output = []
+    for seg in aligned_segments:
+        words = seg["words"] if "words" in seg else []
+        if not words:
+            continue
+        sub_start = words[0]["start"]
+        sub_end = words[0]["end"]
+        sub_words = [words[0]["word"]]
+        speaker = words[0].get("speaker", seg.get("speaker", ""))
+        for prev, curr in zip(words, words[1:]):
+            gap = curr["start"] - prev["end"]
+            if gap > max_gap:
+                output.append({
+                    "start": sub_start,
+                    "end": sub_end + end_padding,
+                    "text": " ".join(sub_words),
+                    "speaker": speaker,
+                    "words": words
+                })
+                sub_start = curr["start"]
+                sub_words = [curr["word"]]
+            else:
+                sub_words.append(curr["word"])
+            sub_end = curr["end"]
+        if sub_words:
+            output.append({
+                "start": sub_start,
+                "end": sub_end + end_padding,
+                "text": " ".join(sub_words),
+                "speaker": speaker,
+                "words": words
+            })
+    return output
 
-    def format_time(seconds):
+
+def filter_gaming_content(
+        phrases: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    # Use Canary-Qwen-2.5B LLM to filter out non-player, bad, or game-dialogue segments
+    try:
+        import nemo.collections.speechlm2 as slm
+        model = slm.models.SALM.from_pretrained(
+            "nvidia/canary-qwen-2.5b").eval()
+        texts = [p["text"] for p in phrases]
+        segment_list = "\n".join(f"{i+1}. \"{text}\""
+                                 for i, text in enumerate(texts))
+        prompt = [{
+            "role": "user",
+            "content": f"{LOGIC_CHECK_PROMPT}\n{segment_list}"
+        }]
+        answer_ids = model.generate(prompts=[prompt],
+                                    max_new_tokens=512,
+                                    temperature=0.0,
+                                    do_sample=False)
+        response = model.tokenizer.ids_to_text(answer_ids[0].cpu()).strip()
+        import json
+
+        # Try extracting a JSON array from LLM response
+        json_start = response.find('[')
+        json_end = response.rfind(']') + 1
+        if json_start >= 0 and json_end > json_start:
+            json_str = response[json_start:json_end]
+            keep_flags = json.loads(json_str)
+            if len(keep_flags) == len(phrases):
+                result = [
+                    phrase for phrase, keep in zip(phrases, keep_flags) if keep
+                ]
+                print(result)
+                return result
+        print("Warning: LLM filtering fallback, returning unfiltered phrases.")
+        return phrases
+    except Exception as e:
+        print(f"Content filtering failed: {e}")
+        return phrases
+
+
+def transcribe_audio():
+    segments = transcribe_audio_whisper(AUDIO_PATH)
+    aligned_segments = align_segments_whisperx(segments, AUDIO_PATH)
+    diarized_segments = diarize_assign_speakers(aligned_segments, AUDIO_PATH)
+    phrase_segments = flatten_word_level_segments(diarized_segments)
+    filtered_segments = filter_gaming_content(phrase_segments)
+    return filtered_segments
+
+
+def write_srt_file(phrases: List[Dict[str, Any]]):
+
+    def format_timestamp(seconds: float) -> str:
         ms = int((seconds - int(seconds)) * 1000)
         h, m, s = int(seconds // 3600), int(
             (seconds % 3600) // 60), int(seconds % 60)
-        return f"{h:02}:{m:02}:{s:02},{ms:03}"
+        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
-    with open(SRT_PATH, 'w', encoding='utf-8') as f:
-        idx = 1
-        for seg in segments:
-            speaker = seg['speaker']
-            words_per_sub = 4
-            for i in range(0, len(seg['words']), words_per_sub):
-                words = seg['words'][i:i + words_per_sub]
-                import json
-                print(json.dumps(words, indent=4))
-                f.write(f"{idx}\n")
-                f.write(
-                    f"{format_time(words[0]['start'])} --> {format_time(words[-1]['end'])}\n"
-                )
-                f.write(f"{speaker}: {' '.join(w['word'] for w in words)}\n\n")
-                idx += 1
-            # f.write(f"{idx}\n")
-            # f.write(
-            #     f"{format_time(seg['start'])} --> {format_time(seg['end'])}\n")
-            # f.write(f"{speaker}: {seg['text']}\n\n")
-            # idx += 1
+    with open(SRT_PATH, "w", encoding="utf-8") as f:
+        for idx, phrase in enumerate(phrases, 1):
+            f.write(f"{idx}\n")
+            f.write(
+                f"{format_timestamp(phrase['start'])} --> {format_timestamp(phrase['end'])}\n"
+            )
+            if phrase.get("speaker"):
+                f.write(f"{phrase['speaker']}: {phrase['text']}\n\n")
+            else:
+                f.write(f"{phrase['text']}\n\n")
 
 
-def parse_srt():
+def parse_srt() -> List[Dict[str, Any]]:
+    """Parse existing SRT file back into segments"""
+    if not os.path.exists(SRT_PATH):
+        return []
+
     with open(SRT_PATH, 'r', encoding='utf-8') as f:
         content = f.read()
+
     pattern = re.compile(
         r"(\d+)\s+([\d:,]+) --> ([\d:,]+)\s+([\s\S]*?)(?=\n\d+\n|\Z)",
         re.MULTILINE)
+
     entries = []
     for match in pattern.finditer(content):
         start_str, end_str, text = match.group(2), match.group(3), match.group(
             4).strip().replace('\n', ' ')
 
-        def srt_time_to_seconds(t):
+        def srt_time_to_seconds(t: str) -> float:
             h, m, s_ms = t.split(':')
             s, ms = s_ms.split(',')
             return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
@@ -182,4 +235,5 @@ def parse_srt():
         start = srt_time_to_seconds(start_str)
         end = srt_time_to_seconds(end_str)
         entries.append({'start': start, 'end': end, 'text': text})
+
     return entries
