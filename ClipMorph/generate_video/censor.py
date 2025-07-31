@@ -1,8 +1,9 @@
+from better_profanity import profanity
 import librosa
 import soundfile as sf
-from better_profanity import profanity
 
-from clipmorph.generate_video import AUDIO_PATH, CENSORED_AUDIO_PATH
+from clipmorph.generate_video import AUDIO_PATH
+from clipmorph.generate_video import CENSORED_AUDIO_PATH
 
 
 def detect_profanity(segments, custom_words=None):
