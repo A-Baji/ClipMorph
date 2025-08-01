@@ -148,30 +148,30 @@ def group_words_into_phrases(aligned_segments: list,
             if next_seg_words:
                 next_orig_start = next_seg_words[0]["start"]
 
-    for j, new_seg in enumerate(segments_buffer):
-        this_end = new_seg["end"]
+        for j, new_seg in enumerate(segments_buffer):
+            this_end = new_seg["end"]
 
-        if j + 1 < len(segments_buffer):
-            next_start = segments_buffer[j + 1]["start"]
-        else:
-            next_start = next_orig_start
+            if j + 1 < len(segments_buffer):
+                next_start = segments_buffer[j + 1]["start"]
+            else:
+                next_start = next_orig_start
 
-        actual_pad = end_padding
-        if next_start is not None:
-            seg_gap_time = next_start - this_end
-            if seg_gap_time < end_padding:
-                actual_pad = max(0.0, 0.5 * seg_gap_time)
-        else:
             actual_pad = end_padding
+            if next_start is not None:
+                seg_gap_time = next_start - this_end
+                if seg_gap_time < end_padding:
+                    actual_pad = max(0.0, 0.5 * seg_gap_time)
+            else:
+                actual_pad = end_padding
 
-        seg_out = {
-            "start": new_seg["start"],
-            "end": new_seg["end"] + actual_pad,
-            "text": " ".join(w["word"] for w in new_seg["words"]),
-            "speaker": new_seg["speaker"],
-            "words": new_seg["words"],
-        }
-        output.append(seg_out)
+            seg_out = {
+                "start": new_seg["start"],
+                "end": new_seg["end"] + actual_pad,
+                "text": " ".join(w["word"] for w in new_seg["words"]),
+                "speaker": new_seg["speaker"],
+                "words": new_seg["words"],
+            }
+            output.append(seg_out)
 
     return output
 
