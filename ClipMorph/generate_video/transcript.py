@@ -102,43 +102,77 @@ def diarize_assign_speakers(aligned_segments: List[Dict[str, Any]],
         gc.collect()
 
 
-def group_words_into_phrases(aligned_segments: List[Dict[str, Any]],
+def group_words_into_phrases(aligned_segments: list,
                              max_gap: float = 0.2,
-                             end_padding: float = 0.2) -> List[Dict[str, Any]]:
+                             end_padding: float = 0.5,
+                             max_words_per_segment: int = 4) -> list:
     output = []
-    for seg in aligned_segments:
-        words = seg["words"] if "words" in seg else []
+    num_segments = len(aligned_segments)
+    for i, seg in enumerate(aligned_segments):
+        words = seg.get("words", [])
         if not words:
             continue
         sub_start = words[0]["start"]
         sub_end = words[0]["end"]
-        sub_words = [words[0]["word"]]
+        sub_words = [words[0]]
         speaker = words[0].get("speaker", seg.get("speaker", ""))
-        for idx, (prev, curr) in enumerate(zip(words, words[1:])):
+        segments_buffer = []
+
+        for prev, curr in zip(words, words[1:]):
             gap = curr["start"] - prev["end"]
-            is_last = (idx + 1 == len(words) - 1)
-            if gap > max_gap:
-                end_time = sub_end + (end_padding if not is_last else 0.0)
-                output.append({
+            if gap > max_gap or len(sub_words) >= max_words_per_segment:
+                segments_buffer.append({
                     "start": sub_start,
-                    "end": end_time,
-                    "text": " ".join(sub_words),
+                    "end": sub_end,
+                    "words": sub_words.copy(),
                     "speaker": speaker,
-                    "words": words
                 })
                 sub_start = curr["start"]
-                sub_words = [curr["word"]]
-            else:
-                sub_words.append(curr["word"])
                 sub_end = curr["end"]
+                sub_words = [curr]
+            else:
+                sub_words.append(curr)
+                sub_end = curr["end"]
+
         if sub_words:
-            output.append({
+            segments_buffer.append({
                 "start": sub_start,
                 "end": sub_end,
-                "text": " ".join(sub_words),
+                "words": sub_words.copy(),
                 "speaker": speaker,
-                "words": words
             })
+
+        next_orig_start = None
+        if i + 1 < num_segments:
+            next_seg_words = aligned_segments[i + 1].get("words", [])
+            if next_seg_words:
+                next_orig_start = next_seg_words[0]["start"]
+
+    for j, new_seg in enumerate(segments_buffer):
+        this_end = new_seg["end"]
+
+        if j + 1 < len(segments_buffer):
+            next_start = segments_buffer[j + 1]["start"]
+        else:
+            next_start = next_orig_start
+
+        actual_pad = end_padding
+        if next_start is not None:
+            seg_gap_time = next_start - this_end
+            if seg_gap_time < end_padding:
+                actual_pad = max(0.0, 0.5 * seg_gap_time)
+        else:
+            actual_pad = end_padding
+
+        seg_out = {
+            "start": new_seg["start"],
+            "end": new_seg["end"] + actual_pad,
+            "text": " ".join(w["word"] for w in new_seg["words"]),
+            "speaker": new_seg["speaker"],
+            "words": new_seg["words"],
+        }
+        output.append(seg_out)
+
     return output
 
 
