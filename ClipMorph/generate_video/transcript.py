@@ -48,7 +48,7 @@ def get_transcription_segments(audio_path: str) -> List[Dict[str, Any]]:
             word_timestamps=True,
             task='transcribe',
             language='en',
-            # initial_prompt=GAMING_PROMPT,
+            initial_prompt=GAMING_PROMPT,
             temperature=0.0,  # Deterministic output
             beam_size=5,
             best_of=5,
@@ -195,14 +195,14 @@ def transcribe_audio():
         return []
 
     logging.info("Diarizing and assigning speakers to segments...")
-    diarized_segments = diarize_assign_speakers(segments, AUDIO_PATH)
-
-    logging.info("Filtering out gaming content segments...")
-    filtered_segments = filter_gaming_content(diarized_segments)
+    diarized_segments = diarize_assign_speakers(aligned_segments, AUDIO_PATH)
 
     logging.info("Grouping words into phrases...")
-    phrase_segments = group_words_into_phrases(filtered_segments)
-    return phrase_segments
+    phrase_segments = group_words_into_phrases(diarized_segments)
+
+    logging.info("Filtering out gaming content segments...")
+    filtered_segments = filter_gaming_content(phrase_segments)
+    return filtered_segments
 
 
 def write_srt_file(phrases: List[Dict[str, Any]]):
