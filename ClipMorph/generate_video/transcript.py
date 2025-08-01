@@ -102,10 +102,9 @@ def diarize_assign_speakers(aligned_segments: List[Dict[str, Any]],
         gc.collect()
 
 
-def group_words_into_phrases(
-        aligned_segments: List[Dict[str, Any]],
-        max_gap: float = 0.2,
-        end_padding: float = 0.175) -> List[Dict[str, Any]]:
+def group_words_into_phrases(aligned_segments: List[Dict[str, Any]],
+                             max_gap: float = 0.2,
+                             end_padding: float = 0.2) -> List[Dict[str, Any]]:
     output = []
     for seg in aligned_segments:
         words = seg["words"] if "words" in seg else []
@@ -115,12 +114,14 @@ def group_words_into_phrases(
         sub_end = words[0]["end"]
         sub_words = [words[0]["word"]]
         speaker = words[0].get("speaker", seg.get("speaker", ""))
-        for prev, curr in zip(words, words[1:]):
+        for idx, (prev, curr) in enumerate(zip(words, words[1:])):
             gap = curr["start"] - prev["end"]
+            is_last = (idx + 1 == len(words) - 1)
             if gap > max_gap:
+                end_time = sub_end + (end_padding if not is_last else 0.0)
                 output.append({
                     "start": sub_start,
-                    "end": sub_end + end_padding,
+                    "end": end_time,
                     "text": " ".join(sub_words),
                     "speaker": speaker,
                     "words": words
@@ -129,11 +130,11 @@ def group_words_into_phrases(
                 sub_words = [curr["word"]]
             else:
                 sub_words.append(curr["word"])
-            sub_end = curr["end"]
+                sub_end = curr["end"]
         if sub_words:
             output.append({
                 "start": sub_start,
-                "end": sub_end + end_padding,
+                "end": sub_end,
                 "text": " ".join(sub_words),
                 "speaker": speaker,
                 "words": words
