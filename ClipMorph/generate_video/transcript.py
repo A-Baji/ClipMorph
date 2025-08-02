@@ -195,14 +195,19 @@ class TranscriptionPipeline:
             words = seg.get("words", [])
             if not words:
                 continue
-            sub_start = words[0]["start"]
-            sub_end = words[0]["end"]
+            sub_start = words[0].get("start")
+            sub_end = words[0].get("end")
             sub_words = [words[0]]
             speaker = words[0].get("speaker", seg.get("speaker", ""))
             segments_buffer = []
 
             for prev, curr in zip(words, words[1:]):
-                gap = curr["start"] - prev["end"]
+                curr_start = curr.get("start")
+                prev_end = prev.get("end")
+                if curr_start and prev_end:
+                    gap = curr_start - prev_end
+                else:
+                    gap = 0
                 if gap > max_gap or len(sub_words) >= max_words_per_segment:
                     segments_buffer.append({
                         "start": sub_start,
@@ -210,12 +215,12 @@ class TranscriptionPipeline:
                         "words": sub_words.copy(),
                         "speaker": speaker,
                     })
-                    sub_start = curr["start"]
-                    sub_end = curr["end"]
+                    sub_start = curr.get("start")
+                    sub_end = curr.get("end")
                     sub_words = [curr]
                 else:
                     sub_words.append(curr)
-                    sub_end = curr["end"]
+                    sub_end = curr.get("end")
 
             if sub_words:
                 segments_buffer.append({
@@ -229,13 +234,13 @@ class TranscriptionPipeline:
             if i + 1 < num_segments:
                 next_seg_words = segments[i + 1].get("words", [])
                 if next_seg_words:
-                    next_orig_start = next_seg_words[0]["start"]
+                    next_orig_start = next_seg_words[0].get("start")
 
             for j, new_seg in enumerate(segments_buffer):
-                this_end = new_seg["end"]
+                this_end = new_seg.get("end")
 
                 if j + 1 < len(segments_buffer):
-                    next_start = segments_buffer[j + 1]["start"]
+                    next_start = segments_buffer[j + 1].get("start")
                 else:
                     next_start = next_orig_start
 
@@ -248,11 +253,12 @@ class TranscriptionPipeline:
                     actual_pad = end_padding
 
                 seg_out = {
-                    "start": new_seg["start"],
-                    "end": new_seg["end"] + actual_pad,
-                    "text": " ".join(w["word"] for w in new_seg["words"]),
-                    "speaker": new_seg["speaker"],
-                    "words": new_seg["words"],
+                    "start": new_seg.get("start"),
+                    "end": new_seg.get("end") + actual_pad,
+                    "text":
+                    " ".join(w.get("word") for w in new_seg.get("words")),
+                    "speaker": new_seg.get("speaker"),
+                    "words": new_seg.get("words"),
                 }
                 output.append(seg_out)
 
