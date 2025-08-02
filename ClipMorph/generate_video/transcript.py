@@ -93,7 +93,7 @@ class TranscriptionPipeline:
             logging.error(f"Failed to load LLM model: {e}")
             return None
 
-    def get_transcription_segments(self) -> List[Dict[str, Any]]:
+    def _get_transcription_segments(self) -> List[Dict[str, Any]]:
         """Get transcription segments using cached Whisper model."""
         result = self._whisper_model.transcribe(
             self._audio,
@@ -112,8 +112,8 @@ class TranscriptionPipeline:
             compression_ratio_threshold=2.6)
         return result['segments']
 
-    def align_segments(self,
-                       segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _align_segments(
+            self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Align segments using cached alignment model."""
         align_data = self._align_model_data
         aligned = whisperx.align(segments,
@@ -124,7 +124,7 @@ class TranscriptionPipeline:
                                  return_char_alignments=False)
         return aligned['segments']
 
-    def diarize_assign_speakers(
+    def _diarize_assign_speakers(
             self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Diarize and assign speakers using cached diarization model."""
         diarizer = self._diarization_model
@@ -138,7 +138,7 @@ class TranscriptionPipeline:
                                                        {"segments": segments})
         return result["segments"]
 
-    def filter_gaming_content(
+    def _filter_gaming_content(
             self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Filter gaming content using cached LLM model."""
         model = self._llm_model
@@ -182,7 +182,7 @@ class TranscriptionPipeline:
             logging.error(f"Content filtering failed: {e}")
             return segments
 
-    def group_words_into_phrases(
+    def _group_words_into_phrases(
             self,
             segments: List[Dict[str, Any]],
             max_gap: float = 0.2,
@@ -258,7 +258,7 @@ class TranscriptionPipeline:
 
         return output
 
-    def cleanup(self):
+    def _cleanup(self):
         """Clean up GPU memory and cached models."""
         for attr in [
                 '_audio', '_whisper_model', '_align_model_data',
@@ -271,38 +271,29 @@ class TranscriptionPipeline:
         torch.cuda.empty_cache()
         gc.collect()
 
+    def transcribe(self) -> List[Dict[str, Any]]:
+        try:
+            logging.info("Transcribing audio into segments...")
+            segments = self._get_transcription_segments()
 
-def transcribe_audio() -> List[Dict[str, Any]]:
-    """Main transcription function using pipeline."""
+            logging.info("Aligning segments with audio...")
+            aligned_segments = self._align_segments(segments)
+            if not aligned_segments:
+                logging.warning("Failed to align segments; invalid segments.")
+                return []
 
-    pipeline = TranscriptionPipeline(AUDIO_PATH)
+            logging.info("Diarizing and assigning speakers to segments...")
+            diarized_segments = self._diarize_assign_speakers(aligned_segments)
 
-    try:
-        logging.info("Transcribing audio into segments...")
-        segments = pipeline.get_transcription_segments()
+            logging.info("Filtering out gaming content segments...")
+            filtered_segments = self._filter_gaming_content(diarized_segments)
 
-        logging.info("Aligning segments with audio...")
-        aligned_segments = pipeline.align_segments(segments)
-        if not aligned_segments:
-            logging.warning(
-                "Failed to align segments. This usually means the transcription contained invalid/incorrect speech segments."
-            )
-            return []
+            logging.info("Grouping words into phrases...")
+            phrase_segments = self._group_words_into_phrases(filtered_segments)
 
-        logging.info("Diarizing and assigning speakers to segments...")
-        diarized_segments = pipeline.diarize_assign_speakers(aligned_segments)
-
-        logging.info("Filtering out gaming content segments...")
-        filtered_segments = pipeline.filter_gaming_content(diarized_segments)
-
-        logging.info("Grouping words into phrases...")
-        phrase_segments = pipeline.group_words_into_phrases(filtered_segments)
-
-        return phrase_segments
-
-    finally:
-        # Clean up GPU memory after processing
-        pipeline.cleanup()
+            return phrase_segments
+        finally:
+            self._cleanup()
 
 
 def write_srt_file(phrases: List[Dict[str, Any]]):
