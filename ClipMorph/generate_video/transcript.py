@@ -12,17 +12,13 @@ import whisperx
 from clipmorph.generate_video import AUDIO_PATH
 from clipmorph.generate_video import SRT_PATH
 
-GAMING_PROMPT = """
-This is gaming commentary containing:
-- Gaming terminology and slang
-- Casual conversation between players
-- Expressions of frustration or excitement
-- Player usernames and game-specific terms
-- In-game dialogue that should be ignored
-- Phrases and words that have been cut off and should be displayed with a dash, e.g., "What the f-", NOT "What the f -"
-- Exclamatory words or phrases that should be displayed in all caps, e.g., "WHAT", "WOW" or "NO WAY".
-- Profanity that should NOT be censored.
-"""
+GAMING_PROMPT = ("Yo what the hell was that?\n"
+                 "No way bro did you see that?\n"
+                 "WHAT?\n"
+                 "HOLY FUCK!\n"
+                 "Oh my god...\n"
+                 "Bro I'm lagging so hard right now.\n"
+                 "Nah man that was clean.\n")
 
 LOGIC_CHECK_PROMPT = """
 Analyze each transcript segment and classify as either player commentary (YES) or not player commentary (NO).
@@ -102,13 +98,14 @@ class TranscriptionPipeline:
             language='en',
             initial_prompt=GAMING_PROMPT,
             temperature=0.0,  # Deterministic output
-            beam_size=5,
+            beam_size=1,
             best_of=5,
             patience=1.0,
             condition_on_previous_text=True,
             suppress_tokens=[-1],
             no_speech_threshold=0.7,
             logprob_threshold=-1.0,
+            hallucination_silence_threshold=1.0,
             compression_ratio_threshold=2.6)
         return result['segments']
 
