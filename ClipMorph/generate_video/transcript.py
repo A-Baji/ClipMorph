@@ -107,6 +107,8 @@ class TranscriptionPipeline:
             logprob_threshold=-1.0,
             hallucination_silence_threshold=1.0,
             compression_ratio_threshold=2.6)
+
+        self._cleanup_model('_whisper_model')
         return result['segments']
 
     def _align_segments(
@@ -119,6 +121,8 @@ class TranscriptionPipeline:
                                  self._audio,
                                  DEVICE,
                                  return_char_alignments=False)
+
+        self._cleanup_model('_align_model_data')
         return aligned['segments']
 
     def _diarize_assign_speakers(
@@ -133,6 +137,8 @@ class TranscriptionPipeline:
         diarize_segs = diarizer(self._audio)
         result = whisperx.diarize.assign_word_speakers(diarize_segs,
                                                        {"segments": segments})
+
+        self._cleanup_model('_diarization_model')
         return result["segments"]
 
     def _filter_gaming_content(
@@ -178,6 +184,8 @@ class TranscriptionPipeline:
         except Exception as e:
             logging.error(f"Content filtering failed: {e}")
             return segments
+        finally:
+            self._cleanup_model('_llm_model')
 
     def _group_words_into_phrases(
             self,
@@ -271,6 +279,12 @@ class TranscriptionPipeline:
                 delattr(self, attr)
             except AttributeError:
                 pass
+        torch.cuda.empty_cache()
+        gc.collect()
+
+    def _cleanup_model(self, model_name):
+        if hasattr(self, model_name):
+            delattr(self, model_name)
         torch.cuda.empty_cache()
         gc.collect()
 
