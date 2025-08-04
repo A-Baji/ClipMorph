@@ -101,7 +101,7 @@ class TranscriptionPipeline:
             beam_size=1,
             best_of=5,
             patience=1.0,
-            condition_on_previous_text=True,
+            condition_on_previous_text=False,
             suppress_tokens=[-1],
             no_speech_threshold=0.7,
             logprob_threshold=-1.0,
