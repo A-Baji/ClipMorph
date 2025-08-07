@@ -1,6 +1,7 @@
-import moviepy as mpy
-from moviepy.video.fx import Crop, Resize
 import cv2
+import moviepy as mpy
+from moviepy.video.fx import Crop
+from moviepy.video.fx import Resize
 
 from clipmorph.generate_video import CENSORED_AUDIO_PATH
 from clipmorph.generate_video.transcript import parse_srt
@@ -96,25 +97,25 @@ def convert_to_short_form(input_path,
         output_path = f"{clip.filename.split('.')[0]}-converted.mp4"
         clip = set_audio(clip)
 
-        crop_width = 1080
-        crop_height = 1920
+        # crop_width = 1080
+        # crop_height = 1920
 
-        if include_cam:
-            cam_resized, cam_h = process_camera_feed(clip, cam_x, cam_y,
-                                                     cam_width, cam_height,
-                                                     crop_width)
-        else:
-            cam_h = crop_height - clip_height
+        # if include_cam:
+        #     cam_resized, cam_h = process_camera_feed(clip, cam_x, cam_y,
+        #                                              cam_width, cam_height,
+        #                                              crop_width)
+        # else:
+        #     cam_h = crop_height - clip_height
 
-        main_clip = process_main_clip(clip, crop_height, cam_h, crop_width)
+        # main_clip = process_main_clip(clip, crop_height, cam_h, crop_width)
 
-        if not include_cam:
-            final_video = blur_background(clip, crop_width, crop_height, cam_h,
-                                          main_clip)
-        else:
-            final_video = mpy.clips_array([[cam_resized], [main_clip]])
+        # if not include_cam:
+        #     final_video = blur_background(clip, crop_width, crop_height, cam_h,
+        #                                   main_clip)
+        # else:
+        #     final_video = mpy.clips_array([[cam_resized], [main_clip]])
 
-        final = overlay_subtitles(final_video)
+        final = overlay_subtitles(clip)
         final.write_videofile(output_path, codec="libx264", audio_codec="aac")
         final.close()
 

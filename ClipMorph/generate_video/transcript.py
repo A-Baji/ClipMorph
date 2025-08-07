@@ -20,19 +20,6 @@ GAMING_PROMPT = ("Yo what the hell was that?\n"
                  "Bro I'm lagging so hard right now.\n"
                  "Nah man that was clean.\n")
 
-LOGIC_CHECK_PROMPT = """
-Analyze each transcript segment and classify as either player commentary (YES) or not player commentary (NO).
-Exclude:
-- In-game NPC dialogue, system messages, and announcers, which typicially use formal language
-- Nonsensical or garbled text due to poor audio quality
-- Background noise transcriptions
-- Menu sounds or UI interactions
-
-Return only a JSON array of booleans matching the input order.
-
-Segments to analyze:
-"""
-
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -140,52 +127,6 @@ class TranscriptionPipeline:
 
         self._cleanup_model('_diarization_model')
         return result["segments"]
-
-    def _filter_gaming_content(
-            self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Filter gaming content using cached LLM model."""
-        model = self._llm_model
-        if not model:
-            logging.warning(
-                "LLM model not available, returning unfiltered phrases.")
-            return segments
-
-        try:
-            texts = [p["text"] for p in segments]
-            segment_list = "\n".join(f"{i+1}. \"{text}\""
-                                     for i, text in enumerate(texts))
-            prompt = [{
-                "role": "user",
-                "content": f"{LOGIC_CHECK_PROMPT}\n{segment_list}"
-            }]
-            answer_ids = model.generate(prompts=[prompt],
-                                        max_new_tokens=512,
-                                        temperature=0.0,
-                                        do_sample=False)
-            response = model.tokenizer.ids_to_text(answer_ids[0].cpu()).strip()
-            import json
-
-            # Try extracting a JSON array from LLM response
-            json_start = response.find('[')
-            json_end = response.rfind(']') + 1
-            if json_start >= 0 and json_end > json_start:
-                json_str = response[json_start:json_end]
-                keep_flags = json.loads(json_str)
-                if len(keep_flags) == len(segments):
-                    result = [
-                        phrase for phrase, keep in zip(segments, keep_flags)
-                        if keep
-                    ]
-                    return result
-
-            logging.warning(
-                "LLM filtering fallback, returning unfiltered phrases.")
-            return segments
-        except Exception as e:
-            logging.error(f"Content filtering failed: {e}")
-            return segments
-        finally:
-            self._cleanup_model('_llm_model')
 
     def _group_words_into_phrases(
             self,
@@ -302,11 +243,8 @@ class TranscriptionPipeline:
             logging.info("Diarizing and assigning speakers to segments...")
             diarized_segments = self._diarize_assign_speakers(aligned_segments)
 
-            logging.info("Filtering out gaming content segments...")
-            filtered_segments = self._filter_gaming_content(diarized_segments)
-
             logging.info("Grouping words into phrases...")
-            phrase_segments = self._group_words_into_phrases(filtered_segments)
+            phrase_segments = self._group_words_into_phrases(diarized_segments)
 
             return phrase_segments
         finally:
