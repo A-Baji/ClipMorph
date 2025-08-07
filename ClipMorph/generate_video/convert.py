@@ -3,13 +3,9 @@ import moviepy as mpy
 from moviepy.video.fx import Crop
 from moviepy.video.fx import Resize
 
-from clipmorph.generate_video import CENSORED_AUDIO_PATH
-from clipmorph.generate_video.transcript import parse_srt
 
-
-def set_audio(clip):
-    audio = mpy.AudioFileClip(CENSORED_AUDIO_PATH)
-    return clip.with_audio(audio)
+def set_audio(clip, muted_audio):
+    return clip.with_audio(muted_audio)
 
 
 def process_camera_feed(clip, cam_x, cam_y, cam_width, cam_height, crop_width):
@@ -59,8 +55,8 @@ def blur_background(clip, crop_width, crop_height, cam_h, main_clip):
     return final_video
 
 
-def overlay_subtitles(final_video):
-    subs = parse_srt()
+def overlay_subtitles(final_video, segments):
+    subs = segments
     subtitle_clips = []
 
     for sub in subs:
@@ -87,6 +83,8 @@ def overlay_subtitles(final_video):
 
 
 def convert_to_short_form(input_path,
+                          muted_audio=None,
+                          segments=None,
                           include_cam=True,
                           cam_x=1420,
                           cam_y=790,
@@ -95,7 +93,7 @@ def convert_to_short_form(input_path,
                           clip_height=1312):
     with mpy.VideoFileClip(input_path) as clip:
         output_path = f"{clip.filename.split('.')[0]}-converted.mp4"
-        clip = set_audio(clip)
+        clip = set_audio(clip, muted_audio)
 
         crop_width = 1080
         crop_height = 1920
@@ -115,7 +113,7 @@ def convert_to_short_form(input_path,
         else:
             final_video = mpy.clips_array([[cam_resized], [main_clip]])
 
-        final = overlay_subtitles(final_video)
+        final = overlay_subtitles(final_video, segments)
         final.write_videofile(output_path, codec="libx264", audio_codec="aac")
         final.close()
 

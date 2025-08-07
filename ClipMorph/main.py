@@ -1,20 +1,28 @@
+import logging
+
+from dotenv import load_dotenv
+
 from clipmorph.cli import parse_args
-from clipmorph.generate_video.pipeline import conversion_pipeline
-from clipmorph.platforms.youtube.upload import upload_to_youtube
+from clipmorph.generate_video.pipeline import ConversionPipeline
 from clipmorph.platforms.instagram.upload import upload_to_instagram
 from clipmorph.platforms.tiktok.upload import upload_to_tiktok
 from clipmorph.platforms.twitter.upload import upload_to_twitter
+from clipmorph.platforms.youtube.upload import upload_to_youtube
 from clipmorph.utils import delete_file
-
-from dotenv import load_dotenv
-import logging
 
 
 def main():
     load_dotenv()
     args = parse_args()
 
-    final_output = conversion_pipeline(args)
+    input_path = getattr(args, "input_path")
+
+    pipeline_args = vars(args).copy()
+    no_confirm = pipeline_args.pop("no_confirm", False)
+    clean = pipeline_args.pop("clean", False)
+
+    pipeline_args.pop("input_path", None)
+    final_output = ConversionPipeline(input_path, **pipeline_args).run()
 
     # Confirm upload
     if not getattr(args, 'no_confirm', False):

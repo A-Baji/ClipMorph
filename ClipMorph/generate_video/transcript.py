@@ -5,11 +5,11 @@ import os
 import re
 from typing import Any, Dict, List
 
+from moviepy import AudioFileClip
 import torch
 import whisper
 import whisperx
 
-from clipmorph.generate_video import AUDIO_PATH
 from clipmorph.generate_video import SRT_PATH
 
 GAMING_PROMPT = ("Yo what the hell was that?\n"
@@ -26,16 +26,14 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 class TranscriptionPipeline:
     """Class to manage all models for transcription pipeline."""
 
-    def __init__(self, audio_path: str = AUDIO_PATH):
-        self.audio_path = audio_path
+    def __init__(self, audio: AudioFileClip):
+        self.audio = audio
 
     @cached_property
     def _audio(self):
         """Load audio file on first access."""
-        if not os.path.exists(self.audio_path):
-            raise FileNotFoundError(f"Audio file not found: {self.audio_path}")
-        logging.info(f"Loading audio file: {self.audio_path}")
-        return whisper.load_audio(self.audio_path)
+        logging.info(f"Loading audio...")
+        return whisper.load_audio(self.audio.reader.filename)
 
     @cached_property
     def _whisper_model(self):
@@ -229,7 +227,7 @@ class TranscriptionPipeline:
         torch.cuda.empty_cache()
         gc.collect()
 
-    def transcribe(self) -> List[Dict[str, Any]]:
+    def run(self) -> List[Dict[str, Any]]:
         try:
             logging.info("Transcribing audio into segments...")
             segments = self._get_transcription_segments()
@@ -270,32 +268,3 @@ def write_srt_file(phrases: List[Dict[str, Any]]):
                 f.write(f"{phrase['speaker']}: {phrase['text']}\n\n")
             else:
                 f.write(f"{phrase['text']}\n\n")
-
-
-def parse_srt() -> List[Dict[str, Any]]:
-    """Parse existing SRT file back into segments."""
-    if not os.path.exists(SRT_PATH):
-        return []
-
-    with open(SRT_PATH, 'r', encoding='utf-8') as f:
-        content = f.read()
-
-    pattern = re.compile(
-        r"(\d+)\s+([\d:,]+) --> ([\d:,]+)\s+([\s\S]*?)(?=\n\d+\n|\Z)",
-        re.MULTILINE)
-
-    entries = []
-    for match in pattern.finditer(content):
-        start_str, end_str, text = match.group(2), match.group(3), match.group(
-            4).strip().replace('\n', ' ')
-
-        def srt_time_to_seconds(t: str) -> float:
-            h, m, s_ms = t.split(':')
-            s, ms = s_ms.split(',')
-            return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
-
-        start = srt_time_to_seconds(start_str)
-        end = srt_time_to_seconds(end_str)
-        entries.append({'start': start, 'end': end, 'text': text})
-
-    return entries
