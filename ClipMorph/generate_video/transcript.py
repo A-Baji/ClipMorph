@@ -250,7 +250,7 @@ class TranscriptionPipeline:
 
 
 def write_srt_file(phrases: List[Dict[str, Any]]):
-    """Write SRT file."""
+    """Write SRT file for debugging purposes."""
 
     def format_timestamp(seconds: float) -> str:
         ms = int((seconds - int(seconds)) * 1000)
