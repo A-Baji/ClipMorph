@@ -1,5 +1,5 @@
 from clipmorph.cli import parse_args
-from clipmorph.convert import convert_to_short_form
+from clipmorph.generate_video.pipeline import conversion_pipeline
 from clipmorph.platforms.youtube.upload import upload_to_youtube
 from clipmorph.platforms.instagram.upload import upload_to_instagram
 from clipmorph.platforms.tiktok.upload import upload_to_tiktok
@@ -14,14 +14,7 @@ def main():
     load_dotenv()
     args = parse_args()
 
-    logging.info("Converting video to short-form format...")
-    output_path = convert_to_short_form(input_path=args.input_path,
-                                        include_cam=args.include_cam,
-                                        cam_x=args.cam_x,
-                                        cam_y=args.cam_y,
-                                        cam_width=args.cam_width,
-                                        cam_height=args.cam_height)
-    logging.info(f"Saved converted video to {output_path}")
+    final_output = conversion_pipeline(args)
 
     # Confirm upload
     if not getattr(args, 'no_confirm', False):
@@ -31,18 +24,18 @@ def main():
             return
 
     # Upload to all platforms
-    print("----------------")
-    upload_to_youtube(output_path)
-    print("----------------")
-    upload_to_instagram(output_path)
-    print("----------------")
-    upload_to_tiktok(output_path)
-    print("----------------")
-    upload_to_twitter(output_path)
+    # print("----------------")
+    # upload_to_youtube(final_output)
+    # print("----------------")
+    # upload_to_instagram(final_output)
+    # print("----------------")
+    # upload_to_tiktok(final_output)
+    # print("----------------")
+    # upload_to_twitter(final_output)
 
     # Cleanup if requested
     if getattr(args, 'clean', False):
-        delete_file(output_path)
+        delete_file(final_output)
 
 
 if __name__ == "__main__":

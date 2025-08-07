@@ -15,7 +15,8 @@ def authenticate_google():
     credentials_info = {
         "type":
         "service_account",
-        "project_id": os.environ["GCP_PROJECT_ID"],
+        "project_id":
+        os.environ["GCP_PROJECT_ID"],
         "private_key_id":
         os.environ["GCP_PRIVATE_KEY_ID"],
         "private_key":
@@ -31,7 +32,7 @@ def authenticate_google():
         "auth_provider_x509_cert_url":
         "https://www.googleapis.com/oauth2/v1/certs",
         "client_x509_cert_url":
-        f"https://www.googleapis.com/robot/v1/metadata/x509/{urllib.parse.quote(os.environ["GCP_CLIENT_EMAIL"])}",
+        f"https://www.googleapis.com/robot/v1/metadata/x509/{urllib.parse.quote(os.environ['GCP_CLIENT_EMAIL'])}",
     }
 
     creds = service_account.Credentials.from_service_account_info(

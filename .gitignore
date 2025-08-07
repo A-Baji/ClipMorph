@@ -1,4 +1,6 @@
 *.mp4
+*.wav
+*.srt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
