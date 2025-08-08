@@ -10,7 +10,7 @@ import torch
 import whisper
 import whisperx
 
-from clipmorph.generate_video import SRT_PATH
+from clipmorph.pipeline import SRT_PATH
 
 GAMING_PROMPT = ("Yo what the hell was that?\n"
                  "No way bro did you see that?\n"

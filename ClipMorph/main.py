@@ -3,7 +3,7 @@ import logging
 from dotenv import load_dotenv
 
 from clipmorph.cli import parse_args
-from clipmorph.generate_video.convert import ConversionPipeline
+from clipmorph.pipeline.convert import ConversionPipeline
 from clipmorph.platforms.instagram.upload import upload_to_instagram
 from clipmorph.platforms.tiktok.upload import upload_to_tiktok
 from clipmorph.platforms.twitter.upload import upload_to_twitter

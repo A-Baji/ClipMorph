@@ -7,9 +7,9 @@ from moviepy import AudioFileClip
 from moviepy import VideoFileClip
 import soundfile as sf
 
-from clipmorph.generate_video.edit import convert_to_short_form
-from clipmorph.generate_video.transcribe import TranscriptionPipeline
-from clipmorph.generate_video.transcribe import write_srt_file
+from clipmorph.pipeline.edit import convert_to_short_form
+from clipmorph.pipeline.transcribe import TranscriptionPipeline
+from clipmorph.pipeline.transcribe import write_srt_file
 
 
 class ConversionPipeline:
