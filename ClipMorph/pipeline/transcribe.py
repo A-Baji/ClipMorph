@@ -229,7 +229,7 @@ class TranscriptionPipeline:
 
     def run(self) -> List[Dict[str, Any]]:
         try:
-            logging.info("Transcribing audio into segments...")
+            logging.info("Generating transcription segments...")
             segments = self._get_transcription_segments()
 
             logging.info("Aligning segments with audio...")

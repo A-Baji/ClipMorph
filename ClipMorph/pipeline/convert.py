@@ -72,9 +72,7 @@ class ConversionPipeline:
             logging.info("Censoring subtitles...")
             # TODO: Censor subtitles
 
-        logging.info(
-            "Converting video to short-form format and overlaying subtitles..."
-        )
+        logging.info("Editing video...")
         final_output = EditingPipeline(input_path=self.input_path,
                                        muted_audio=muted_audio,
                                        segments=segments,
