@@ -1,120 +1,85 @@
-import cv2
-import moviepy as mpy
-from moviepy.video.fx import Crop
-from moviepy.video.fx import Resize
+import logging
+import tempfile
+
+from better_profanity import profanity
+import librosa
+from moviepy import AudioFileClip
+from moviepy import VideoFileClip
+import soundfile as sf
+
+from clipmorph.generate_video.edit import convert_to_short_form
+from clipmorph.generate_video.transcribe import TranscriptionPipeline
+from clipmorph.generate_video.transcribe import write_srt_file
 
 
-def set_audio(clip, muted_audio):
-    return clip.with_audio(muted_audio)
+class ConversionPipeline:
 
+    def __init__(self, input_path, **kwargs):
+        self.input_path = input_path
+        self.kwargs = kwargs
 
-def process_camera_feed(clip, cam_x, cam_y, cam_width, cam_height, crop_width):
-    cam_feed = Crop(x1=cam_x, y1=cam_y, width=cam_width,
-                    height=cam_height).apply(clip)
-    cam_resized = Resize(width=crop_width).apply(cam_feed)
-    cam_h = cam_resized.h
-    if cam_h % 2 != 0:
-        cam_resized = Resize((crop_width, cam_h + 1)).apply(cam_resized)
-        cam_h = cam_resized.h
-    return cam_resized, cam_h
+    def _extract_audio(self, input_path):
+        clip = VideoFileClip(input_path)
+        return clip.audio
 
+    def _detect_profanity(self, segments, custom_words=None):
+        profanity.load_censor_words(custom_words, whitelist_words=["god"])
+        profane_intervals = []
+        for seg in segments:
+            for word_info in seg['words']:
+                if profanity.contains_profanity(word_info['word']):
+                    profane_intervals.append(
+                        (word_info['start'], word_info['end']))
+        return profane_intervals
 
-def process_main_clip(clip, crop_height, cam_h, crop_width):
-    main_clip = Resize(height=crop_height - cam_h).apply(clip)
-    main_clip = Crop(width=crop_width,
-                     height=main_clip.h,
-                     x_center=main_clip.w // 2,
-                     y_center=main_clip.h // 2).apply(main_clip)
-    return main_clip
+    def _mute_audio(self, intervals,
+                    audio_clip: AudioFileClip) -> AudioFileClip:
+        src_path = audio_clip.reader.filename
+        y, sr = librosa.load(src_path, sr=None)
 
+        for start, end in intervals:
+            start_idx = int(start * sr)
+            end_idx = int(end * sr)
+            y[start_idx:end_idx] = 0
 
-def blur_background(clip, crop_width, crop_height, cam_h, main_clip):
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        sf.write(tmp.name, y, sr)
+        tmp.close()
 
-    def blur_frame(get_frame, t):
-        frame = get_frame(t)
-        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        blurred_bgr = cv2.GaussianBlur(frame_bgr, (51, 51), sigmaX=0)
-        return cv2.cvtColor(blurred_bgr, cv2.COLOR_BGR2RGB)
+        return AudioFileClip(tmp.name)
 
-    bg_full = Resize(height=crop_height).apply(clip)
-    bg_blur = bg_full.transform(blur_frame)
-    bg_blur_cropped = Crop(width=crop_width,
-                           height=crop_height,
-                           x_center=bg_full.w // 2,
-                           y_center=bg_full.h // 2).apply(bg_blur)
+    def run(self):
+        logging.info("Extracting audio from video...")
+        audio = self._extract_audio(self.input_path)
 
-    bg_h = cam_h // 2
-    bg_blur_top = Crop(x1=0, y1=0, width=crop_width,
-                       height=bg_h).apply(bg_blur_cropped)
-    bg_blur_bot = Crop(x1=0,
-                       y1=bg_h + main_clip.h,
-                       width=crop_width,
-                       height=bg_h).apply(bg_blur_cropped)
+        logging.info("Transcribing audio...")
+        segments = TranscriptionPipeline(audio).run()
 
-    final_video = mpy.clips_array([[bg_blur_top], [main_clip], [bg_blur_bot]])
-    return final_video
-
-
-def overlay_subtitles(final_video, segments):
-    subs = segments
-    subtitle_clips = []
-
-    for sub in subs:
-        txt_clip = (mpy.TextClip(
-            text=sub["text"],
-            color="#ffffff",
-            font=None,
-            font_size=70,
-            stroke_color="black",
-            stroke_width=12,
-            method="caption",
-            size=(int(final_video.w * 0.8), None),
-            text_align="center",
-            horizontal_align="center",
-            vertical_align="center",
-            margin=(0, 50),
-        ).with_start(sub["start"]).with_end(sub["end"]).with_position(
-            ("center", int(final_video.h * 0.70))))
-
-        subtitle_clips.append(txt_clip)
-
-    final = mpy.CompositeVideoClip([final_video, *subtitle_clips])
-    return final
-
-
-def convert_to_short_form(input_path,
-                          muted_audio=None,
-                          segments=None,
-                          include_cam=True,
-                          cam_x=1420,
-                          cam_y=790,
-                          cam_width=480,
-                          cam_height=270,
-                          clip_height=1312):
-    with mpy.VideoFileClip(input_path) as clip:
-        output_path = f"{clip.filename.split('.')[0]}-converted.mp4"
-        clip = set_audio(clip, muted_audio)
-
-        crop_width = 1080
-        crop_height = 1920
-
-        if include_cam:
-            cam_resized, cam_h = process_camera_feed(clip, cam_x, cam_y,
-                                                     cam_width, cam_height,
-                                                     crop_width)
+        if not segments:
+            logging.warning(
+                "Failed to transcribe audio. No subtitles will be generated and profanity will not be censored."
+            )
         else:
-            cam_h = crop_height - clip_height
+            logging.debug("Generating subtitles (.srt)...")
+            write_srt_file(segments)
 
-        main_clip = process_main_clip(clip, crop_height, cam_h, crop_width)
+            logging.info("Detecting profanity in audio...")
+            intervals = self._detect_profanity(segments)
 
-        if not include_cam:
-            final_video = blur_background(clip, crop_width, crop_height, cam_h,
-                                          main_clip)
-        else:
-            final_video = mpy.clips_array([[cam_resized], [main_clip]])
+            logging.info("Muting profane audio segments...")
+            muted_audio = self._mute_audio(intervals, audio)
 
-        final = overlay_subtitles(final_video, segments)
-        final.write_videofile(output_path, codec="libx264", audio_codec="aac")
-        final.close()
+            logging.info("Censoring subtitles...")
+            # TODO: Censor subtitles
 
-        return output_path
+        logging.info(
+            "Converting video to short-form format and overlaying subtitles..."
+        )
+        final_output = convert_to_short_form(input_path=self.input_path,
+                                             muted_audio=muted_audio,
+                                             segments=segments,
+                                             **self.kwargs)
+
+        logging.info(f"Saved converted video to {final_output}")
+
+        return final_output
