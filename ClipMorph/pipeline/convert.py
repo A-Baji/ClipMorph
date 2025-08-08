@@ -7,7 +7,7 @@ from moviepy import AudioFileClip
 from moviepy import VideoFileClip
 import soundfile as sf
 
-from clipmorph.pipeline.edit import convert_to_short_form
+from clipmorph.pipeline.edit import EditingPipeline
 from clipmorph.pipeline.transcribe import TranscriptionPipeline
 from clipmorph.pipeline.transcribe import write_srt_file
 
@@ -75,10 +75,10 @@ class ConversionPipeline:
         logging.info(
             "Converting video to short-form format and overlaying subtitles..."
         )
-        final_output = convert_to_short_form(input_path=self.input_path,
-                                             muted_audio=muted_audio,
-                                             segments=segments,
-                                             **self.kwargs)
+        final_output = EditingPipeline(input_path=self.input_path,
+                                       muted_audio=muted_audio,
+                                       segments=segments,
+                                       **self.kwargs).run()
 
         logging.info(f"Saved converted video to {final_output}")
 
