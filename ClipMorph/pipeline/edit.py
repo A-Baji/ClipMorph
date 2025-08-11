@@ -1,4 +1,5 @@
 import logging
+import os
 
 import cv2
 import moviepy as mpy
@@ -10,6 +11,7 @@ class EditingPipeline:
 
     def __init__(self,
                  input_path,
+                 output_dir="output/",
                  muted_audio=None,
                  segments=None,
                  include_cam=True,
@@ -19,6 +21,8 @@ class EditingPipeline:
                  cam_height=270,
                  clip_height=1312):
         self.input_path = input_path
+        self.output_dir = output_dir if output_dir.endswith(
+            "/") else output_dir + "/"
         self.muted_audio = muted_audio
         self.segments = segments
         self.include_cam = include_cam
@@ -109,7 +113,10 @@ class EditingPipeline:
         try:
             logging.info("Loading video clip...")
             with mpy.VideoFileClip(self.input_path) as clip:
-                output_path = f"{clip.filename.split('.')[0]}-converted.mp4"
+                filename = clip.filename.split("/")[-1].split("\\")[-1].split(
+                    ".")[0]
+                os.makedirs(self.output_dir, exist_ok=True)
+                output_path = f"{self.output_dir}{filename}-converted.mp4"
                 logging.info("Applying muted audio to the video...")
                 clip = self._set_audio(clip, self.muted_audio)
 

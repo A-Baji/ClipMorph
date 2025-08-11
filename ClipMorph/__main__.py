@@ -1,4 +1,5 @@
 import logging
+import os
 
 from dotenv import load_dotenv
 
@@ -8,7 +9,6 @@ from clipmorph.platforms.instagram.upload import upload_to_instagram
 from clipmorph.platforms.tiktok.upload import upload_to_tiktok
 from clipmorph.platforms.twitter.upload import upload_to_twitter
 from clipmorph.platforms.youtube.upload import upload_to_youtube
-from clipmorph.utils import delete_file
 
 
 def main():
@@ -43,7 +43,13 @@ def main():
 
     # Cleanup if requested
     if getattr(args, 'clean', False):
-        delete_file(final_output)
+        try:
+            os.remove(final_output)
+            logging.debug(f"Deleted file: {final_output}")
+        except FileNotFoundError:
+            logging.warning(f"File not found: {final_output}")
+        except Exception as e:
+            logging.error(f"Error deleting file {final_output}: {e}")
 
 
 if __name__ == "__main__":
