@@ -35,4 +35,9 @@ def parse_args():
                         type=int,
                         default=270,
                         help="Height in pixels of camera feed.")
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="output/",
+        help="Custom output directory for the processed video.")
     return parser.parse_args()
