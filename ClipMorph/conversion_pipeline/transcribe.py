@@ -10,7 +10,7 @@ import torch
 import whisper
 import whisperx
 
-from clipmorph.pipeline import SRT_PATH
+SRT_PATH = "subtitles.srt"
 
 GAMING_PROMPT = ("Yo what the hell was that?\n"
                  "No way bro did you see that?\n"
