@@ -5,10 +5,7 @@ from dotenv import load_dotenv
 
 from clipmorph.cli import parse_args
 from clipmorph.conversion_pipeline import ConversionPipeline
-from clipmorph.platforms.instagram.upload import upload_to_instagram
-from clipmorph.platforms.tiktok.upload import upload_to_tiktok
-from clipmorph.platforms.twitter.upload import upload_to_twitter
-from clipmorph.platforms.youtube.upload import upload_to_youtube
+from clipmorph.upload_pipeline import UploadPipeline
 
 
 def main():
