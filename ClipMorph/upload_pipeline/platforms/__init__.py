@@ -1,1 +1,1 @@
-
+from .instagram import InstagramUploadPipeline
