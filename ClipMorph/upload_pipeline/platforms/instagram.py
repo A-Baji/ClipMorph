@@ -199,8 +199,6 @@ class InstagramUploadPipeline:
         Uploads a video to Google Cloud Storage and makes it public.
         Returns the public URL to the uploaded video.
         """
-        import os  # Import locally to avoid polluting global namespace
-
         if not self.google_creds:
             self.authenticate_google()
 
@@ -215,10 +213,8 @@ class InstagramUploadPipeline:
         """
         Deletes a video from Google Cloud Storage.
         """
-        import os  # Import locally to avoid polluting global namespace
-
         if not self.google_creds:
-            self.authenticate_google()
+            self._authenticate_google()
 
         blob_name = os.path.basename(video_path)
         storage_client = storage.Client(credentials=self.google_creds)
