@@ -443,7 +443,7 @@ class InstagramUploadPipeline:
             progress_bar.close()
             self.progress_bar = None
 
-    def run(self, video_path, caption="Uploaded via API"):
+    def run(self, video_path, caption="Instagram Reels Upload"):
         """
         Main method to handle the complete Instagram Reels upload process.
         """
