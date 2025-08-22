@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 import logging
 import os
 import time
@@ -7,6 +8,7 @@ import webbrowser
 from google.cloud import storage
 from google.oauth2 import service_account
 import requests
+from tqdm import tqdm
 
 
 class InstagramUploadPipeline:
@@ -14,6 +16,20 @@ class InstagramUploadPipeline:
     A pipeline class for handling Instagram Reels uploads, including authentication,
     temporary video hosting, and upload management.
     """
+
+    # Constants
+    FACEBOOK_GRAPH_BASE_URL = "https://graph.facebook.com"
+    FACEBOOK_AUTH_BASE_URL = "https://www.facebook.com"
+    GOOGLE_AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
+    GOOGLE_TOKEN_URI = "https://oauth2.googleapis.com/token"
+    GOOGLE_CERTS_URL = "https://www.googleapis.com/oauth2/v1/certs"
+
+    # Video processing constants
+    DEFAULT_PROCESSING_TIME_PER_MB = 20  # seconds
+    MIN_PROCESSING_TIME = 30  # seconds
+    MAX_PROGRESS_DURING_PROCESSING = 80  # don't complete progress bar during processing
+    API_POLL_INTERVAL = 5  # seconds between status checks
+    MIN_PROGRESS_INCREMENT = 1.5
 
     def __init__(self,
                  facebook_app_id=os.getenv("FACEBOOK_APP_ID"),
@@ -27,6 +43,9 @@ class InstagramUploadPipeline:
                  gcp_client_id=os.getenv("GCP_CLIENT_ID"),
                  gcs_bucket_name=os.getenv("GCS_BUCKET_NAME"),
                  redirect_uri='https://localhost/',
+                 api_version='v23.0',
+                 request_timeout=30,
+                 processing_timeout=360,
                  auth_scopes=[
                      'instagram_basic', 'pages_show_list',
                      'pages_read_engagement', 'pages_manage_posts',
@@ -57,6 +76,10 @@ class InstagramUploadPipeline:
                 Defaults to GCS_BUCKET_NAME environment variable.
             redirect_uri (str, optional): OAuth redirect URI.
                 Defaults to 'https://localhost/'.
+            request_timeout (int, optional): Timeout for HTTP requests in seconds.
+                Defaults to 30 seconds.
+            processing_timeout (int, optional): Timeout for video processing in seconds.
+                Defaults to 120 seconds.
             auth_scopes (list, optional): List of Facebook authentication scopes.
                 Defaults to basic Instagram and page management scopes.
         """
@@ -76,12 +99,30 @@ class InstagramUploadPipeline:
 
         # Authentication configuration
         self.redirect_uri = redirect_uri
+        self.api_version = api_version
         self.auth_scopes = auth_scopes
+
+        # Timeout configuration
+        self.request_timeout = request_timeout
+        self.processing_timeout = processing_timeout
 
         # Runtime state
         self.google_creds = None
         self.page_token = None
         self.ig_user_id = None
+
+        # Progress bar configuration (redistributed for smoother UX)
+        self.progress_allocations = {
+            "google_auth": 2,  # 2%
+            "page_token": 3,  # 3%
+            "ig_user_id": 3,  # 3%
+            "video_upload": 5,  # 5%
+            "create_container": 7,  # 7%
+            "video_processing": 70,  # 70% - spread over time
+            "publish_media": 8,  # 8% - reduced from 23%
+            "cleanup": 2  # 2%
+        }
+        self.progress_bar = None
 
         # Validate required credentials
         if not all([self.app_id, self.app_secret, self.page_id]):
@@ -100,6 +141,42 @@ class InstagramUploadPipeline:
                 "or set them as environment variables: GCP_PROJECT_ID, GCP_PRIVATE_KEY_ID, "
                 "GCP_PRIVATE_KEY, GCP_CLIENT_EMAIL, GCP_CLIENT_ID, GCS_BUCKET_NAME"
             )
+
+    def _retry_request(self, func, *args, max_retries=3, **kwargs):
+        """Retry HTTP requests with exponential backoff and enhanced error messages."""
+        for attempt in range(max_retries):
+            try:
+                response = func(*args, **kwargs)
+                if not response.ok:
+                    # Add helpful context to the error message
+                    try:
+                        error_data = response.json()
+                        api_error = error_data.get('error',
+                                                   {}).get('message', '')
+                        if api_error:
+                            response.reason = f"{response.reason}: {api_error}"
+                    except:
+                        pass
+                response.raise_for_status()
+                return response
+            except requests.exceptions.RequestException as e:
+                if attempt == max_retries - 1:
+                    raise e
+                wait_time = 2**attempt  # Exponential backoff: 1s, 2s, 4s
+                logging.warning(
+                    f"Request failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {e}"
+                )
+                time.sleep(wait_time)
+
+    def _update_progress(self, step_name: str, description: str = ""):
+        """Update the progress bar based on step completion."""
+        if self.progress_bar and step_name in self.progress_allocations:
+            increment = self.progress_allocations[step_name]
+            if increment > 0:
+                self.progress_bar.update(increment)
+            if description:
+                self.progress_bar.set_description(f"Instagram: {description}")
+            # Don't call refresh() - let tqdm handle it automatically
 
     def _authenticate_google(self):
         """
@@ -120,27 +197,29 @@ class InstagramUploadPipeline:
             "client_id":
             self.gcp_client_id,
             "auth_uri":
-            "https://accounts.google.com/o/oauth2/auth",
+            self.GOOGLE_AUTH_URI,
             "token_uri":
-            "https://oauth2.googleapis.com/token",
+            self.GOOGLE_TOKEN_URI,
             "auth_provider_x509_cert_url":
-            "https://www.googleapis.com/oauth2/v1/certs",
+            self.GOOGLE_CERTS_URL,
             "client_x509_cert_url":
             f"https://www.googleapis.com/robot/v1/metadata/x509/{urllib.parse.quote(self.gcp_client_email)}",
         }
         self.google_creds = service_account.Credentials.from_service_account_info(
             credentials_info)
+        self._update_progress("google_auth", "Authenticated with Google Cloud")
         return self.google_creds
 
     def _get_user_access_token(self):
         """
         Guides user through browser-based OAuth to obtain a user access token.
         """
-        oauth_url = (f"https://www.facebook.com/v23.0/dialog/oauth"
-                     f"?client_id={self.app_id}"
-                     f"&redirect_uri={self.redirect_uri}"
-                     f"&scope={','.join(self.auth_scopes)}"
-                     f"&response_type=code")
+        oauth_url = (
+            f"{self.FACEBOOK_AUTH_BASE_URL}/{self.api_version}/dialog/oauth"
+            f"?client_id={self.app_id}"
+            f"&redirect_uri={self.redirect_uri}"
+            f"&scope={','.join(self.auth_scopes)}"
+            f"&response_type=code")
         print("Open this URL in your browser and authorize the app:")
         print(oauth_url)
         webbrowser.open(oauth_url)
@@ -148,26 +227,30 @@ class InstagramUploadPipeline:
             "Paste the 'code' parameter from the redirect URL here: ").strip()
 
         # Exchange code for access token
-        token_url = (f"https://graph.facebook.com/v23.0/oauth/access_token"
-                     f"?client_id={self.app_id}"
-                     f"&redirect_uri={self.redirect_uri}"
-                     f"&client_secret={self.app_secret}"
-                     f"&code={code}")
-        resp = requests.get(token_url)
-        resp.raise_for_status()
+        token_url = (
+            f"{self.FACEBOOK_GRAPH_BASE_URL}/{self.api_version}/oauth/access_token"
+            f"?client_id={self.app_id}"
+            f"&redirect_uri={self.redirect_uri}"
+            f"&client_secret={self.app_secret}"
+            f"&code={code}")
+        resp = self._retry_request(requests.get,
+                                   token_url,
+                                   timeout=self.request_timeout)
         data = resp.json()
         return data['access_token']
 
     def _generate_long_lived_access_token(self):
         """Generates a long-lived access token from a short-lived one."""
-        response = requests.get(
-            "https://graph.facebook.com/v23.0/oauth/access_token",
+        response = self._retry_request(
+            requests.get,
+            f"{self.FACEBOOK_GRAPH_BASE_URL}/{self.api_version}/oauth/access_token",
             params={
                 "grant_type": "fb_exchange_token",
                 "client_id": self.app_id,
                 "client_secret": self.app_secret,
-                "fb_exchange_token": self.get_user_access_token()
-            })
+                "fb_exchange_token": self._get_user_access_token()
+            },
+            timeout=self.request_timeout)
         logging.info(f"Access token: {response.json()['access_token']}")
         return response.json()["access_token"]
 
@@ -175,10 +258,12 @@ class InstagramUploadPipeline:
         """
         Exchanges a user access token for a page access token.
         """
-        url = f"https://graph.facebook.com/v23.0/{self.page_id}?fields=access_token&access_token={self.access_token}"
-        resp = requests.get(url)
-        resp.raise_for_status()
+        url = f"{self.FACEBOOK_GRAPH_BASE_URL}/{self.api_version}/{self.page_id}?fields=access_token&access_token={self.access_token}"
+        resp = self._retry_request(requests.get,
+                                   url,
+                                   timeout=self.request_timeout)
         self.page_token = resp.json()['access_token']
+        self._update_progress("page_token", "Got page access token")
         return self.page_token
 
     def _get_ig_user_id(self):
@@ -186,12 +271,14 @@ class InstagramUploadPipeline:
         Gets the Instagram user ID connected to a Facebook Page.
         """
         if not self.page_token:
-            self.get_page_access_token()
+            self._get_page_access_token()
 
-        url = f"https://graph.facebook.com/v23.0/{self.page_id}?fields=instagram_business_account&access_token={self.page_token}"
-        resp = requests.get(url)
-        resp.raise_for_status()
+        url = f"{self.FACEBOOK_GRAPH_BASE_URL}/{self.api_version}/{self.page_id}?fields=instagram_business_account&access_token={self.page_token}"
+        resp = self._retry_request(requests.get,
+                                   url,
+                                   timeout=self.request_timeout)
         self.ig_user_id = resp.json()['instagram_business_account']['id']
+        self._update_progress("ig_user_id", "Got Instagram user ID")
         return self.ig_user_id
 
     def _upload_video(self, video_path):
@@ -199,14 +286,18 @@ class InstagramUploadPipeline:
         Uploads a video to Google Cloud Storage and makes it public.
         Returns the public URL to the uploaded video.
         """
+        if not os.path.exists(video_path):
+            raise FileNotFoundError(f"Video file not found: {video_path}")
         if not self.google_creds:
-            self.authenticate_google()
+            self._authenticate_google()
 
         destination_blob_name = os.path.basename(video_path)
         storage_client = storage.Client(credentials=self.google_creds)
         bucket = storage_client.bucket(self.gcs_bucket_name)
         blob = bucket.blob(destination_blob_name)
         blob.upload_from_filename(video_path)
+        self._update_progress("video_upload",
+                              "Video uploaded to cloud storage")
         return blob.public_url
 
     def _delete_video(self, video_path):
@@ -221,6 +312,7 @@ class InstagramUploadPipeline:
         bucket = storage_client.bucket(self.gcs_bucket_name)
         blob = bucket.blob(blob_name)
         blob.delete()
+        self._update_progress("cleanup", "Cleaned up temporary files")
         return True
 
     def _create_reel_container(self,
@@ -232,9 +324,9 @@ class InstagramUploadPipeline:
         Creates a media container for a Reel.
         """
         if not self.ig_user_id:
-            self.get_ig_user_id()
+            self._get_ig_user_id()
 
-        url = f"https://graph.facebook.com/v23.0/{self.ig_user_id}/media"
+        url = f"{self.FACEBOOK_GRAPH_BASE_URL}/{self.api_version}/{self.ig_user_id}/media"
         payload = {
             'media_type': 'REELS',
             'video_url': video_url,
@@ -244,104 +336,195 @@ class InstagramUploadPipeline:
         }
         if thumb_offset is not None:
             payload['thumb_offset'] = str(thumb_offset)
-        resp = requests.post(url, data=payload)
-        resp.raise_for_status()
+        resp = self._retry_request(requests.post,
+                                   url,
+                                   data=payload,
+                                   timeout=self.request_timeout)
+        self._update_progress("create_container", "Created reel container")
         return resp.json()['id']
 
     def _publish_media(self, creation_id):
         """
         Publishes the media container to Instagram as a Reel.
         """
-        if not self.ig_user_id:
-            self.get_ig_user_id()
+        # Update progress immediately when starting publish
+        self._update_progress("publish_media", "Publishing reel to Instagram")
 
-        url = f"https://graph.facebook.com/v23.0/{self.ig_user_id}/media_publish"
+        if not self.ig_user_id:
+            self._get_ig_user_id()
+
+        url = f"{self.FACEBOOK_GRAPH_BASE_URL}/{self.api_version}/{self.ig_user_id}/media_publish"
         payload = {'creation_id': creation_id, 'access_token': self.page_token}
-        resp = requests.post(url, data=payload)
-        resp.raise_for_status()
+        resp = self._retry_request(requests.post,
+                                   url,
+                                   data=payload,
+                                   timeout=self.request_timeout)
+
+        # Update description to show completion
+        if self.progress_bar:
+            self.progress_bar.set_description("Instagram: Cleaning up...")
         return resp.json()['id']
 
-    def _wait_for_processing(self, creation_id, timeout=120):
+    def _wait_for_processing(self, creation_id, video_size_mb=0):
         """
         Polls the media container status until it's finished processing.
         """
-        url = f"https://graph.facebook.com/v23.0/{creation_id}?fields=status_code&access_token={self.page_token}"
+        url = f"{self.FACEBOOK_GRAPH_BASE_URL}/{self.api_version}/{creation_id}?fields=status_code&access_token={self.page_token}"
         start = time.time()
-        while time.time() - start < timeout:
-            resp = requests.get(url)
-            resp.raise_for_status()
-            status = resp.json().get('status_code')
+        last_api_call = 0
+
+        # Calculate increment per second based on expected processing time
+        estimated_time = max(
+            self.MIN_PROCESSING_TIME,
+            video_size_mb * self.DEFAULT_PROCESSING_TIME_PER_MB)
+        increment_per_check = max(
+            self.MIN_PROGRESS_INCREMENT,
+            self.MAX_PROGRESS_DURING_PROCESSING / estimated_time)
+
+        current_progress = self.progress_bar.n if self.progress_bar else 0
+        status = None
+
+        while time.time() - start < self.processing_timeout:
+            elapsed = time.time() - start
+
+            # Only fetch API status every few seconds
+            if elapsed - last_api_call >= self.API_POLL_INTERVAL:
+                resp = self._retry_request(requests.get, url, timeout=10)
+                status = resp.json().get('status_code')
+                last_api_call = elapsed
+
+            # Progressive updates based on video size and elapsed time
+            target_progress = current_progress + min(
+                elapsed * increment_per_check,
+                self.MAX_PROGRESS_DURING_PROCESSING)
+
+            # Update the timer description every second
+            if self.progress_bar:
+                self.progress_bar.set_description(
+                    f"Instagram: Processing video... ({elapsed:.0f}s)")
+
+            # Only update progress if we haven't reached the cap
+            if self.progress_bar and self.progress_bar.n < target_progress and self.progress_bar.n < self.MAX_PROGRESS_DURING_PROCESSING:
+                increment = min(
+                    increment_per_check, target_progress - self.progress_bar.n,
+                    self.MAX_PROGRESS_DURING_PROCESSING - self.progress_bar.n)
+                if increment > 0:
+                    self.progress_bar.update(increment)
+
             if status == 'FINISHED':
+                if self.progress_bar:
+                    self.progress_bar.set_description(
+                        "Instagram: Publishing reel...")
                 return True
             elif status == 'ERROR':
                 logging.error(f"Video processing failed: {resp.json()}")
                 return False
-            time.sleep(5)
+
+            time.sleep(1)
+
         raise TimeoutError("Timed out waiting for video processing.")
+
+    @contextmanager
+    def _progress_context(self, total_progress, description="Starting upload"):
+        """Context manager for progress bar to ensure proper cleanup."""
+        progress_bar = tqdm(
+            total=total_progress,
+            desc=f"Instagram: {description}",
+            unit="%",
+            bar_format=
+            "{l_bar}{bar}| {n_fmt}/{total_fmt}% [{elapsed}<{remaining}]",
+            ncols=100,
+            leave=True,
+            position=0)
+        self.progress_bar = progress_bar
+        try:
+            yield progress_bar
+        finally:
+            progress_bar.close()
+            self.progress_bar = None
 
     def run(self, video_path, caption="Uploaded via API"):
         """
         Main method to handle the complete Instagram Reels upload process.
         """
-        logging.info("[Instagram] Starting Instagram Reels upload...")
+        # Get video file size for progress estimation
+        if not os.path.exists(video_path):
+            raise FileNotFoundError(f"Video file not found: {video_path}")
+        video_size_mb = os.path.getsize(video_path) / (1024 * 1024)
 
-        # Initialize credentials if not already done
-        if not self.google_creds:
-            self._authenticate_google()
-        logging.info(
-            "[Instagram] Authenticated to Cloud Storage with Google for temporary video hosting."
-        )
+        total_progress = sum(self.progress_allocations.values())
+        upload_success = False
 
-        # Upload to temporary storage
-        video_url = self._upload_video(video_path)
-        logging.info(
-            f"[Instagram] Uploaded video to temporary host: {video_url}")
+        with self._progress_context(total_progress, "Starting upload"):
+            try:
+                # Initialize credentials if not already done
+                if not self.google_creds:
+                    self._authenticate_google()
 
-        # Get necessary tokens and IDs
-        if not self.access_token:
-            logging.info(
-                "[Instagram] No access token found. Starting OAuth flow...")
-            self.access_token = self._generate_long_lived_access_token()
-            print(
-                "\nIMPORTANT: To skip the manual OAuth process in future runs, "
-                "set this access token in your environment:\n"
-                f"FACEBOOK_ACCESS_TOKEN={self.access_token}\n")
+                # Upload to temporary storage
+                video_url = self._upload_video(video_path)
 
-        # Get necessary tokens and IDs
-        if not self.page_token:
-            self._get_page_access_token()
-        logging.info("[Instagram] Fetched Instagram page access token.")
+                # Get necessary tokens and IDs
+                if not self.access_token:
+                    self.progress_bar.write(
+                        "[Instagram] No access token found. Starting OAuth flow..."
+                    )
+                    self.access_token = self._generate_long_lived_access_token(
+                    )
+                    self.progress_bar.write(
+                        "\nIMPORTANT: To skip the manual OAuth process in future runs, "
+                        "set this access token in your environment:\n"
+                        f"FACEBOOK_ACCESS_TOKEN={self.access_token}\n")
 
-        if not self.ig_user_id:
-            self._get_ig_user_id()
-        logging.info(
-            f"[Instagram] Fetched Instagram user ID: {self.ig_user_id}")
+                # Get necessary tokens and IDs
+                if not self.page_token:
+                    self._get_page_access_token()
 
-        # Create and process the reel
-        creation_id = self._create_reel_container(video_url, caption)
-        logging.info(
-            f"[Instagram] Created Instagram Reel container with ID: {creation_id}"
-        )
+                if not self.ig_user_id:
+                    self._get_ig_user_id()
 
-        try:
-            logging.info("[Instagram] Processing video...")
-            if self._wait_for_processing(creation_id):
-                logging.info(
-                    "[Instagram] Video processing finished. Publishing Reel..."
-                )
-                media_id = self._publish_media(creation_id)
-                logging.info(
-                    f"[Instagram] Published Reel with media ID: {media_id}")
-            else:
-                logging.error(
-                    "[Instagram] Video processing failed or returned error status."
-                )
-        except TimeoutError as e:
-            logging.error(
-                f"[Instagram] Timeout while waiting for video processing: {e}")
-        except Exception as e:
-            logging.error(
-                f"[Instagram] Unexpected error during Instagram upload: {e}")
-        finally:
-            self._delete_video(video_path)
-            logging.info("[Instagram] Cleaned up temporary hosted video.")
+                # Create and process the reel
+                creation_id = self._create_reel_container(video_url, caption)
+
+                try:
+                    if self._wait_for_processing(creation_id,
+                                                 video_size_mb=video_size_mb):
+                        media_id = self._publish_media(creation_id)
+                        self.progress_bar.write(
+                            f"[Instagram] Published Reel with media ID: {media_id}"
+                        )
+                        upload_success = True
+                    else:
+                        self.progress_bar.write(
+                            "[Instagram] Video processing failed or returned error status."
+                        )
+                except TimeoutError as e:
+                    self.progress_bar.write(
+                        f"[Instagram] Timeout while waiting for video processing: {e}"
+                    )
+                except Exception as e:
+                    self.progress_bar.write(
+                        f"[Instagram] Unexpected error during Instagram upload: {e}"
+                    )
+                finally:
+                    self._delete_video(video_path)
+
+                # Handle progress bar completion based on success/failure
+                if upload_success:
+                    # Complete to 100% only on success
+                    remaining = total_progress - self.progress_bar.n
+                    if remaining > 0:
+                        self.progress_bar.update(remaining)
+                    self.progress_bar.set_description(
+                        "Instagram: Upload complete")
+                else:
+                    # Show error state without completing to 100%
+                    self.progress_bar.set_description(
+                        "Instagram: Upload failed")
+
+            except Exception as e:
+                if self.progress_bar:
+                    self.progress_bar.write(f"[Instagram] Critical error: {e}")
+                    self.progress_bar.set_description(
+                        "Instagram: Upload failed")
+                raise
