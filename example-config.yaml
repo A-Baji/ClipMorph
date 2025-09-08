@@ -1,0 +1,17 @@
+# Example ClipMorph Configuration File
+# This file shows how to configure platform-specific upload settings
+
+platforms:
+  youtube:
+    category: "20"  # Gaming category
+    privacy_status: "unlisted"  # public, unlisted, or private
+    
+  instagram:
+    share_to_feed: false  # Don't share to main feed (story only)
+    thumb_offset: 3000   # Thumbnail at 3 seconds
+    
+  tiktok:
+    privacy_level: "MUTUAL_FOLLOW_FRIENDS"  # PUBLIC_TO_EVERYONE, MUTUAL_FOLLOW_FRIENDS, or SELF_ONLY
+    
+  twitter:
+    # Twitter uses account-level privacy, no platform-specific options currently

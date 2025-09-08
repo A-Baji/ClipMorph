@@ -1,0 +1,16 @@
+{
+  "platforms": {
+    "youtube": {
+      "category": "20",
+      "privacy_status": "unlisted"
+    },
+    "instagram": {
+      "share_to_feed": false,
+      "thumb_offset": 3000
+    },
+    "tiktok": {
+      "privacy_level": "MUTUAL_FOLLOW_FRIENDS"
+    },
+    "twitter": {}
+  }
+}
