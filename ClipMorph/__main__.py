@@ -53,6 +53,7 @@ def main():
     # Extract main control arguments
     no_confirm = getattr(args, "no_confirm", False)
     clean = getattr(args, "clean", False)
+    no_conversion = getattr(args, "no_conversion", False)
     no_upload = getattr(args, "no_upload", False)
     upload_to = getattr(args, "upload_to", None)
     skip = getattr(args, "skip", None)
@@ -60,10 +61,15 @@ def main():
     # Automatically separate conversion and upload args based on argument groups
     conversion_args, upload_args = separate_args_by_category(args, parser)
 
-    # Lazy import heavy dependencies only when needed
-    from clipmorph.conversion_pipeline import ConversionPipeline
-
-    conversion_output = ConversionPipeline(**conversion_args).run()
+    # Handle conversion or direct upload
+    if no_conversion:
+        # Use input video directly
+        conversion_output = conversion_args['input_path']
+        print(f"Skipping conversion, using input video directly: {conversion_output}")
+    else:
+        # Lazy import heavy dependencies only when needed
+        from clipmorph.conversion_pipeline import ConversionPipeline
+        conversion_output = ConversionPipeline(**conversion_args).run()
 
     # Check if upload should be skipped
     if no_upload:
@@ -124,8 +130,8 @@ def main():
     )
     print("=" * 60)
 
-    # Cleanup if requested
-    if clean:
+    # Cleanup if requested (but don't delete original input file)
+    if clean and not no_conversion:
         try:
             os.remove(conversion_output)
             logging.debug(f"Deleted file: {conversion_output}")
@@ -133,6 +139,8 @@ def main():
             logging.warning(f"File not found: {conversion_output}")
         except Exception as e:
             logging.error(f"Error deleting file {conversion_output}: {e}")
+    elif clean and no_conversion:
+        print("Cleanup skipped: cannot delete original input file when using --no-conversion")
 
 
 if __name__ == "__main__":

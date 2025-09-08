@@ -35,6 +35,9 @@ def _create_parser():
                         "-c",
                         action="store_true",
                         help="Delete output video after upload.")
+    parser.add_argument("--no-conversion",
+                        action="store_true",
+                        help="Skip conversion and upload input video directly.")
 
     # Conversion pipeline options
     conversion_group = parser.add_argument_group('Conversion Options')
@@ -151,7 +154,7 @@ def separate_args_by_category(args, parser):
 
     # Special handling for positional arguments and main control args
     main_control_args = {
-        'input_path', 'no_confirm', 'clean', 'no_upload', 'upload_to', 'skip'
+        'input_path', 'no_confirm', 'clean', 'no_conversion', 'no_upload', 'upload_to', 'skip'
     }
     conversion_args.add('input_path')  # input_path goes to conversion
 
