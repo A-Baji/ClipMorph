@@ -413,9 +413,9 @@ class InstagramUploadPipeline(BaseUploadPipeline):
 
     def run(self,
             video_path,
-            caption="Instagram Reels Upload",
-            share_to_feed=True,
-            thumb_offset=None):
+            caption: str,
+            share_to_feed: bool = True,
+            thumb_offset: int = None):
         """
         Main method to handle the complete Instagram Reels upload process.
         

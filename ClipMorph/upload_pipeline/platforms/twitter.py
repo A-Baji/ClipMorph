@@ -293,7 +293,7 @@ class TwitterUploadPipeline(BaseUploadPipeline):
         self._update_progress("create_tweet", "Tweet created successfully")
         return tweet_id
 
-    def run(self, video_path: str, tweet_text: str = "Twitter/X Upload"):
+    def run(self, video_path: str, tweet_text: str):
         """
         Main method to handle the complete Twitter video upload process.
         

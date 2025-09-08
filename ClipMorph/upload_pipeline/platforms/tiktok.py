@@ -343,8 +343,8 @@ class TikTokUploadPipeline(BaseUploadPipeline):
 
     def run(self,
             video_path: str,
-            title: str = "TikTok Upload",
-            privacy_level: str = "SELF_ONLY"):
+            title: str,
+            privacy_level: str = "PUBLIC_TO_EVERYONE"):
         """
         Main method to handle the complete TikTok video upload process.
         

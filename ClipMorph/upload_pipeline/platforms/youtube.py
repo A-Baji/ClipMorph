@@ -363,10 +363,10 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
     def run(
             self,
             video_path: str,
-            title: str = "YouTube Shorts Upload",
-            description: str = "Uploaded via API",
-            category: str = "20",  # Gaming
+            title: str,
+            description: str = None,
             keywords: Optional[List[str]] = None,
+            category: str = "20",  # Gaming
             privacy_status: str = "public"):
         """
         Main method to handle the complete YouTube upload process.
