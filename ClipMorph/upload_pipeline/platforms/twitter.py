@@ -1,17 +1,14 @@
-from contextlib import contextmanager
 import logging
 import os
-import random
 import time
-from typing import Optional
 
-import requests
 from requests_oauthlib import OAuth1Session
 import tweepy
-from tqdm import tqdm
+
+from .base import BaseUploadPipeline
 
 
-class TwitterUploadPipeline:
+class TwitterUploadPipeline(BaseUploadPipeline):
     """
     A pipeline class for handling Twitter/X video uploads, including authentication,
     video upload management, and progress tracking.
@@ -20,7 +17,7 @@ class TwitterUploadPipeline:
     # Constants
     TWITTER_API_BASE_URL = "https://api.twitter.com"
     TWITTER_UPLOAD_BASE_URL = "https://upload.twitter.com"
-    
+
     # Video processing constants
     DEFAULT_PROCESSING_TIME_PER_MB = 8  # seconds
     MIN_PROCESSING_TIME = 10  # seconds
@@ -36,7 +33,8 @@ class TwitterUploadPipeline:
                  twitter_api_key=os.getenv("TWITTER_API_KEY"),
                  twitter_api_key_secret=os.getenv("TWITTER_API_KEY_SECRET"),
                  twitter_access_token=os.getenv("TWITTER_ACCESS_TOKEN"),
-                 twitter_access_token_secret=os.getenv("TWITTER_ACCESS_TOKEN_SECRET"),
+                 twitter_access_token_secret=os.getenv(
+                     "TWITTER_ACCESS_TOKEN_SECRET"),
                  twitter_bearer_token=os.getenv("TWITTER_BEARER_TOKEN"),
                  request_timeout=30,
                  processing_timeout=300,
@@ -67,17 +65,17 @@ class TwitterUploadPipeline:
         self.access_token = twitter_access_token
         self.access_token_secret = twitter_access_token_secret
         self.bearer_token = twitter_bearer_token
-        
+
         # Configuration
         self.request_timeout = request_timeout
         self.processing_timeout = processing_timeout
         self.max_processing_retries = max_processing_retries
-        
+
         # Runtime state
         self.api = None
         self.client = None
         self.oauth_session = None
-        
+
         # Progress bar configuration
         self.progress_allocations = {
             "authenticate": 5,  # 5%
@@ -87,107 +85,62 @@ class TwitterUploadPipeline:
             "create_tweet": 10  # 10%
         }
         self.progress_bar = None
-        
+
+        # Set platform name for base class
+        self.platform_name = "Twitter"
+
+        # Initialize base class
+        super().__init__()
+
         # Validate required credentials
-        if not all([self.api_key, self.api_key_secret, self.access_token, 
-                   self.access_token_secret, self.bearer_token]):
+        if not all([
+                self.api_key, self.api_key_secret, self.access_token,
+                self.access_token_secret, self.bearer_token
+        ]):
             raise ValueError(
                 "Missing required Twitter credentials. Provide them as parameters "
                 "or set them as environment variables: TWITTER_API_KEY, "
                 "TWITTER_API_KEY_SECRET, TWITTER_ACCESS_TOKEN, "
                 "TWITTER_ACCESS_TOKEN_SECRET, TWITTER_BEARER_TOKEN")
 
-    def _retry_request(self, func, *args, max_retries=None, **kwargs):
-        """Retry HTTP requests with exponential backoff and enhanced error messages."""
-        if max_retries is None:
-            max_retries = self.MAX_RETRIES
+        # Validate base class requirements
+        self._validate_required_attributes()
 
-        for attempt in range(max_retries):
-            try:
-                response = func(*args, **kwargs)
-                if hasattr(response, 'status_code') and not response.ok:
-                    # Check if this is a retriable HTTP status code
-                    if response.status_code in self.RETRIABLE_STATUS_CODES:
-                        # Add helpful context to the error message
-                        try:
-                            error_data = response.json()
-                            api_error = error_data.get('errors', [{}])[0].get('message', '')
-                            if api_error:
-                                response.reason = f"{response.reason}: {api_error}"
-                        except:
-                            pass
-                        
-                        if attempt == max_retries - 1:
-                            response.raise_for_status()
-                        
-                        # Use exponential backoff with jitter for retriable errors
-                        wait_time = (2**attempt) + random.uniform(0, 1)
-                        logging.warning(
-                            f"Retriable HTTP error {response.status_code} (attempt {attempt + 1}/{max_retries}), "
-                            f"retrying in {wait_time:.1f}s: {response.reason}"
-                        )
-                        time.sleep(wait_time)
-                        continue
-                    else:
-                        # Non-retriable HTTP error, fail immediately
-                        response.raise_for_status()
-                
-                return response
-            except requests.exceptions.RequestException as e:
-                if attempt == max_retries - 1:
-                    raise e
-                wait_time = (2**attempt) + random.uniform(0, 1)
-                logging.warning(
-                    f"Request failed (attempt {attempt + 1}/{max_retries}), "
-                    f"retrying in {wait_time:.1f}s: {e}"
-                )
-                time.sleep(wait_time)
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    raise e
-                wait_time = (2**attempt) + random.uniform(0, 1)
-                logging.warning(
-                    f"API call failed (attempt {attempt + 1}/{max_retries}), "
-                    f"retrying in {wait_time:.1f}s: {e}"
-                )
-                time.sleep(wait_time)
-
-    def _update_progress(self, step_name: str, description: str = ""):
-        """Update the progress bar based on step completion."""
-        if self.progress_bar and step_name in self.progress_allocations:
-            increment = self.progress_allocations[step_name]
-            if increment > 0:
-                self.progress_bar.update(increment)
-            if description:
-                self.progress_bar.set_description(f"Twitter: {description}")
+    def _enhance_error_message(self, response):
+        """Twitter-specific error message enhancement."""
+        try:
+            error_data = response.json()
+            # Twitter uses 'errors' array format
+            api_error = error_data.get('errors', [{}])[0].get('message', '')
+            if api_error:
+                response.reason = f"{response.reason}: {api_error}"
+        except:
+            pass
 
     def _authenticate(self):
         """
         Authenticates with Twitter API using provided credentials.
         Returns authenticated API and client objects.
         """
-        auth = tweepy.OAuth1UserHandler(
-            self.api_key, self.api_key_secret, 
-            self.access_token, self.access_token_secret
-        )
+        auth = tweepy.OAuth1UserHandler(self.api_key, self.api_key_secret,
+                                        self.access_token,
+                                        self.access_token_secret)
         self.api = tweepy.API(auth)
-        
+
         self.client = tweepy.Client(
             bearer_token=self.bearer_token,
             consumer_key=self.api_key,
             consumer_secret=self.api_key_secret,
             access_token=self.access_token,
-            access_token_secret=self.access_token_secret
-        )
-        
+            access_token_secret=self.access_token_secret)
+
         # Create OAuth session for status checking
         self.oauth_session = OAuth1Session(
             self.api_key,
             client_secret=self.api_key_secret,
             resource_owner_key=self.access_token,
-            resource_owner_secret=self.access_token_secret
-        )
-        
+            resource_owner_secret=self.access_token_secret)
+
         self._update_progress("authenticate", "Authenticated with Twitter")
         return self.api, self.client
 
@@ -221,13 +174,16 @@ class TwitterUploadPipeline:
         """
         Upload video media to Twitter and return media ID.
         """
+
         def upload_with_retry():
-            return self.api.media_upload(video_path, media_category="tweet_video")
-        
+            return self.api.media_upload(video_path,
+                                         media_category="tweet_video")
+
         media = self._retry_request(upload_with_retry)
         media_id = media.media_id_string
-        
-        self._update_progress("media_upload", f"Media uploaded (ID: {media_id})")
+
+        self._update_progress("media_upload",
+                              f"Media uploaded (ID: {media_id})")
         return media_id
 
     def _wait_for_processing(self, media_id: str, video_size_mb: float):
@@ -237,47 +193,45 @@ class TwitterUploadPipeline:
         processing_state = None
         retry_count = 0
         start_time = time.time()
-        
+
         # Calculate progress increment based on file size
         estimated_time = max(
             self.MIN_PROCESSING_TIME,
-            video_size_mb * self.DEFAULT_PROCESSING_TIME_PER_MB
-        )
+            video_size_mb * self.DEFAULT_PROCESSING_TIME_PER_MB)
         increment_per_update = max(
-            self.MIN_PROGRESS_INCREMENT,
-            self.MAX_PROGRESS_DURING_PROCESSING / (estimated_time / self.API_POLL_INTERVAL)
-        )
-        
+            self.MIN_PROGRESS_INCREMENT, self.MAX_PROGRESS_DURING_PROCESSING /
+            (estimated_time / self.API_POLL_INTERVAL))
+
         current_progress = self.progress_bar.n if self.progress_bar else 0
-        
-        while (processing_state != "succeeded" and 
-               retry_count < self.max_processing_retries and
-               time.time() - start_time < self.processing_timeout):
-            
+
+        while (processing_state != "succeeded"
+               and retry_count < self.max_processing_retries
+               and time.time() - start_time < self.processing_timeout):
+
             elapsed = time.time() - start_time
-            
+
             # Update progress description with elapsed time
             if self.progress_bar:
                 self.progress_bar.set_description(
-                    f"Twitter: Processing video... ({elapsed:.0f}s)"
-                )
-            
+                    f"Twitter: Processing video... ({elapsed:.0f}s)")
+
             status_url = f"{self.TWITTER_UPLOAD_BASE_URL}/1.1/media/upload.json?command=STATUS&media_id={media_id}"
-            
+
             def get_status():
                 return self.oauth_session.get(status_url)
-            
+
             try:
                 response = self._retry_request(get_status)
                 media_status = response.json()
                 processing_info = media_status.get("processing_info")
-                
+
                 if processing_info and processing_info.get("state"):
                     processing_state = processing_info["state"]
-                    
+
                     if processing_state == "succeeded":
                         if self.progress_bar:
-                            self.progress_bar.set_description("Twitter: Video processed successfully")
+                            self.progress_bar.set_description(
+                                "Twitter: Video processed successfully")
                         break
                     elif processing_state == "failed":
                         error = processing_info.get("error", {})
@@ -287,39 +241,41 @@ class TwitterUploadPipeline:
                     else:
                         # Update progress gradually during processing
                         target_progress = current_progress + min(
-                            elapsed * (increment_per_update / self.API_POLL_INTERVAL),
-                            self.MAX_PROGRESS_DURING_PROCESSING
-                        )
-                        
-                        if (self.progress_bar and 
-                            self.progress_bar.n < target_progress and 
-                            self.progress_bar.n < current_progress + self.MAX_PROGRESS_DURING_PROCESSING):
+                            elapsed *
+                            (increment_per_update / self.API_POLL_INTERVAL),
+                            self.MAX_PROGRESS_DURING_PROCESSING)
+
+                        if (self.progress_bar
+                                and self.progress_bar.n < target_progress
+                                and self.progress_bar.n < current_progress +
+                                self.MAX_PROGRESS_DURING_PROCESSING):
                             increment = min(
                                 increment_per_update,
-                                target_progress - self.progress_bar.n
-                            )
+                                target_progress - self.progress_bar.n)
                             if increment > 0:
                                 self.progress_bar.update(increment)
-                        
-                        check_after_secs = processing_info.get("check_after_secs", self.API_POLL_INTERVAL)
+
+                        check_after_secs = processing_info.get(
+                            "check_after_secs", self.API_POLL_INTERVAL)
                         time.sleep(check_after_secs)
                         retry_count += 1
                 else:
                     # No processing info available yet
                     time.sleep(self.API_POLL_INTERVAL)
                     retry_count += 1
-                    
+
             except Exception as e:
                 logging.warning(f"Error checking processing status: {e}")
                 time.sleep(self.API_POLL_INTERVAL)
                 retry_count += 1
-        
+
         if processing_state != "succeeded":
             if time.time() - start_time >= self.processing_timeout:
                 raise TimeoutError("Video processing timed out")
             else:
-                raise RuntimeError("Video processing failed or exceeded retry limit")
-        
+                raise RuntimeError(
+                    "Video processing failed or exceeded retry limit")
+
         self._update_progress("video_processing", "Video processing completed")
         return True
 
@@ -327,33 +283,15 @@ class TwitterUploadPipeline:
         """
         Create a tweet with the uploaded video.
         """
+
         def create_with_retry():
             return self.client.create_tweet(text=text, media_ids=[media_id])
-        
+
         response = self._retry_request(create_with_retry)
         tweet_id = response.data['id']
-        
+
         self._update_progress("create_tweet", "Tweet created successfully")
         return tweet_id
-
-    @contextmanager
-    def _progress_context(self, total_progress, description="Starting upload"):
-        """Context manager for progress bar to ensure proper cleanup."""
-        progress_bar = tqdm(
-            total=total_progress,
-            desc=f"Twitter: {description}",
-            unit="%",
-            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}% [{elapsed}<{remaining}]",
-            ncols=100,
-            leave=True,
-            position=0
-        )
-        self.progress_bar = progress_bar
-        try:
-            yield progress_bar
-        finally:
-            progress_bar.close()
-            self.progress_bar = None
 
     def run(self, video_path: str, tweet_text: str = "Twitter/X Upload"):
         """
@@ -389,11 +327,7 @@ class TwitterUploadPipeline:
                 tweet_id = self._create_tweet(tweet_text, media_id)
 
                 # Complete progress bar
-                remaining = total_progress - self.progress_bar.n
-                if remaining > 0:
-                    self.progress_bar.update(remaining)
-
-                self.progress_bar.set_description("Twitter: Upload successful")
+                self._complete_progress_bar(True)
 
                 if self.progress_bar:
                     self.progress_bar.write(
@@ -403,7 +337,7 @@ class TwitterUploadPipeline:
             except Exception as e:
                 if self.progress_bar:
                     self.progress_bar.write(f"[Twitter] Upload failed: {e}")
-                    self.progress_bar.set_description("Twitter: Upload failed")
+                self._complete_progress_bar(False)
                 raise
 
         return tweet_id

@@ -1,7 +1,5 @@
-from contextlib import contextmanager
 import logging
 import os
-import random
 import time
 import urllib.parse
 import webbrowser
@@ -9,10 +7,11 @@ import webbrowser
 from google.cloud import storage
 from google.oauth2 import service_account
 import requests
-from tqdm import tqdm
+
+from .base import BaseUploadPipeline
 
 
-class InstagramUploadPipeline:
+class InstagramUploadPipeline(BaseUploadPipeline):
     """
     A pipeline class for handling Instagram Reels uploads, including authentication,
     temporary video hosting, and upload management.
@@ -129,6 +128,12 @@ class InstagramUploadPipeline:
         }
         self.progress_bar = None
 
+        # Set platform name for base class
+        self.platform_name = "Instagram"
+
+        # Initialize base class
+        super().__init__()
+
         # Validate required credentials
         if not all([self.app_id, self.app_secret, self.page_id]):
             raise ValueError(
@@ -147,61 +152,18 @@ class InstagramUploadPipeline:
                 "GCP_PRIVATE_KEY, GCP_CLIENT_EMAIL, GCP_CLIENT_ID, GCS_BUCKET_NAME"
             )
 
-    def _retry_request(self, func, *args, max_retries=None, **kwargs):
-        """Retry HTTP requests with exponential backoff and enhanced error messages."""
-        if max_retries is None:
-            max_retries = self.MAX_RETRIES
+        # Validate base class requirements
+        self._validate_required_attributes()
 
-        for attempt in range(max_retries):
-            try:
-                response = func(*args, **kwargs)
-                if not response.ok:
-                    # Check if this is a retriable HTTP status code
-                    if response.status_code in self.RETRIABLE_STATUS_CODES:
-                        # Add helpful context to the error message
-                        try:
-                            error_data = response.json()
-                            api_error = error_data.get('error', {}).get('message', '')
-                            if api_error:
-                                response.reason = f"{response.reason}: {api_error}"
-                        except:
-                            pass
-                        
-                        if attempt == max_retries - 1:
-                            response.raise_for_status()
-                        
-                        # Use exponential backoff with jitter for retriable errors
-                        wait_time = (2**attempt) + random.uniform(0, 1)
-                        logging.warning(
-                            f"Retriable HTTP error {response.status_code} (attempt {attempt + 1}/{max_retries}), "
-                            f"retrying in {wait_time:.1f}s: {response.reason}"
-                        )
-                        time.sleep(wait_time)
-                        continue
-                    else:
-                        # Non-retriable HTTP error, fail immediately
-                        response.raise_for_status()
-                
-                return response
-            except requests.exceptions.RequestException as e:
-                if attempt == max_retries - 1:
-                    raise e
-                wait_time = (2**attempt) + random.uniform(0, 1)
-                logging.warning(
-                    f"Request failed (attempt {attempt + 1}/{max_retries}), "
-                    f"retrying in {wait_time:.1f}s: {e}"
-                )
-                time.sleep(wait_time)
-
-    def _update_progress(self, step_name: str, description: str = ""):
-        """Update the progress bar based on step completion."""
-        if self.progress_bar and step_name in self.progress_allocations:
-            increment = self.progress_allocations[step_name]
-            if increment > 0:
-                self.progress_bar.update(increment)
-            if description:
-                self.progress_bar.set_description(f"Instagram: {description}")
-            # Don't call refresh() - let tqdm handle it automatically
+    def _enhance_error_message(self, response):
+        """Instagram-specific error message enhancement."""
+        try:
+            error_data = response.json()
+            api_error = error_data.get('error', {}).get('message', '')
+            if api_error:
+                response.reason = f"{response.reason}: {api_error}"
+        except:
+            pass
 
     def _authenticate_google(self):
         """
@@ -449,26 +411,11 @@ class InstagramUploadPipeline:
 
         raise TimeoutError("Timed out waiting for video processing.")
 
-    @contextmanager
-    def _progress_context(self, total_progress, description="Starting upload"):
-        """Context manager for progress bar to ensure proper cleanup."""
-        progress_bar = tqdm(
-            total=total_progress,
-            desc=f"Instagram: {description}",
-            unit="%",
-            bar_format=
-            "{l_bar}{bar}| {n_fmt}/{total_fmt}% [{elapsed}<{remaining}]",
-            ncols=100,
-            leave=True,
-            position=0)
-        self.progress_bar = progress_bar
-        try:
-            yield progress_bar
-        finally:
-            progress_bar.close()
-            self.progress_bar = None
-
-    def run(self, video_path, caption="Instagram Reels Upload", share_to_feed=True, thumb_offset=None):
+    def run(self,
+            video_path,
+            caption="Instagram Reels Upload",
+            share_to_feed=True,
+            thumb_offset=None):
         """
         Main method to handle the complete Instagram Reels upload process.
         
@@ -521,7 +468,8 @@ class InstagramUploadPipeline:
                     self._get_ig_user_id()
 
                 # Create and process the reel
-                creation_id = self._create_reel_container(video_url, caption, share_to_feed, thumb_offset)
+                creation_id = self._create_reel_container(
+                    video_url, caption, share_to_feed, thumb_offset)
 
                 try:
                     if self._wait_for_processing(creation_id,
@@ -547,23 +495,12 @@ class InstagramUploadPipeline:
                     self._delete_video(video_path)
 
                 # Handle progress bar completion based on success/failure
-                if upload_success:
-                    # Complete to 100% only on success
-                    remaining = total_progress - self.progress_bar.n
-                    if remaining > 0:
-                        self.progress_bar.update(remaining)
-                    self.progress_bar.set_description(
-                        "Instagram: Upload complete")
-                else:
-                    # Show error state without completing to 100%
-                    self.progress_bar.set_description(
-                        "Instagram: Upload failed")
+                self._complete_progress_bar(upload_success)
 
             except Exception as e:
                 if self.progress_bar:
                     self.progress_bar.write(f"[Instagram] Critical error: {e}")
-                    self.progress_bar.set_description(
-                        "Instagram: Upload failed")
+                self._complete_progress_bar(False)
                 raise
 
         return media_id

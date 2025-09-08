@@ -1,4 +1,3 @@
-from contextlib import contextmanager
 import logging
 import os
 import random
@@ -11,10 +10,11 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
-from tqdm import tqdm
+
+from .base import BaseUploadPipeline
 
 
-class YouTubeUploadPipeline:
+class YouTubeUploadPipeline(BaseUploadPipeline):
     """
     A pipeline class for handling YouTube Shorts uploads, including authentication,
     video upload management, and progress tracking.
@@ -25,7 +25,7 @@ class YouTubeUploadPipeline:
     GOOGLE_TOKEN_URI = "https://oauth2.googleapis.com/token"
     YOUTUBE_UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
 
-    # Video processing constants  
+    # Video processing constants
     DEFAULT_PROCESSING_TIME_PER_MB = 15  # seconds
     MIN_PROCESSING_TIME = 20  # seconds
     MAX_PROGRESS_DURING_PROCESSING = 85  # don't complete progress bar during processing
@@ -93,6 +93,12 @@ class YouTubeUploadPipeline:
         }
         self.progress_bar = None
 
+        # Set platform name for base class
+        self.platform_name = "YouTube"
+
+        # Initialize base class
+        super().__init__()
+
         # Validate required credentials
         if not all([self.client_id, self.client_secret]):
             raise ValueError(
@@ -100,42 +106,13 @@ class YouTubeUploadPipeline:
                 "or set them as environment variables: GOOGLE_CLIENT_ID, "
                 "GOOGLE_CLIENT_SECRET")
 
-    def _retry_request(self, func, *args, max_retries=None, **kwargs):
-        """Retry HTTP requests with exponential backoff and enhanced error messages."""
-        if max_retries is None:
-            max_retries = self.MAX_RETRIES
+        # Validate base class requirements
+        self._validate_required_attributes()
 
-        for attempt in range(max_retries):
-            try:
-                return func(*args, **kwargs)
-            except HttpError as e:
-                if e.resp.status in self.RETRIABLE_STATUS_CODES:
-                    if attempt == max_retries - 1:
-                        raise e
-                    wait_time = (2**attempt) + random.uniform(0, 1)
-                    logging.warning(
-                        f"Retriable HTTP error {e.resp.status} (attempt {attempt + 1}/{max_retries}), "
-                        f"retrying in {wait_time:.1f}s: {e}")
-                    time.sleep(wait_time)
-                else:
-                    raise e
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    raise e
-                wait_time = (2**attempt) + random.uniform(0, 1)
-                logging.warning(
-                    f"Request failed (attempt {attempt + 1}/{max_retries}), "
-                    f"retrying in {wait_time:.1f}s: {e}")
-                time.sleep(wait_time)
-
-    def _update_progress(self, step_name: str, description: str = ""):
-        """Update the progress bar based on step completion."""
-        if self.progress_bar and step_name in self.progress_allocations:
-            increment = self.progress_allocations[step_name]
-            if increment > 0:
-                self.progress_bar.update(increment)
-            if description:
-                self.progress_bar.set_description(f"YouTube: {description}")
+    def _enhance_error_message(self, response):
+        """YouTube-specific error message enhancement for HttpError."""
+        # YouTube HttpError objects have different structure
+        # The base class will handle this automatically
 
     def _authenticate(self):
         """
@@ -354,25 +331,6 @@ class YouTubeUploadPipeline:
                 time.sleep(sleep_seconds)
                 error = None
 
-    @contextmanager
-    def _progress_context(self, total_progress, description="Starting upload"):
-        """Context manager for progress bar to ensure proper cleanup."""
-        progress_bar = tqdm(
-            total=total_progress,
-            desc=f"YouTube: {description}",
-            unit="%",
-            bar_format=
-            "{l_bar}{bar}| {n_fmt}/{total_fmt}% [{elapsed}<{remaining}]",
-            ncols=100,
-            leave=True,
-            position=0)
-        self.progress_bar = progress_bar
-        try:
-            yield progress_bar
-        finally:
-            progress_bar.close()
-            self.progress_bar = None
-
     def generate_refresh_token(self):
         """
         Generates a refresh token through OAuth2 flow.
@@ -467,11 +425,7 @@ class YouTubeUploadPipeline:
                 self._update_progress("finalize", "Upload complete")
 
                 # Complete progress bar
-                remaining = total_progress - self.progress_bar.n
-                if remaining > 0:
-                    self.progress_bar.update(remaining)
-
-                self.progress_bar.set_description("YouTube: Upload successful")
+                self._complete_progress_bar(True)
 
                 if self.progress_bar:
                     self.progress_bar.write(
@@ -480,7 +434,7 @@ class YouTubeUploadPipeline:
             except Exception as e:
                 if self.progress_bar:
                     self.progress_bar.write(f"[YouTube] Upload failed: {e}")
-                    self.progress_bar.set_description("YouTube: Upload failed")
+                self._complete_progress_bar(False)
                 raise
 
         return video_id
