@@ -14,10 +14,12 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logging.getLogger("speechbrain").setLevel(logging.ERROR)
 logging.getLogger("pyannote").setLevel(logging.ERROR)
 logging.getLogger("torch").setLevel(logging.ERROR)
-logging.getLogger("speechbrain.utils.torch_audio_backend").setLevel(logging.ERROR)
+logging.getLogger("speechbrain.utils.torch_audio_backend").setLevel(
+    logging.ERROR)
 logging.getLogger("speechbrain.utils.checkpoints").setLevel(logging.ERROR)
 logging.getLogger("speechbrain.core").setLevel(logging.ERROR)
-logging.getLogger("speechbrain.utils.parameter_transfer").setLevel(logging.ERROR)
+logging.getLogger("speechbrain.utils.parameter_transfer").setLevel(
+    logging.ERROR)
 
 # Disable debug messages from speechbrain entirely
 logging.getLogger("speechbrain").propagate = False
@@ -65,7 +67,9 @@ def main():
     if no_conversion:
         # Use input video directly
         conversion_output = conversion_args['input_path']
-        print(f"Skipping conversion, using input video directly: {conversion_output}")
+        print(
+            f"Skipping conversion, using input video directly: {conversion_output}"
+        )
     else:
         # Lazy import heavy dependencies only when needed
         from clipmorph.conversion_pipeline import ConversionPipeline
@@ -83,7 +87,7 @@ def main():
         return
 
     # Confirm upload
-    if not no_confirm:
+    if not no_confirm and not no_conversion:
         platform_list = ", ".join(enabled_platforms)
         confirm = input(
             f"\nUpload to {platform_list}? (y/n): ").strip().lower()
@@ -140,7 +144,9 @@ def main():
         except Exception as e:
             logging.error(f"Error deleting file {conversion_output}: {e}")
     elif clean and no_conversion:
-        print("Cleanup skipped: cannot delete original input file when using --no-conversion")
+        print(
+            "Cleanup skipped: cannot delete original input file when using --no-conversion"
+        )
 
 
 if __name__ == "__main__":

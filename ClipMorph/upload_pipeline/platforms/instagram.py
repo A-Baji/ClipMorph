@@ -373,7 +373,8 @@ class InstagramUploadPipeline(BaseUploadPipeline):
             # Only fetch API status every few seconds
             if elapsed - last_api_call >= self.API_POLL_INTERVAL:
                 resp = self._retry_request(requests.get, url, timeout=10)
-                status = resp.json().get('status_code')
+                media_status = resp.json()
+                status = media_status.get('status_code')
                 last_api_call = elapsed
 
             # Progressive updates based on video size and elapsed time
@@ -400,8 +401,32 @@ class InstagramUploadPipeline(BaseUploadPipeline):
                         "[Instagram] Publishing reel...")
                 return True
             elif status == 'ERROR':
-                logging.error(f"Video processing failed: {resp.json()}")
-                return False
+                # Try to get more detailed error info from various possible locations
+                error_info = media_status.get('error', {})
+                error_msg = media_status.get('message', '')
+                error_type = media_status.get('error_type', '')
+                
+                if error_info or error_msg or error_type:
+                    # We have some error details
+                    details = []
+                    if error_msg:
+                        details.append(error_msg)
+                    if error_type:
+                        details.append(f"Type: {error_type}")
+                    if error_info and isinstance(error_info, dict):
+                        if 'message' in error_info:
+                            details.append(error_info['message'])
+                        if 'code' in error_info:
+                            details.append(f"Code: {error_info['code']}")
+                    
+                    raise RuntimeError(f"Instagram video processing failed: {' | '.join(details)}")
+                else:
+                    # No specific error details - provide common causes
+                    media_id = media_status.get('id', 'unknown')
+                    raise RuntimeError(
+                        f"Instagram video processing failed (ID: {media_id}). "
+                        "Common causes: unsupported video format, file too large, invalid aspect ratio, or temporary Instagram API issue."
+                    )
 
             time.sleep(1)
 
@@ -434,6 +459,7 @@ class InstagramUploadPipeline(BaseUploadPipeline):
         total_progress = sum(self.progress_allocations.values())
         upload_success = False
         media_id = None
+        failure_reason = None
 
         with self._progress_context(total_progress, "Starting upload"):
             try:
@@ -468,22 +494,13 @@ class InstagramUploadPipeline(BaseUploadPipeline):
                     video_url, caption, share_to_feed, thumb_offset)
 
                 try:
-                    if self._wait_for_processing(creation_id,
-                                                 video_size_mb=video_size_mb):
-                        media_id = self._publish_media(creation_id)
-                        upload_success = True
-                    else:
-                        self.progress_bar.write(
-                            "[Instagram] Video processing failed or returned error status."
-                        )
-                except TimeoutError as e:
-                    self.progress_bar.write(
-                        f"[Instagram] Timeout while waiting for video processing: {e}"
-                    )
+                    self._wait_for_processing(creation_id, video_size_mb=video_size_mb)
+                    media_id = self._publish_media(creation_id)
+                    upload_success = True
+                except (TimeoutError, RuntimeError) as e:
+                    failure_reason = str(e)
                 except Exception as e:
-                    self.progress_bar.write(
-                        f"[Instagram] Unexpected error during Instagram upload: {e}"
-                    )
+                    failure_reason = f"Unexpected error during processing: {str(e)}"
                 finally:
                     self._delete_video(video_path)
 
@@ -492,6 +509,8 @@ class InstagramUploadPipeline(BaseUploadPipeline):
                     self._complete_progress_bar(True)
                 else:
                     self._complete_progress_bar(False)
+                    error_msg = failure_reason or "Instagram upload failed during video processing or publishing"
+                    raise RuntimeError(error_msg)
 
             except Exception as e:
                 self._complete_progress_bar(False)
