@@ -137,19 +137,17 @@ def separate_args_by_category(args, parser):
         if 'Conversion' in group_title:
             # Add all arguments from conversion group
             for action in group._group_actions:
-                for option_string in action.option_strings:
-                    # Convert --option-name to option_name
-                    arg_name = option_string.lstrip('-').replace('-', '_')
-                    conversion_args.add(arg_name)
+                # Use dest attribute which is the actual argument name stored in args
+                if action.dest and action.dest != 'help':
+                    conversion_args.add(action.dest)
         elif group_title in [
                 'Upload Control', 'Content Options', 'Platform Overrides'
         ]:
             # Add all arguments from upload-related groups
             for action in group._group_actions:
-                for option_string in action.option_strings:
-                    # Convert --option-name to option_name
-                    arg_name = option_string.lstrip('-').replace('-', '_')
-                    upload_args.add(arg_name)
+                # Use dest attribute which is the actual argument name stored in args
+                if action.dest and action.dest != 'help':
+                    upload_args.add(action.dest)
 
     # Special handling for positional arguments and main control args
     main_control_args = {

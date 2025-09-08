@@ -283,10 +283,7 @@ class UploadPipeline:
                     result = future.result()
                     results[platform_name] = result
 
-                    if result['success']:
-                        logging.info(
-                            f"{platform_name} upload completed successfully")
-                    else:
+                    if not result['success']:
                         logging.error(
                             f"{platform_name} upload failed: {result['error']}"
                         )

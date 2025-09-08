@@ -494,8 +494,6 @@ class InstagramUploadPipeline(BaseUploadPipeline):
                     self._complete_progress_bar(False)
 
             except Exception as e:
-                if self.progress_bar:
-                    self.progress_bar.write(f"[Instagram] Critical error: {e}")
                 self._complete_progress_bar(False)
                 raise
 

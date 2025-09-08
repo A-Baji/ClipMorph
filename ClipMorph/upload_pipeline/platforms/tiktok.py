@@ -386,8 +386,6 @@ class TikTokUploadPipeline(BaseUploadPipeline):
                 self._complete_progress_bar(True)
 
             except Exception as e:
-                if self.progress_bar:
-                    self.progress_bar.write(f"[TikTok] Upload failed: {e}")
                 self._complete_progress_bar(False)
                 raise
 
