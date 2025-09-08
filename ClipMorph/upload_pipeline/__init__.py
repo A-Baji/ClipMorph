@@ -36,45 +36,45 @@ class UploadPipeline:
     """
 
     def __init__(self,
-                 youtube_enabled: bool = True,
-                 instagram_enabled: bool = True,
-                 tiktok_enabled: bool = True,
-                 twitter_enabled: bool = True,
+                 youtube: bool = False,
+                 instagram: bool = False,
+                 tiktok: bool = False,
+                 twitter: bool = False,
                  max_workers: int = 4):
         """
         Initialize the upload pipeline with platform configurations.
         
         Args:
-            youtube_enabled: Whether to upload to YouTube
-            instagram_enabled: Whether to upload to Instagram  
-            tiktok_enabled: Whether to upload to TikTok
-            twitter_enabled: Whether to upload to Twitter
+            youtube: Whether to upload to YouTube
+            instagram: Whether to upload to Instagram  
+            tiktok: Whether to upload to TikTok
+            twitter: Whether to upload to Twitter
             max_workers: Maximum number of parallel uploads
         """
         self.max_workers = max_workers
         self.enabled_platforms = {}
 
         # Initialize enabled platforms
-        if youtube_enabled:
+        if youtube:
             try:
                 self.enabled_platforms['YouTube'] = YouTubeUploadPipeline()
             except Exception as e:
                 logging.warning(f"Failed to initialize YouTube pipeline: {e}")
 
-        if instagram_enabled:
+        if instagram:
             try:
                 self.enabled_platforms['Instagram'] = InstagramUploadPipeline()
             except Exception as e:
                 logging.warning(
                     f"Failed to initialize Instagram pipeline: {e}")
 
-        if tiktok_enabled:
+        if tiktok:
             try:
                 self.enabled_platforms['TikTok'] = TikTokUploadPipeline()
             except Exception as e:
                 logging.warning(f"Failed to initialize TikTok pipeline: {e}")
 
-        if twitter_enabled:
+        if twitter:
             try:
                 self.enabled_platforms['Twitter'] = TwitterUploadPipeline()
             except Exception as e:
@@ -95,12 +95,13 @@ class UploadPipeline:
             Truncated combined content
         """
         # Convert tags to hashtags
-        hashtags = ' '.join([
-            f"#{tag.strip('#').replace(' ', '')}" for tag in tags
-            if tag.strip()
-        ])
+        hashtags = ''
+        if tags:
+            hashtags = ' '.join([
+                f"#{tag.strip('#').replace(' ', '')}" for tag in tags
+                if tag.strip()
+            ])
 
-        # Always keep the title
         if len(title) >= max_chars:
             return title[:max_chars].strip()
 
@@ -134,7 +135,8 @@ class UploadPipeline:
             else:
                 return title
 
-    def _map_common_parameters(self, platform_name: str, **kwargs) -> Dict:
+    def _map_common_parameters(self, platform_name: str, title: str,
+                               **kwargs) -> Dict:
         """
         Map common parameters to platform-specific parameter names.
         
@@ -145,17 +147,15 @@ class UploadPipeline:
         Returns:
             Dictionary with platform-specific parameters
         """
-        # Extract common parameters
-        title = kwargs.get('title', 'Upload')
-        description = kwargs.get('description', '')
-        tags = kwargs.get('tags', kwargs.get('keywords',
-                                             []))  # Support both names
+        # Extract common parameters with proper defaults
+        description = kwargs.get('description', '') or ''
+        tags = kwargs.get('tags', kwargs.get('keywords', [])) or []
 
         # Map to platform-specific parameters
         if platform_name == 'YouTube':
             # YouTube: 100 char title, 5000 char description, 500 char keywords
-            yt_title = title[:100] if len(title) > 100 else title
-            yt_description = description[:5000] if len(
+            yt_title = title[:100] if title and len(title) > 100 else title
+            yt_description = description[:5000] if description and len(
                 description) > 5000 else (description or 'Uploaded via API')
             yt_keywords = tags[:500] if isinstance(
                 tags, str) else tags  # Keep as list for YouTube
@@ -196,7 +196,7 @@ class UploadPipeline:
             return {}
 
     def _upload_single_platform(self, platform_name: str, pipeline,
-                                video_path: str, **kwargs) -> Dict:
+                                video_path: str, title: str, **kwargs) -> Dict:
         """
         Upload to a single platform and return results.
         
@@ -212,7 +212,7 @@ class UploadPipeline:
         try:
             # Map common parameters to platform-specific ones
             platform_params = self._map_common_parameters(
-                platform_name, **kwargs)
+                platform_name, title, **kwargs)
 
             # Add platform-specific defaults and overrides
             if platform_name == 'YouTube':
@@ -247,7 +247,8 @@ class UploadPipeline:
                 'error': str(e)
             }
 
-    def run(self, video_path: str, **platform_kwargs) -> Dict[str, Dict]:
+    def run(self, video_path: str, title: str,
+            **platform_kwargs) -> Dict[str, Dict]:
         """
         Upload video to all enabled platforms in parallel.
         
@@ -270,7 +271,7 @@ class UploadPipeline:
                 self.max_workers, len(self.enabled_platforms))) as executor:
             # Submit all upload tasks
             future_to_platform = {
-                executor.submit(self._upload_single_platform, platform_name, pipeline, video_path, **platform_kwargs):
+                executor.submit(self._upload_single_platform, platform_name, pipeline, video_path, title, **platform_kwargs):
                 platform_name
                 for platform_name, pipeline in self.enabled_platforms.items()
             }
