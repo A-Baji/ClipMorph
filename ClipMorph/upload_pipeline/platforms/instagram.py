@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 import logging
 import os
+import random
 import time
 import urllib.parse
 import webbrowser
@@ -30,6 +31,10 @@ class InstagramUploadPipeline:
     MAX_PROGRESS_DURING_PROCESSING = 80  # don't complete progress bar during processing
     API_POLL_INTERVAL = 5  # seconds between status checks
     MIN_PROGRESS_INCREMENT = 1.5
+
+    # Retry configuration
+    MAX_RETRIES = 3
+    RETRIABLE_STATUS_CODES = [500, 502, 503, 504]
 
     def __init__(self,
                  facebook_app_id=os.getenv("FACEBOOK_APP_ID"),
@@ -142,29 +147,49 @@ class InstagramUploadPipeline:
                 "GCP_PRIVATE_KEY, GCP_CLIENT_EMAIL, GCP_CLIENT_ID, GCS_BUCKET_NAME"
             )
 
-    def _retry_request(self, func, *args, max_retries=3, **kwargs):
+    def _retry_request(self, func, *args, max_retries=None, **kwargs):
         """Retry HTTP requests with exponential backoff and enhanced error messages."""
+        if max_retries is None:
+            max_retries = self.MAX_RETRIES
+
         for attempt in range(max_retries):
             try:
                 response = func(*args, **kwargs)
                 if not response.ok:
-                    # Add helpful context to the error message
-                    try:
-                        error_data = response.json()
-                        api_error = error_data.get('error',
-                                                   {}).get('message', '')
-                        if api_error:
-                            response.reason = f"{response.reason}: {api_error}"
-                    except:
-                        pass
-                response.raise_for_status()
+                    # Check if this is a retriable HTTP status code
+                    if response.status_code in self.RETRIABLE_STATUS_CODES:
+                        # Add helpful context to the error message
+                        try:
+                            error_data = response.json()
+                            api_error = error_data.get('error', {}).get('message', '')
+                            if api_error:
+                                response.reason = f"{response.reason}: {api_error}"
+                        except:
+                            pass
+                        
+                        if attempt == max_retries - 1:
+                            response.raise_for_status()
+                        
+                        # Use exponential backoff with jitter for retriable errors
+                        wait_time = (2**attempt) + random.uniform(0, 1)
+                        logging.warning(
+                            f"Retriable HTTP error {response.status_code} (attempt {attempt + 1}/{max_retries}), "
+                            f"retrying in {wait_time:.1f}s: {response.reason}"
+                        )
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        # Non-retriable HTTP error, fail immediately
+                        response.raise_for_status()
+                
                 return response
             except requests.exceptions.RequestException as e:
                 if attempt == max_retries - 1:
                     raise e
-                wait_time = 2**attempt  # Exponential backoff: 1s, 2s, 4s
+                wait_time = (2**attempt) + random.uniform(0, 1)
                 logging.warning(
-                    f"Request failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {e}"
+                    f"Request failed (attempt {attempt + 1}/{max_retries}), "
+                    f"retrying in {wait_time:.1f}s: {e}"
                 )
                 time.sleep(wait_time)
 
@@ -210,7 +235,7 @@ class InstagramUploadPipeline:
         self._update_progress("google_auth", "Authenticated with Google Cloud")
         return self.google_creds
 
-    def _get_user_access_token(self):
+    def get_user_access_token(self):
         """
         Guides user through browser-based OAuth to obtain a user access token.
         """
@@ -248,7 +273,7 @@ class InstagramUploadPipeline:
                 "grant_type": "fb_exchange_token",
                 "client_id": self.app_id,
                 "client_secret": self.app_secret,
-                "fb_exchange_token": self._get_user_access_token()
+                "fb_exchange_token": self.get_user_access_token()
             },
             timeout=self.request_timeout)
         logging.info(f"Access token: {response.json()['access_token']}")
@@ -443,9 +468,20 @@ class InstagramUploadPipeline:
             progress_bar.close()
             self.progress_bar = None
 
-    def run(self, video_path, caption="Instagram Reels Upload"):
+    def run(self, video_path, caption="Instagram Reels Upload", share_to_feed=True, thumb_offset=None):
         """
         Main method to handle the complete Instagram Reels upload process.
+        
+        Args:
+            video_path (str): Path to the video file to upload
+            caption (str): Caption for the Instagram Reel
+            share_to_feed (bool, optional): Whether to share the reel to the main feed. 
+                Defaults to True.
+            thumb_offset (int, optional): Thumbnail offset in milliseconds.
+                Defaults to None (auto-generated).
+                
+        Returns:
+            str: Media ID of the uploaded reel
         """
         # Get video file size for progress estimation
         if not os.path.exists(video_path):
@@ -454,6 +490,7 @@ class InstagramUploadPipeline:
 
         total_progress = sum(self.progress_allocations.values())
         upload_success = False
+        media_id = None
 
         with self._progress_context(total_progress, "Starting upload"):
             try:
@@ -484,7 +521,7 @@ class InstagramUploadPipeline:
                     self._get_ig_user_id()
 
                 # Create and process the reel
-                creation_id = self._create_reel_container(video_url, caption)
+                creation_id = self._create_reel_container(video_url, caption, share_to_feed, thumb_offset)
 
                 try:
                     if self._wait_for_processing(creation_id,
@@ -528,3 +565,5 @@ class InstagramUploadPipeline:
                     self.progress_bar.set_description(
                         "Instagram: Upload failed")
                 raise
+
+        return media_id
