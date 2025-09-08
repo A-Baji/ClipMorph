@@ -77,9 +77,8 @@ class TikTokUploadPipeline(BaseUploadPipeline):
         self.progress_allocations = {
             "authenticate": 5,  # 5%
             "validate_file": 5,  # 5%
-            "initialize_upload": 10,  # 10%
-            "video_upload": 70,  # 70% - spread over time
-            "finalize": 10  # 10%
+            "initialize_upload": 15,  # 15%
+            "video_upload": 75,  # 75% - spread over time
         }
         self.progress_bar = None
 
@@ -386,9 +385,6 @@ class TikTokUploadPipeline(BaseUploadPipeline):
 
                 # Upload video file
                 self._upload_video_file(video_path, upload_url, file_size)
-
-                # Finalize
-                self._update_progress("finalize", "Upload complete")
 
                 # Complete progress bar
                 self._complete_progress_bar(True)

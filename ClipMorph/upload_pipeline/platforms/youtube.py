@@ -92,9 +92,8 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
         self.progress_allocations = {
             "authenticate": 5,  # 5%
             "validate_file": 5,  # 5%
-            "prepare_upload": 10,  # 10%
-            "video_upload": 70,  # 70% - spread over time
-            "finalize": 10  # 10%
+            "prepare_upload": 15,  # 15%
+            "video_upload": 75,  # 75% - spread over time
         }
         self.progress_bar = None
 
@@ -414,9 +413,6 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
                 # Execute upload
                 video_id = self._execute_resumable_upload(
                     request, video_size_mb)
-
-                # Finalize
-                self._update_progress("finalize", "Upload complete")
 
                 # Complete progress bar
                 self._complete_progress_bar(True)
