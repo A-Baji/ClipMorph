@@ -282,20 +282,11 @@ class TikTokUploadPipeline(BaseUploadPipeline):
                 'Content-Range': f'bytes 0-{video_size-1}/{video_size}'
             }
 
-            # Simulate progress during upload
+            # Update description during upload
             if self.progress_bar:
                 elapsed = time.time() - start_time
                 self.progress_bar.set_description(
-                    f"TikTok: Uploading video... ({elapsed:.0f}s)")
-
-                # Update progress gradually
-                target_progress = current_progress + (
-                    self.MAX_PROGRESS_DURING_PROCESSING * 0.8)
-                if self.progress_bar.n < target_progress:
-                    increment = min(target_progress - self.progress_bar.n,
-                                    increment_per_update)
-                    if increment > 0:
-                        self.progress_bar.update(increment)
+                    f"[TikTok] Uploading video... ({elapsed:.0f}s)")
 
             response = self._retry_request(requests.put,
                                            upload_url,
@@ -401,11 +392,6 @@ class TikTokUploadPipeline(BaseUploadPipeline):
 
                 # Complete progress bar
                 self._complete_progress_bar(True)
-
-                if self.progress_bar:
-                    self.progress_bar.write(
-                        f"[TikTok] Successfully uploaded video with publish ID: {publish_id}"
-                    )
 
             except Exception as e:
                 if self.progress_bar:

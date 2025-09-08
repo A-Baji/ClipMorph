@@ -13,6 +13,11 @@ from googleapiclient.http import MediaFileUpload
 
 from .base import BaseUploadPipeline
 
+# Suppress Google library verbose logging
+logging.getLogger('googleapiclient.discovery').setLevel(logging.WARNING)
+logging.getLogger('googleapiclient.discovery_cache').setLevel(logging.WARNING)
+logging.getLogger('google.auth').setLevel(logging.WARNING)
+
 
 class YouTubeUploadPipeline(BaseUploadPipeline):
     """
@@ -120,17 +125,16 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
         Automatically generates a new refresh token if missing or invalid.
         Returns a valid credentials object.
         """
-        # If no refresh token, generate one automatically
+        # If no refresh token, check environment again and generate if needed
+        if not self.refresh_token:
+            # Check environment variable again in case it was set after initialization
+            self.refresh_token = os.getenv("GOOGLE_REFRESH_TOKEN")
+
         if not self.refresh_token:
             if self.progress_bar:
                 self.progress_bar.write(
                     "[YouTube] No refresh token found. Starting OAuth flow...")
             self.refresh_token = self.generate_refresh_token()
-            if self.progress_bar:
-                self.progress_bar.write(
-                    "\nIMPORTANT: To skip the manual OAuth process in future runs, "
-                    "set this refresh token in your environment:\n"
-                    f"GOOGLE_REFRESH_TOKEN={self.refresh_token}\n")
 
         self.credentials = Credentials(None,
                                        refresh_token=self.refresh_token,
@@ -140,7 +144,7 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
                                        scopes=[self.YOUTUBE_UPLOAD_SCOPE])
 
         if not self.credentials.valid:
-            if self.credentials.expired and self.credentials.refresh_token:
+            if self.credentials.refresh_token:
                 try:
                     self.credentials.refresh(Request())
                 except Exception as e:
@@ -150,11 +154,6 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
                             f"[YouTube] Refresh token expired or invalid. Generating new token... ({e})"
                         )
                     self.refresh_token = self.generate_refresh_token()
-                    if self.progress_bar:
-                        self.progress_bar.write(
-                            "\nIMPORTANT: To skip the manual OAuth process in future runs, "
-                            "set this refresh token in your environment:\n"
-                            f"GOOGLE_REFRESH_TOKEN={self.refresh_token}\n")
 
                     # Create new credentials with the fresh token
                     self.credentials = Credentials(
@@ -172,11 +171,6 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
                         "[YouTube] Invalid credentials. Generating new refresh token..."
                     )
                 self.refresh_token = self.generate_refresh_token()
-                if self.progress_bar:
-                    self.progress_bar.write(
-                        "\nIMPORTANT: To skip the manual OAuth process in future runs, "
-                        "set this refresh token in your environment:\n"
-                        f"GOOGLE_REFRESH_TOKEN={self.refresh_token}\n")
 
                 # Create new credentials with the fresh token
                 self.credentials = Credentials(
@@ -281,7 +275,7 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
                 # Update progress description with elapsed time
                 if self.progress_bar:
                     self.progress_bar.set_description(
-                        f"YouTube: Uploading video... ({elapsed:.0f}s)")
+                        f"[YouTube] Uploading video... ({elapsed:.0f}s)")
 
                 status, response = request.next_chunk()
 
@@ -299,9 +293,6 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
 
                 if response is not None:
                     if 'id' in response:
-                        logging.info(
-                            f"[YouTube] Video uploaded successfully with ID: {response['id']}"
-                        )
                         return response['id']
                     else:
                         raise RuntimeError(
@@ -361,9 +352,12 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
 
         creds = flow.run_local_server(port=0, prompt='select_account')
 
-        print("\nIMPORTANT: To skip the manual OAuth process in future runs, "
-              "set this refresh token in your environment:")
-        print(f"GOOGLE_REFRESH_TOKEN={creds.refresh_token}")
+        # Show the setup message whenever a new token is generated
+        if self.progress_bar:
+            self.progress_bar.write(
+                "\nIMPORTANT: To skip the manual OAuth process in future runs, "
+                "set this refresh token in your environment:\n"
+                f"GOOGLE_REFRESH_TOKEN={creds.refresh_token}\n")
 
         return creds.refresh_token
 
@@ -426,10 +420,6 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
 
                 # Complete progress bar
                 self._complete_progress_bar(True)
-
-                if self.progress_bar:
-                    self.progress_bar.write(
-                        f"[YouTube] Successfully uploaded video: {video_id}")
 
             except Exception as e:
                 if self.progress_bar:

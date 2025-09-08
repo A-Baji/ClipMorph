@@ -1,4 +1,5 @@
-from abc import ABC, abstractmethod
+from abc import ABC
+from abc import abstractmethod
 from contextlib import contextmanager
 import logging
 import random
@@ -14,11 +15,11 @@ class BaseUploadPipeline(ABC):
     Abstract base class for upload pipelines providing common functionality
     for retry logic, progress tracking, and progress bar management.
     """
-    
+
     # Default retry configuration (can be overridden by subclasses)
     MAX_RETRIES = 3
     RETRIABLE_STATUS_CODES = [500, 502, 503, 504]
-    
+
     def __init__(self, **kwargs):
         """Initialize base pipeline with common attributes."""
         # Progress bar configuration (must be set by subclasses)
@@ -26,12 +27,16 @@ class BaseUploadPipeline(ABC):
             self.progress_allocations = {}
         if not hasattr(self, 'progress_bar'):
             self.progress_bar = None
-        
+
         # Platform name (must be set by subclasses)
         if not hasattr(self, 'platform_name'):
             self.platform_name = "Unknown"
-        
-    def _retry_request(self, func: Callable, *args, max_retries=None, **kwargs) -> Any:
+
+    def _retry_request(self,
+                       func: Callable,
+                       *args,
+                       max_retries=None,
+                       **kwargs) -> Any:
         """
         Retry HTTP requests with exponential backoff and enhanced error messages.
         
@@ -54,20 +59,21 @@ class BaseUploadPipeline(ABC):
             max_retries = self.MAX_RETRIES
 
         last_exception = None
-        
+
         for attempt in range(max_retries):
             try:
                 response = func(*args, **kwargs)
-                
+
                 # Handle HTTP response objects (requests library)
-                if hasattr(response, 'status_code') and hasattr(response, 'ok') and not response.ok:
+                if hasattr(response, 'status_code') and hasattr(
+                        response, 'ok') and not response.ok:
                     if response.status_code in self.RETRIABLE_STATUS_CODES:
                         # Add helpful context to the error message
                         self._enhance_error_message(response)
-                        
+
                         if attempt == max_retries - 1:
                             response.raise_for_status()
-                        
+
                         # Use exponential backoff with jitter for retriable errors
                         wait_time = (2**attempt) + random.uniform(0, 1)
                         logging.warning(
@@ -79,25 +85,25 @@ class BaseUploadPipeline(ABC):
                     else:
                         # Non-retriable HTTP error, fail immediately
                         response.raise_for_status()
-                        
+
                 # Handle Google API HttpError (YouTube)
-                elif hasattr(response, 'resp') and hasattr(response.resp, 'status'):
+                elif hasattr(response, 'resp') and hasattr(
+                        response.resp, 'status'):
                     if response.resp.status in self.RETRIABLE_STATUS_CODES:
                         if attempt == max_retries - 1:
                             raise response
                         wait_time = (2**attempt) + random.uniform(0, 1)
                         logging.warning(
                             f"Retriable HTTP error {response.resp.status} (attempt {attempt + 1}/{max_retries}), "
-                            f"retrying in {wait_time:.1f}s: {response}"
-                        )
+                            f"retrying in {wait_time:.1f}s: {response}")
                         time.sleep(wait_time)
                         continue
                     else:
                         raise response
-                
+
                 # If we get here, the request was successful
                 return response
-                
+
             except requests.exceptions.RequestException as e:
                 last_exception = e
                 if attempt == max_retries - 1:
@@ -105,10 +111,9 @@ class BaseUploadPipeline(ABC):
                 wait_time = (2**attempt) + random.uniform(0, 1)
                 logging.warning(
                     f"Request failed (attempt {attempt + 1}/{max_retries}), "
-                    f"retrying in {wait_time:.1f}s: {e}"
-                )
+                    f"retrying in {wait_time:.1f}s: {e}")
                 time.sleep(wait_time)
-                
+
             except Exception as e:
                 last_exception = e
                 if attempt == max_retries - 1:
@@ -116,10 +121,9 @@ class BaseUploadPipeline(ABC):
                 wait_time = (2**attempt) + random.uniform(0, 1)
                 logging.warning(
                     f"API call failed (attempt {attempt + 1}/{max_retries}), "
-                    f"retrying in {wait_time:.1f}s: {e}"
-                )
+                    f"retrying in {wait_time:.1f}s: {e}")
                 time.sleep(wait_time)
-        
+
         # This shouldn't be reached, but just in case
         if last_exception:
             raise last_exception
@@ -136,10 +140,10 @@ class BaseUploadPipeline(ABC):
         """
         try:
             error_data = response.json()
-            
+
             # Generic error message extraction (works for most APIs)
             api_error = None
-            
+
             # Try common error message patterns
             if 'error' in error_data:
                 if isinstance(error_data['error'], dict):
@@ -151,7 +155,7 @@ class BaseUploadPipeline(ABC):
                 api_error = error_data['errors'][0].get('message', '')
             elif 'message' in error_data:
                 api_error = error_data['message']
-            
+
             if api_error:
                 response.reason = f"{getattr(response, 'reason', 'HTTP Error')}: {api_error}"
         except:
@@ -171,10 +175,13 @@ class BaseUploadPipeline(ABC):
             if increment > 0:
                 self.progress_bar.update(increment)
             if description:
-                self.progress_bar.set_description(f"{self.platform_name}: {description}")
+                self.progress_bar.set_description(
+                    f"[{self.platform_name}] {description}")
 
     @contextmanager
-    def _progress_context(self, total_progress: int, description: str = "Starting upload"):
+    def _progress_context(self,
+                          total_progress: int,
+                          description: str = "Starting upload"):
         """
         Context manager for progress bar to ensure proper cleanup.
         
@@ -187,13 +194,12 @@ class BaseUploadPipeline(ABC):
         """
         progress_bar = tqdm(
             total=total_progress,
-            desc=f"{self.platform_name}: {description}",
+            desc=f"[{self.platform_name}] {description}",
             unit="%",
-            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}% [{elapsed}<{remaining}]",
+            bar_format="{l_bar}{bar}| {percentage:3.0f}% [{elapsed}<{remaining}]",
             ncols=100,
             leave=True,
-            position=0
-        )
+            position=0)
         self.progress_bar = progress_bar
         try:
             yield progress_bar
@@ -218,15 +224,18 @@ class BaseUploadPipeline(ABC):
         Should be called during initialization.
         """
         if not self.progress_allocations:
-            raise ValueError(f"{self.__class__.__name__} must set progress_allocations")
-        
+            raise ValueError(
+                f"{self.__class__.__name__} must set progress_allocations")
+
         if self.platform_name == "Unknown":
-            raise ValueError(f"{self.__class__.__name__} must set platform_name")
-            
+            raise ValueError(
+                f"{self.__class__.__name__} must set platform_name")
+
         # Validate progress allocations sum to reasonable total
         total = sum(self.progress_allocations.values())
         if not (90 <= total <= 110):  # Allow some flexibility
-            logging.warning(f"Progress allocations sum to {total}%, expected around 100%")
+            logging.warning(
+                f"Progress allocations sum to {total}%, expected around 100%")
 
     def _complete_progress_bar(self, success: bool = True):
         """
@@ -237,14 +246,15 @@ class BaseUploadPipeline(ABC):
         """
         if not self.progress_bar:
             return
-            
+
         if success:
             # Complete to 100% only on success
             total_progress = sum(self.progress_allocations.values())
             remaining = total_progress - self.progress_bar.n
             if remaining > 0:
                 self.progress_bar.update(remaining)
-            self.progress_bar.set_description(f"{self.platform_name}: Upload complete")
+            
+            self.progress_bar.set_description(f"[{self.platform_name}] Upload complete")
         else:
             # Show error state without completing to 100%
-            self.progress_bar.set_description(f"{self.platform_name}: Upload failed")
+            self.progress_bar.set_description(f"[{self.platform_name}] Upload failed")

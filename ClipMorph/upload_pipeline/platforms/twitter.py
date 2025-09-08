@@ -213,7 +213,7 @@ class TwitterUploadPipeline(BaseUploadPipeline):
             # Update progress description with elapsed time
             if self.progress_bar:
                 self.progress_bar.set_description(
-                    f"Twitter: Processing video... ({elapsed:.0f}s)")
+                    f"[Twitter Processing video... ({elapsed:.0f}s)")
 
             status_url = f"{self.TWITTER_UPLOAD_BASE_URL}/1.1/media/upload.json?command=STATUS&media_id={media_id}"
 
@@ -231,7 +231,7 @@ class TwitterUploadPipeline(BaseUploadPipeline):
                     if processing_state == "succeeded":
                         if self.progress_bar:
                             self.progress_bar.set_description(
-                                "Twitter: Video processed successfully")
+                                "[Twitter] Video processed successfully")
                         break
                     elif processing_state == "failed":
                         error = processing_info.get("error", {})
@@ -328,11 +328,6 @@ class TwitterUploadPipeline(BaseUploadPipeline):
 
                 # Complete progress bar
                 self._complete_progress_bar(True)
-
-                if self.progress_bar:
-                    self.progress_bar.write(
-                        f"[Twitter] Successfully posted tweet with ID: {tweet_id}"
-                    )
 
             except Exception as e:
                 if self.progress_bar:

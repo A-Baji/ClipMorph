@@ -349,7 +349,7 @@ class InstagramUploadPipeline(BaseUploadPipeline):
 
         # Update description to show completion
         if self.progress_bar:
-            self.progress_bar.set_description("Instagram: Cleaning up...")
+            self.progress_bar.set_description("[Instagram] Cleaning up...")
         return resp.json()['id']
 
     def _wait_for_processing(self, creation_id, video_size_mb=0):
@@ -388,7 +388,7 @@ class InstagramUploadPipeline(BaseUploadPipeline):
             # Update the timer description every second
             if self.progress_bar:
                 self.progress_bar.set_description(
-                    f"Instagram: Processing video... ({elapsed:.0f}s)")
+                    f"[Instagram] Processing video... ({elapsed:.0f}s)")
 
             # Only update progress if we haven't reached the cap
             if self.progress_bar and self.progress_bar.n < target_progress and self.progress_bar.n < self.MAX_PROGRESS_DURING_PROCESSING:
@@ -401,7 +401,7 @@ class InstagramUploadPipeline(BaseUploadPipeline):
             if status == 'FINISHED':
                 if self.progress_bar:
                     self.progress_bar.set_description(
-                        "Instagram: Publishing reel...")
+                        "[Instagram] Publishing reel...")
                 return True
             elif status == 'ERROR':
                 logging.error(f"Video processing failed: {resp.json()}")
@@ -475,9 +475,6 @@ class InstagramUploadPipeline(BaseUploadPipeline):
                     if self._wait_for_processing(creation_id,
                                                  video_size_mb=video_size_mb):
                         media_id = self._publish_media(creation_id)
-                        self.progress_bar.write(
-                            f"[Instagram] Published Reel with media ID: {media_id}"
-                        )
                         upload_success = True
                     else:
                         self.progress_bar.write(
@@ -495,7 +492,10 @@ class InstagramUploadPipeline(BaseUploadPipeline):
                     self._delete_video(video_path)
 
                 # Handle progress bar completion based on success/failure
-                self._complete_progress_bar(upload_success)
+                if upload_success:
+                    self._complete_progress_bar(True)
+                else:
+                    self._complete_progress_bar(False)
 
             except Exception as e:
                 if self.progress_bar:
