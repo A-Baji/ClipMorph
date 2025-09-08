@@ -25,10 +25,6 @@ class TwitterUploadPipeline(BaseUploadPipeline):
     API_POLL_INTERVAL = 5  # seconds between status checks
     MIN_PROGRESS_INCREMENT = 2.0
 
-    # Retry configuration
-    MAX_RETRIES = 3
-    RETRIABLE_STATUS_CODES = [500, 502, 503, 504]
-
     def __init__(self,
                  twitter_api_key=os.getenv("TWITTER_API_KEY"),
                  twitter_api_key_secret=os.getenv("TWITTER_API_KEY_SECRET"),

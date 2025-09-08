@@ -31,10 +31,6 @@ class InstagramUploadPipeline(BaseUploadPipeline):
     API_POLL_INTERVAL = 5  # seconds between status checks
     MIN_PROGRESS_INCREMENT = 1.5
 
-    # Retry configuration
-    MAX_RETRIES = 3
-    RETRIABLE_STATUS_CODES = [500, 502, 503, 504]
-
     def __init__(self,
                  facebook_app_id=os.getenv("FACEBOOK_APP_ID"),
                  facebook_app_secret=os.getenv("FACEBOOK_APP_SECRET"),

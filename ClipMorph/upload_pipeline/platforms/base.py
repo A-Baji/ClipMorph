@@ -105,22 +105,38 @@ class BaseUploadPipeline(ABC):
                 return response
 
             except requests.exceptions.RequestException as e:
-                last_exception = e
-                if attempt == max_retries - 1:
+                # Only retry network-level errors, not HTTP errors like 4xx
+                if isinstance(e, requests.exceptions.HTTPError):
+                    # HTTP errors should have been handled above based on status code
                     raise e
-                wait_time = (2**attempt) + random.uniform(0, 1)
-                logging.warning(
-                    f"Request failed (attempt {attempt + 1}/{max_retries}), "
-                    f"retrying in {wait_time:.1f}s: {e}")
-                time.sleep(wait_time)
+                elif isinstance(e, (requests.exceptions.ConnectionError, 
+                                   requests.exceptions.Timeout,
+                                   requests.exceptions.ChunkedEncodingError)):
+                    # These are retriable network-level errors
+                    last_exception = e
+                    if attempt == max_retries - 1:
+                        raise e
+                    wait_time = (2**attempt) + random.uniform(0, 1)
+                    logging.warning(
+                        f"Network error (attempt {attempt + 1}/{max_retries}), "
+                        f"retrying in {wait_time:.1f}s: {e}")
+                    time.sleep(wait_time)
+                else:
+                    # Other RequestExceptions should not be retried
+                    raise e
 
             except Exception as e:
+                # Don't retry HTTP errors or authentication failures
+                if isinstance(e, requests.exceptions.HTTPError):
+                    raise e
+                    
+                # Only retry genuinely unexpected errors
                 last_exception = e
                 if attempt == max_retries - 1:
                     raise e
                 wait_time = (2**attempt) + random.uniform(0, 1)
                 logging.warning(
-                    f"API call failed (attempt {attempt + 1}/{max_retries}), "
+                    f"Unexpected error (attempt {attempt + 1}/{max_retries}), "
                     f"retrying in {wait_time:.1f}s: {e}")
                 time.sleep(wait_time)
 

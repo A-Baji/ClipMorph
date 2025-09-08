@@ -27,10 +27,6 @@ class TikTokUploadPipeline(BaseUploadPipeline):
     API_POLL_INTERVAL = 3  # seconds between status checks
     MIN_PROGRESS_INCREMENT = 2.0
 
-    # Retry configuration
-    MAX_RETRIES = 3
-    RETRIABLE_STATUS_CODES = [500, 502, 503, 504]
-
     def __init__(self,
                  tiktok_client_key=os.getenv("TIKTOK_CLIENT_KEY"),
                  tiktok_client_secret=os.getenv("TIKTOK_CLIENT_SECRET"),

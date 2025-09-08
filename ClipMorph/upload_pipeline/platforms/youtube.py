@@ -37,10 +37,6 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
     API_POLL_INTERVAL = 2  # seconds between status checks
     MIN_PROGRESS_INCREMENT = 2.0
 
-    # Retry configuration
-    MAX_RETRIES = 3
-    RETRIABLE_STATUS_CODES = [500, 502, 503, 504]
-
     def __init__(self,
                  google_client_id=os.getenv("GOOGLE_CLIENT_ID"),
                  google_client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
