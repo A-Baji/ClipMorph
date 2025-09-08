@@ -1,7 +1,18 @@
 import logging
 import os
+import warnings
 
 from dotenv import load_dotenv
+
+# Suppress various library warnings and debug logs
+warnings.filterwarnings("ignore", category=UserWarning, module="pyannote")
+warnings.filterwarnings("ignore", category=UserWarning, module="speechbrain")
+warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+
+# Suppress specific library loggers
+logging.getLogger("speechbrain").setLevel(logging.ERROR)
+logging.getLogger("pyannote").setLevel(logging.ERROR)
+logging.getLogger("torch").setLevel(logging.ERROR)
 
 from clipmorph.cli import parse_args
 from clipmorph.conversion_pipeline import ConversionPipeline
