@@ -48,6 +48,12 @@ class ConversionPipeline:
 
         return AudioFileClip(tmp.name)
 
+    def _censor_subtitles(self, segments):
+        """Censor profane words in subtitle segments."""
+        for segment in segments:
+            segment["text"] = profanity.censor(segment["text"])
+        return segments
+
     def run(self):
         logging.info("Extracting audio from video...")
         audio = self._extract_audio(self.input_path)
@@ -70,7 +76,7 @@ class ConversionPipeline:
             muted_audio = self._mute_audio(intervals, audio)
 
             logging.info("Censoring subtitles...")
-            # TODO: Censor subtitles
+            segments = self._censor_subtitles(segments)
 
         logging.info("Editing video...")
         final_output = EditingPipeline(input_path=self.input_path,
