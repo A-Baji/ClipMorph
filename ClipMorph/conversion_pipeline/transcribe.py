@@ -2,7 +2,6 @@ from functools import cached_property
 import gc
 import logging
 import os
-import re
 from typing import Any, Dict, List
 
 from moviepy import AudioFileClip
