@@ -1,6 +1,8 @@
 import logging
 import warnings
 
+from clipmorph.ffmpeg import configure_ffmpeg
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 # Suppress various library warnings and debug logs BEFORE any heavy imports
@@ -24,3 +26,5 @@ logging.getLogger("speechbrain.utils.parameter_transfer").setLevel(
 
 # Disable debug messages from speechbrain entirely
 logging.getLogger("speechbrain").propagate = False
+
+configure_ffmpeg()
