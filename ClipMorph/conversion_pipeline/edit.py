@@ -90,17 +90,18 @@ class EditingPipeline:
     def _set_audio(self, input_path: str, muted_audio_path: str,
                    output_path: str) -> None:
         """Replace audio in video using ffmpeg"""
-        if muted_audio_path:
+        if muted_audio_path and muted_audio_path != input_path:
+            # When using a different audio file (muted version)
             cmd = [
                 self.ffmpeg_path, '-i', input_path, '-i', muted_audio_path,
                 '-c:v', 'copy', '-c:a', 'aac', '-map', '0:v:0', '-map',
                 '1:a:0', '-shortest', '-y', output_path
             ]
         else:
-            # If no muted audio, just copy without audio
+            # When using original audio, just copy both streams
             cmd = [
-                self.ffmpeg_path, '-i', input_path, '-c:v', 'copy', '-an',
-                '-y', output_path
+                self.ffmpeg_path, '-i', input_path, '-c:v', 'copy', '-c:a',
+                'aac', '-y', output_path
             ]
         self._run_ffmpeg(cmd)
 
@@ -208,19 +209,35 @@ class EditingPipeline:
 
     def _combine_clips_vertical(self, clip1_path: str, clip2_path: str,
                                 output_path: str) -> None:
-        """Combine two clips vertically using ffmpeg"""
+        """Combine two clips vertically while preserving audio"""
         cmd = [
-            self.ffmpeg_path, '-i', clip1_path, '-i', clip2_path,
-            '-filter_complex', '[0:v][1:v]vstack=inputs=2[v]', '-map', '[v]',
-            '-c:a', 'copy', '-y', output_path
+            self.ffmpeg_path,
+            '-i',
+            clip1_path,
+            '-i',
+            clip2_path,
+            # Complex filter to stack videos vertically
+            '-filter_complex',
+            '[0:v][1:v]vstack=inputs=2[v]',
+            # Map video output from filter
+            '-map',
+            '[v]',
+            # Map audio from first input (camera feed)
+            '-map',
+            '0:a',
+            # Copy audio codec
+            '-c:a',
+            'copy',
+            '-y',
+            output_path
         ]
         self._run_ffmpeg(cmd)
 
     def _overlay_subtitles(self, input_path: str, output_path: str,
                            segments: List[Dict]) -> None:
-        """Overlay subtitles using ffmpeg drawtext filter"""
+        """Overlay subtitles using ffmpeg subtitles filter (handles Windows paths)."""
+        # If no segments, just copy
         if not segments:
-            # Just copy if no segments
             cmd = [
                 self.ffmpeg_path, '-i', input_path, '-c', 'copy', '-y',
                 output_path
@@ -228,41 +245,53 @@ class EditingPipeline:
             self._run_ffmpeg(cmd)
             return
 
-        # Get video dimensions
-        video_info = self._get_video_info(input_path)
-        video_stream = next(s for s in video_info['streams']
-                            if s['codec_type'] == 'video')
-        video_width = int(video_stream['width'])
-        video_height = int(video_stream['height'])
+        def _format_timestamp(seconds: float) -> str:
+            # SRT needs "hh:mm:ss,mmm"
+            total_ms = int(round(seconds * 1000))
+            ms = total_ms % 1000
+            s = (total_ms // 1000) % 60
+            m = (total_ms // 60000) % 60
+            h = total_ms // 3600000
+            return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
-        # Build drawtext filters for each segment
-        drawtext_filters = []
-        for i, segment in enumerate(segments):
-            text = segment['text'].replace("'", "\\'").replace(":", "\\:")
-            start_time = segment['start']
-            end_time = segment['end']
+        # Create an SRT file, skipping empty segments
+        srt_temp = self._create_temp_file(
+            suffix='.srt')  # assume helper exists
+        with open(srt_temp, 'w', encoding='utf-8') as f:
+            idx = 1
+            for seg in segments:
+                text = (seg.get('text') or '').strip()
+                if not text:
+                    # skip empty text segments (prevents weird parse/alignment issues)
+                    continue
+                start_ts = _format_timestamp(float(seg.get('start', 0.0)))
+                end_ts = _format_timestamp(float(seg.get('end', start_ts)))
+                f.write(f"{idx}\n")
+                f.write(f"{start_ts} --> {end_ts}\n")
+                # escape any stray newlines already in text
+                for line in text.splitlines():
+                    f.write(f"{line}\n")
+                f.write("\n")
+                idx += 1
 
-            # Position text at 70% down the video height, centered
-            x_pos = f"(w-text_w)/2"
-            y_pos = f"{int(video_height * 0.70)}"
+        # Build safe path for ffmpeg subtitles filter
+        abs_path = os.path.abspath(srt_temp)
+        # Use forward slashes (safer)
+        ff_path = abs_path.replace('\\', '/')
 
-            drawtext_filter = (f"drawtext=text='{text}'"
-                               f":fontcolor=white"
-                               f":fontsize=70"
-                               f":bordercolor=black"
-                               f":borderw=12"
-                               f":x={x_pos}"
-                               f":y={y_pos}"
-                               f":enable='between(t,{start_time},{end_time})'")
-            drawtext_filters.append(drawtext_filter)
+        # Escape colon characters (so C:/ doesn't get treated as option separators)
+        # e.g. "C:/Users/..." -> "C\: /Users/..." (single backslash before colon)
+        # Note: ffmpeg expects backslash as escape within filter expr.
+        ff_path_escaped = ff_path.replace(':', '\\:')
 
-        # Combine all drawtext filters
-        filter_string = ','.join(drawtext_filters)
+        # For extra safety wrap in single quotes inside the filter expression.
+        vf_expr = f"subtitles='{ff_path_escaped}'"
 
         cmd = [
-            self.ffmpeg_path, '-i', input_path, '-vf', filter_string, '-c:a',
-            'copy', '-y', output_path
+            self.ffmpeg_path, '-i', input_path, '-vf', vf_expr, '-c:a', 'copy',
+            '-y', output_path
         ]
+
         self._run_ffmpeg(cmd)
 
     def run(self):
@@ -324,9 +353,26 @@ class EditingPipeline:
             # Final encode with proper codec settings
             logging.info("Writing final video to file...")
             cmd = [
-                self.ffmpeg_path, '-i', final_temp, '-c:v', 'libx264',
-                '-preset', 'medium', '-crf', '23', '-c:a', 'aac', '-b:a',
-                '128k', '-movflags', '+faststart', '-y', output_path
+                self.ffmpeg_path,
+                '-i',
+                final_temp,
+                # Ensure we map all streams
+                '-map',
+                '0',  # Map all streams from input
+                '-c:v',
+                'libx264',
+                '-preset',
+                'medium',
+                '-crf',
+                '23',
+                '-c:a',
+                'aac',
+                '-b:a',
+                '128k',
+                '-movflags',
+                '+faststart',
+                '-y',
+                output_path
             ]
             self._run_ffmpeg(cmd)
 

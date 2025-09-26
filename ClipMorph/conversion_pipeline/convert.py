@@ -159,15 +159,19 @@ class ConversionPipeline:
                 logging.warning(
                     "Failed to transcribe audio. No subtitles will be generated and profanity will not be censored."
                 )
+                # Use original audio when no transcription/muting needed
+                muted_audio_path = audio_path
             else:
-                logging.debug("Generating subtitles (.srt)...")
-                write_srt_file(segments)
-
                 logging.info("Detecting profanity in audio...")
                 intervals = self._detect_profanity(segments)
 
-                logging.info("Muting profane audio segments...")
-                muted_audio_path = self._mute_audio(intervals, audio_path)
+                if intervals:
+                    logging.info("Muting profane audio segments...")
+                    muted_audio_path = self._mute_audio(intervals, audio_path)
+                else:
+                    logging.info(
+                        "No profanity detected, using original audio...")
+                    muted_audio_path = audio_path
 
                 logging.info("Censoring subtitles...")
                 segments = self._censor_subtitles(segments)
