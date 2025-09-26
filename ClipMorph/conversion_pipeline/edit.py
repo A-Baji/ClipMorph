@@ -236,8 +236,32 @@ class EditingPipeline:
     def _overlay_subtitles(self, input_path: str, output_path: str,
                            segments: List[Dict]) -> None:
         """Overlay subtitles using ffmpeg subtitles filter (handles Windows paths)."""
-        # If no segments, just copy
+        # If no segments or empty list, just copy
         if not segments:
+            cmd = [
+                self.ffmpeg_path, '-i', input_path, '-c', 'copy', '-y',
+                output_path
+            ]
+            self._run_ffmpeg(cmd)
+            return
+
+        # Filter out invalid segments
+        valid_segments = []
+        for seg in segments:
+            text = (seg.get('text') or '').strip()
+            try:
+                start = float(seg.get('start', 0))
+                end = float(seg.get('end', 0))
+                if text and start is not None and end is not None:
+                    valid_segments.append({
+                        'text': text,
+                        'start': start,
+                        'end': end
+                    })
+            except (TypeError, ValueError):
+                continue
+
+        if not valid_segments:
             cmd = [
                 self.ffmpeg_path, '-i', input_path, '-c', 'copy', '-y',
                 output_path
@@ -254,25 +278,18 @@ class EditingPipeline:
             h = total_ms // 3600000
             return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
-        # Create an SRT file, skipping empty segments
-        srt_temp = self._create_temp_file(
-            suffix='.srt')  # assume helper exists
+        # Create an SRT file using validated segments
+        srt_temp = self._create_temp_file(suffix='.srt')
         with open(srt_temp, 'w', encoding='utf-8') as f:
-            idx = 1
-            for seg in segments:
-                text = (seg.get('text') or '').strip()
-                if not text:
-                    # skip empty text segments (prevents weird parse/alignment issues)
-                    continue
-                start_ts = _format_timestamp(float(seg.get('start', 0.0)))
-                end_ts = _format_timestamp(float(seg.get('end', start_ts)))
+            for idx, seg in enumerate(valid_segments, 1):
+                start_ts = _format_timestamp(seg['start'])
+                end_ts = _format_timestamp(seg['end'])
                 f.write(f"{idx}\n")
                 f.write(f"{start_ts} --> {end_ts}\n")
                 # escape any stray newlines already in text
-                for line in text.splitlines():
+                for line in seg['text'].splitlines():
                     f.write(f"{line}\n")
                 f.write("\n")
-                idx += 1
 
         # Build safe path for ffmpeg subtitles filter
         abs_path = os.path.abspath(srt_temp)

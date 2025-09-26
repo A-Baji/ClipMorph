@@ -162,6 +162,9 @@ class ConversionPipeline:
                 # Use original audio when no transcription/muting needed
                 muted_audio_path = audio_path
             else:
+                logging.debug("Generating subtitles (.srt)...")
+                write_srt_file(segments)
+
                 logging.info("Detecting profanity in audio...")
                 intervals = self._detect_profanity(segments)
 

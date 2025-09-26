@@ -137,8 +137,31 @@ class TranscriptionPipeline:
             end_padding: float = 0.5,
             max_words_per_segment: int = 4) -> List[Dict[str, Any]]:
         """Group words into phrases."""
+        if not segments:
+            return []
+
+        # Filter out invalid segments first
+        valid_segments = []
+        for seg in segments:
+            if not seg.get("words"):
+                continue
+
+            valid_words = []
+            for word in seg["words"]:
+                if (isinstance(word.get("start"), (int, float))
+                        and isinstance(word.get("end"),
+                                       (int, float)) and word.get("word")):
+                    valid_words.append(word)
+
+            if valid_words:
+                seg["words"] = valid_words
+                valid_segments.append(seg)
+
+        if not valid_segments:
+            return []
+
         output = []
-        num_segments = len(segments)
+        num_segments = len(valid_segments)
         for i, seg in enumerate(segments):
             words = seg.get("words", [])
             if not words:
