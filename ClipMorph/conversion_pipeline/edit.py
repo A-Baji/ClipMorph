@@ -1,10 +1,9 @@
+import json
 import logging
 import os
-
-import cv2
-import moviepy as mpy
-from moviepy.video.fx import Crop
-from moviepy.video.fx import Resize
+import subprocess
+import tempfile
+from typing import Any, Dict, List
 
 
 class EditingPipeline:
@@ -19,7 +18,9 @@ class EditingPipeline:
                  cam_y=790,
                  cam_width=480,
                  cam_height=270,
-                 clip_height=1312):
+                 clip_height=1312,
+                 ffmpeg_path="ffmpeg",
+                 ffprobe_path="ffprobe"):
         self.input_path = input_path
         self.output_dir = output_dir if output_dir.endswith(
             "/") else output_dir + "/"
@@ -31,134 +32,310 @@ class EditingPipeline:
         self.cam_width = cam_width
         self.cam_height = cam_height
         self.clip_height = clip_height
+        self.ffmpeg_path = ffmpeg_path
+        self.ffprobe_path = ffprobe_path
+        self.temp_files = []
 
-    def _set_audio(self, clip: mpy.VideoFileClip, muted_audio):
-        return clip.with_audio(muted_audio)
+    def _cleanup_temp_files(self):
+        """Clean up temporary files created during processing"""
+        for temp_file in self.temp_files:
+            try:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+            except OSError:
+                pass
+        self.temp_files.clear()
 
-    def _process_camera_feed(self, clip, cam_x, cam_y, cam_width, cam_height,
-                             crop_width):
-        cam_feed = Crop(x1=cam_x, y1=cam_y, width=cam_width,
-                        height=cam_height).apply(clip)
-        cam_resized = Resize(width=crop_width).apply(cam_feed)
-        cam_h = cam_resized.h
-        if cam_h % 2 != 0:
-            cam_resized = Resize((crop_width, cam_h + 1)).apply(cam_resized)
-            cam_h = cam_resized.h
-        return cam_resized, cam_h
+    def _create_temp_file(self, suffix='.mp4'):
+        """Create a temporary file and track it for cleanup"""
+        temp_fd, temp_path = tempfile.mkstemp(suffix=suffix)
+        os.close(temp_fd)  # Close the file descriptor, we only need the path
+        self.temp_files.append(temp_path)
+        return temp_path
 
-    def _process_main_clip(self, clip, crop_height, cam_h, crop_width):
-        main_clip = Resize(height=crop_height - cam_h).apply(clip)
-        main_clip = Crop(width=crop_width,
-                         height=main_clip.h,
-                         x_center=main_clip.w // 2,
-                         y_center=main_clip.h // 2).apply(main_clip)
-        return main_clip
+    def _get_video_info(self, video_path: str) -> Dict[str, Any]:
+        """Get video information using ffprobe"""
+        cmd = [
+            self.ffprobe_path, '-v', 'quiet', '-print_format', 'json',
+            '-show_format', '-show_streams', video_path
+        ]
 
-    def _blur_background(self, clip, crop_width, crop_height, cam_h,
-                         main_clip):
+        try:
+            result = subprocess.run(cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    check=True)
+            return json.loads(result.stdout)
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Error getting video info for {video_path}: {e}")
+            logging.error(f"FFprobe stderr: {e.stderr}")
+            raise
+        except json.JSONDecodeError as e:
+            logging.error(f"Error parsing ffprobe output: {e}")
+            raise
 
-        def blur_frame(get_frame, t):
-            frame = get_frame(t)
-            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            blurred_bgr = cv2.GaussianBlur(frame_bgr, (51, 51), sigmaX=0)
-            return cv2.cvtColor(blurred_bgr, cv2.COLOR_BGR2RGB)
+    def _run_ffmpeg(self, cmd: List[str]) -> None:
+        """Run ffmpeg command with error handling"""
+        try:
+            result = subprocess.run(cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    check=True)
+            logging.debug(f"FFmpeg command succeeded: {' '.join(cmd)}")
+        except subprocess.CalledProcessError as e:
+            logging.error(f"FFmpeg command failed: {' '.join(cmd)}")
+            logging.error(f"Error output: {e.stderr}")
+            raise
 
-        bg_full = Resize(height=crop_height).apply(clip)
-        bg_blur = bg_full.transform(blur_frame)
-        bg_blur_cropped = Crop(width=crop_width,
-                               height=crop_height,
-                               x_center=bg_full.w // 2,
-                               y_center=bg_full.h // 2).apply(bg_blur)
+    def _set_audio(self, input_path: str, muted_audio_path: str,
+                   output_path: str) -> None:
+        """Replace audio in video using ffmpeg"""
+        if muted_audio_path:
+            cmd = [
+                self.ffmpeg_path, '-i', input_path, '-i', muted_audio_path,
+                '-c:v', 'copy', '-c:a', 'aac', '-map', '0:v:0', '-map',
+                '1:a:0', '-shortest', '-y', output_path
+            ]
+        else:
+            # If no muted audio, just copy without audio
+            cmd = [
+                self.ffmpeg_path, '-i', input_path, '-c:v', 'copy', '-an',
+                '-y', output_path
+            ]
+        self._run_ffmpeg(cmd)
 
+    def _process_camera_feed(self, input_path: str, output_path: str,
+                             cam_x: int, cam_y: int, cam_width: int,
+                             cam_height: int, crop_width: int) -> int:
+        """Process camera feed: crop and resize"""
+        # Ensure even dimensions for codec compatibility
+        if cam_height % 2 != 0:
+            cam_height += 1
+
+        # Calculate resize height maintaining aspect ratio
+        aspect_ratio = cam_width / cam_height
+        resize_height = int(crop_width / aspect_ratio)
+        if resize_height % 2 != 0:
+            resize_height += 1
+
+        cmd = [
+            self.ffmpeg_path, '-i', input_path, '-vf',
+            f'crop={cam_width}:{cam_height}:{cam_x}:{cam_y},scale={crop_width}:{resize_height}',
+            '-c:a', 'copy', '-y', output_path
+        ]
+        self._run_ffmpeg(cmd)
+        return resize_height
+
+    def _process_main_clip(self, input_path: str, output_path: str,
+                           crop_height: int, cam_h: int,
+                           crop_width: int) -> None:
+        """Process main clip: resize and crop"""
+        main_height = crop_height - cam_h
+        if main_height % 2 != 0:
+            main_height += 1
+
+        # Get video info to calculate center crop
+        video_info = self._get_video_info(input_path)
+        video_stream = next(s for s in video_info['streams']
+                            if s['codec_type'] == 'video')
+        orig_width = int(video_stream['width'])
+        orig_height = int(video_stream['height'])
+
+        # Calculate scale to fit height, then crop width to center
+        scale_factor = main_height / orig_height
+        scaled_width = int(orig_width * scale_factor)
+
+        # Ensure even width
+        if scaled_width % 2 != 0:
+            scaled_width += 1
+
+        crop_x = max(0, (scaled_width - crop_width) // 2)
+
+        cmd = [
+            self.ffmpeg_path, '-i', input_path, '-vf',
+            f'scale={scaled_width}:{main_height},crop={crop_width}:{main_height}:{crop_x}:0',
+            '-c:a', 'copy', '-y', output_path
+        ]
+        self._run_ffmpeg(cmd)
+
+    def _blur_background(self, input_path: str, output_path: str,
+                         crop_width: int, crop_height: int, cam_h: int,
+                         main_clip_path: str) -> None:
+        """Create blurred background and combine with main clip"""
         bg_h = cam_h // 2
-        bg_blur_top = Crop(x1=0, y1=0, width=crop_width,
-                           height=bg_h).apply(bg_blur_cropped)
-        bg_blur_bot = Crop(x1=0,
-                           y1=bg_h + main_clip.h,
-                           width=crop_width,
-                           height=bg_h).apply(bg_blur_cropped)
+        if bg_h % 2 != 0:
+            bg_h += 1
 
-        final_video = mpy.clips_array([[bg_blur_top], [main_clip],
-                                       [bg_blur_bot]])
-        return final_video
+        # Get video info for centering
+        video_info = self._get_video_info(input_path)
+        video_stream = next(s for s in video_info['streams']
+                            if s['codec_type'] == 'video')
+        orig_width = int(video_stream['width'])
+        orig_height = int(video_stream['height'])
 
-    def _overlay_subtitles(self, final_video,
-                           segments) -> mpy.CompositeVideoClip:
-        subs = segments
-        subtitle_clips = []
+        # Calculate center crop coordinates - this matches MoviePy's logic exactly
+        scale_factor = crop_height / orig_height
+        scaled_width = int(orig_width * scale_factor)
+        crop_x_center = max(0, (scaled_width - crop_width) // 2)
 
-        for sub in subs:
-            txt_clip = (mpy.TextClip(
-                text=sub["text"],
-                color="#ffffff",
-                font=None,
-                font_size=70,
-                stroke_color="black",
-                stroke_width=12,
-                method="caption",
-                size=(int(final_video.w * 0.8), None),
-                text_align="center",
-                horizontal_align="center",
-                vertical_align="center",
-                margin=(0, 50),
-            ).with_start(sub["start"]).with_end(sub["end"]).with_position(
-                ("center", int(final_video.h * 0.70))))
+        # Create the full blurred and cropped background first
+        blur_temp = self._create_temp_file()
 
-            subtitle_clips.append(txt_clip)
+        cmd = [
+            self.ffmpeg_path, '-i', input_path, '-vf',
+            f'scale=-1:{crop_height},gblur=sigma=10,crop={crop_width}:{crop_height}:{crop_x_center}:0',
+            '-c:a', 'copy', '-y', blur_temp
+        ]
+        self._run_ffmpeg(cmd)
 
-        final = mpy.CompositeVideoClip([final_video, *subtitle_clips])
-        return final
+        # Now extract top and bottom sections from the blurred background
+        # and combine with the main clip
+        main_height = crop_height - (2 * bg_h)
+
+        filter_complex = f"""
+        [0:v]crop={crop_width}:{bg_h}:0:0[top];
+        [0:v]crop={crop_width}:{bg_h}:0:{bg_h + main_height}[bottom];
+        [top][1:v][bottom]vstack=inputs=3[v]
+        """
+
+        cmd = [
+            self.ffmpeg_path, '-i', blur_temp, '-i', main_clip_path,
+            '-filter_complex',
+            filter_complex.strip(), '-map', '[v]', '-map', '0:a?', '-c:a',
+            'copy', '-y', output_path
+        ]
+        self._run_ffmpeg(cmd)
+
+    def _combine_clips_vertical(self, clip1_path: str, clip2_path: str,
+                                output_path: str) -> None:
+        """Combine two clips vertically using ffmpeg"""
+        cmd = [
+            self.ffmpeg_path, '-i', clip1_path, '-i', clip2_path,
+            '-filter_complex', '[0:v][1:v]vstack=inputs=2[v]', '-map', '[v]',
+            '-c:a', 'copy', '-y', output_path
+        ]
+        self._run_ffmpeg(cmd)
+
+    def _overlay_subtitles(self, input_path: str, output_path: str,
+                           segments: List[Dict]) -> None:
+        """Overlay subtitles using ffmpeg drawtext filter"""
+        if not segments:
+            # Just copy if no segments
+            cmd = [
+                self.ffmpeg_path, '-i', input_path, '-c', 'copy', '-y',
+                output_path
+            ]
+            self._run_ffmpeg(cmd)
+            return
+
+        # Get video dimensions
+        video_info = self._get_video_info(input_path)
+        video_stream = next(s for s in video_info['streams']
+                            if s['codec_type'] == 'video')
+        video_width = int(video_stream['width'])
+        video_height = int(video_stream['height'])
+
+        # Build drawtext filters for each segment
+        drawtext_filters = []
+        for i, segment in enumerate(segments):
+            text = segment['text'].replace("'", "\\'").replace(":", "\\:")
+            start_time = segment['start']
+            end_time = segment['end']
+
+            # Position text at 70% down the video height, centered
+            x_pos = f"(w-text_w)/2"
+            y_pos = f"{int(video_height * 0.70)}"
+
+            drawtext_filter = (f"drawtext=text='{text}'"
+                               f":fontcolor=white"
+                               f":fontsize=70"
+                               f":bordercolor=black"
+                               f":borderw=12"
+                               f":x={x_pos}"
+                               f":y={y_pos}"
+                               f":enable='between(t,{start_time},{end_time})'")
+            drawtext_filters.append(drawtext_filter)
+
+        # Combine all drawtext filters
+        filter_string = ','.join(drawtext_filters)
+
+        cmd = [
+            self.ffmpeg_path, '-i', input_path, '-vf', filter_string, '-c:a',
+            'copy', '-y', output_path
+        ]
+        self._run_ffmpeg(cmd)
 
     def run(self):
         try:
-            logging.info("Loading video clip...")
-            with mpy.VideoFileClip(self.input_path) as clip:
-                filename = clip.filename.split("/")[-1].split("\\")[-1].split(
-                    ".")[0]
-                os.makedirs(self.output_dir, exist_ok=True)
-                output_path = f"{self.output_dir}{filename}-converted.mp4"
-                logging.info("Applying muted audio to the video...")
-                clip = self._set_audio(clip, self.muted_audio)
+            logging.info("Starting video processing with ffmpeg...")
 
-                crop_width = 1080
-                crop_height = 1920
+            # Extract filename for output
+            filename = os.path.splitext(os.path.basename(self.input_path))[0]
+            os.makedirs(self.output_dir, exist_ok=True)
+            output_path = f"{self.output_dir}{filename}-converted.mp4"
 
-                if self.include_cam:
-                    logging.info("Processing camera feed...")
-                    cam_resized, cam_h = self._process_camera_feed(
-                        clip, self.cam_x, self.cam_y, self.cam_width,
-                        self.cam_height, crop_width)
-                else:
-                    cam_h = crop_height - self.clip_height
+            # Step 1: Set audio
+            logging.info("Applying audio to the video...")
+            audio_temp = self._create_temp_file()
+            self._set_audio(self.input_path, self.muted_audio, audio_temp)
 
-                logging.info("Processing main clip...")
-                main_clip = self._process_main_clip(clip, crop_height, cam_h,
-                                                    crop_width)
+            crop_width = 1080
+            crop_height = 1920
 
-                if not self.include_cam:
-                    logging.info("Blurring background...")
-                    composited_video = self._blur_background(
-                        clip, crop_width, crop_height, cam_h, main_clip)
-                else:
-                    logging.info("Combining camera feed and main clip...")
-                    composited_video = mpy.clips_array([[cam_resized],
-                                                        [main_clip]])
+            if self.include_cam:
+                # Process camera feed
+                logging.info("Processing camera feed...")
+                cam_temp = self._create_temp_file()
+                cam_h = self._process_camera_feed(audio_temp, cam_temp,
+                                                  self.cam_x, self.cam_y,
+                                                  self.cam_width,
+                                                  self.cam_height, crop_width)
+            else:
+                cam_h = crop_height - self.clip_height
 
-                if self.segments:
-                    logging.info("Overlaying subtitles...")
-                    final_video: mpy.CompositeVideoClip = self._overlay_subtitles(
-                        composited_video, self.segments)
-                else:
-                    logging.info("No subtitles provided, skipping overlay.")
-                    final_video = composited_video
+            # Process main clip
+            logging.info("Processing main clip...")
+            main_temp = self._create_temp_file()
+            self._process_main_clip(audio_temp, main_temp, crop_height, cam_h,
+                                    crop_width)
 
-                logging.info("Writing final video to file...")
-                final_video.write_videofile(output_path,
-                                            codec="libx264",
-                                            audio_codec="aac")
-                final_video.close()
+            # Combine or blur
+            if not self.include_cam:
+                logging.info("Blurring background...")
+                composited_temp = self._create_temp_file()
+                self._blur_background(audio_temp, composited_temp, crop_width,
+                                      crop_height, cam_h, main_temp)
+            else:
+                logging.info("Combining camera feed and main clip...")
+                composited_temp = self._create_temp_file()
+                self._combine_clips_vertical(cam_temp, main_temp,
+                                             composited_temp)
 
-                return output_path
+            # Add subtitles
+            if self.segments:
+                logging.info("Overlaying subtitles...")
+                final_temp = self._create_temp_file()
+                self._overlay_subtitles(composited_temp, final_temp,
+                                        self.segments)
+            else:
+                logging.info("No subtitles provided, skipping overlay.")
+                final_temp = composited_temp
+
+            # Final encode with proper codec settings
+            logging.info("Writing final video to file...")
+            cmd = [
+                self.ffmpeg_path, '-i', final_temp, '-c:v', 'libx264',
+                '-preset', 'medium', '-crf', '23', '-c:a', 'aac', '-b:a',
+                '128k', '-movflags', '+faststart', '-y', output_path
+            ]
+            self._run_ffmpeg(cmd)
+
+            logging.info(f"Video processing completed: {output_path}")
+            return output_path
+
         except Exception as e:
             logging.error(f"An error occurred during video processing: {e}")
             raise
+        finally:
+            # Clean up temporary files
+            self._cleanup_temp_files()

@@ -4,7 +4,6 @@ import logging
 import os
 from typing import Any, Dict, List
 
-from moviepy import AudioFileClip
 import torch
 import whisper
 import whisperx
@@ -25,14 +24,20 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 class TranscriptionPipeline:
     """Class to manage all models for transcription pipeline."""
 
-    def __init__(self, audio: AudioFileClip):
-        self.audio = audio
+    def __init__(self, audio_path: str):
+        """
+        Initialize with audio file path instead of AudioFileClip
+        
+        Args:
+            audio_path: Path to the audio file
+        """
+        self.audio_path = audio_path
 
     @cached_property
     def _audio(self):
         """Load audio file on first access."""
-        logging.info(f"Loading audio...")
-        return whisper.load_audio(self.audio.reader.filename)
+        logging.info(f"Loading audio from {self.audio_path}...")
+        return whisper.load_audio(self.audio_path)
 
     @cached_property
     def _whisper_model(self):
