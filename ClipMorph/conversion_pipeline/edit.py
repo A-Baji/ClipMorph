@@ -1,9 +1,9 @@
-import json
 import logging
 import os
-import subprocess
-import tempfile
 from typing import Any, Dict, List
+
+from clipmorph.ffmpeg import FFmpegError
+from clipmorph.ffmpeg import FFmpegRunner
 
 
 class EditingPipeline:
@@ -19,8 +19,7 @@ class EditingPipeline:
                  cam_width=480,
                  cam_height=270,
                  clip_height=1312,
-                 ffmpeg_path="ffmpeg",
-                 ffprobe_path="ffprobe"):
+                 ffmpeg_runner=None):
         self.input_path = input_path
         self.output_dir = output_dir if output_dir.endswith(
             "/") else output_dir + "/"
@@ -32,60 +31,11 @@ class EditingPipeline:
         self.cam_width = cam_width
         self.cam_height = cam_height
         self.clip_height = clip_height
-        self.ffmpeg_path = ffmpeg_path
-        self.ffprobe_path = ffprobe_path
-        self.temp_files = []
-
-    def _cleanup_temp_files(self):
-        """Clean up temporary files created during processing"""
-        for temp_file in self.temp_files:
-            try:
-                if os.path.exists(temp_file):
-                    os.remove(temp_file)
-            except OSError:
-                pass
-        self.temp_files.clear()
-
-    def _create_temp_file(self, suffix='.mp4'):
-        """Create a temporary file and track it for cleanup"""
-        temp_fd, temp_path = tempfile.mkstemp(suffix=suffix)
-        os.close(temp_fd)  # Close the file descriptor, we only need the path
-        self.temp_files.append(temp_path)
-        return temp_path
+        self.ffmpeg_runner = ffmpeg_runner or FFmpegRunner()
 
     def _get_video_info(self, video_path: str) -> Dict[str, Any]:
         """Get video information using ffprobe"""
-        cmd = [
-            self.ffprobe_path, '-v', 'quiet', '-print_format', 'json',
-            '-show_format', '-show_streams', video_path
-        ]
-
-        try:
-            result = subprocess.run(cmd,
-                                    capture_output=True,
-                                    text=True,
-                                    check=True)
-            return json.loads(result.stdout)
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Error getting video info for {video_path}: {e}")
-            logging.error(f"FFprobe stderr: {e.stderr}")
-            raise
-        except json.JSONDecodeError as e:
-            logging.error(f"Error parsing ffprobe output: {e}")
-            raise
-
-    def _run_ffmpeg(self, cmd: List[str]) -> None:
-        """Run ffmpeg command with error handling"""
-        try:
-            result = subprocess.run(cmd,
-                                    capture_output=True,
-                                    text=True,
-                                    check=True)
-            logging.debug(f"FFmpeg command succeeded: {' '.join(cmd)}")
-        except subprocess.CalledProcessError as e:
-            logging.error(f"FFmpeg command failed: {' '.join(cmd)}")
-            logging.error(f"Error output: {e.stderr}")
-            raise
+        return self.ffmpeg_runner.get_video_info(video_path)
 
     def _set_audio(self, input_path: str, muted_audio_path: str,
                    output_path: str) -> None:
@@ -93,17 +43,17 @@ class EditingPipeline:
         if muted_audio_path and muted_audio_path != input_path:
             # When using a different audio file (muted version)
             cmd = [
-                self.ffmpeg_path, '-i', input_path, '-i', muted_audio_path,
-                '-c:v', 'copy', '-c:a', 'aac', '-map', '0:v:0', '-map',
-                '1:a:0', '-shortest', '-y', output_path
+                self.ffmpeg_runner.config.ffmpeg_path, '-i', input_path, '-i',
+                muted_audio_path, '-c:v', 'copy', '-c:a', 'aac', '-map',
+                '0:v:0', '-map', '1:a:0', '-shortest', '-y', output_path
             ]
         else:
             # When using original audio, just copy both streams
             cmd = [
-                self.ffmpeg_path, '-i', input_path, '-c:v', 'copy', '-c:a',
-                'aac', '-y', output_path
+                self.ffmpeg_runner.config.ffmpeg_path, '-i', input_path,
+                '-c:v', 'copy', '-c:a', 'aac', '-y', output_path
             ]
-        self._run_ffmpeg(cmd)
+        self.ffmpeg_runner.run_ffmpeg(cmd)
 
     def _process_camera_feed(self, input_path: str, output_path: str,
                              cam_x: int, cam_y: int, cam_width: int,
@@ -120,11 +70,11 @@ class EditingPipeline:
             resize_height += 1
 
         cmd = [
-            self.ffmpeg_path, '-i', input_path, '-vf',
+            self.ffmpeg_runner.config.ffmpeg_path, '-i', input_path, '-vf',
             f'crop={cam_width}:{cam_height}:{cam_x}:{cam_y},scale={crop_width}:{resize_height}',
             '-c:a', 'copy', '-y', output_path
         ]
-        self._run_ffmpeg(cmd)
+        self.ffmpeg_runner.run_ffmpeg(cmd)
         return resize_height
 
     def _process_main_clip(self, input_path: str, output_path: str,
@@ -153,11 +103,11 @@ class EditingPipeline:
         crop_x = max(0, (scaled_width - crop_width) // 2)
 
         cmd = [
-            self.ffmpeg_path, '-i', input_path, '-vf',
+            self.ffmpeg_runner.config.ffmpeg_path, '-i', input_path, '-vf',
             f'scale={scaled_width}:{main_height},crop={crop_width}:{main_height}:{crop_x}:0',
             '-c:a', 'copy', '-y', output_path
         ]
-        self._run_ffmpeg(cmd)
+        self.ffmpeg_runner.run_ffmpeg(cmd)
 
     def _blur_background(self, input_path: str, output_path: str,
                          crop_width: int, crop_height: int, cam_h: int,
@@ -174,20 +124,20 @@ class EditingPipeline:
         orig_width = int(video_stream['width'])
         orig_height = int(video_stream['height'])
 
-        # Calculate center crop coordinates - this matches MoviePy's logic exactly
+        # Calculate center crop coordinates
         scale_factor = crop_height / orig_height
         scaled_width = int(orig_width * scale_factor)
         crop_x_center = max(0, (scaled_width - crop_width) // 2)
 
         # Create the full blurred and cropped background first
-        blur_temp = self._create_temp_file()
+        blur_temp = self.ffmpeg_runner.create_temp_file()
 
         cmd = [
-            self.ffmpeg_path, '-i', input_path, '-vf',
+            self.ffmpeg_runner.config.ffmpeg_path, '-i', input_path, '-vf',
             f'scale=-1:{crop_height},gblur=sigma=10,crop={crop_width}:{crop_height}:{crop_x_center}:0',
             '-c:a', 'copy', '-y', blur_temp
         ]
-        self._run_ffmpeg(cmd)
+        self.ffmpeg_runner.run_ffmpeg(cmd)
 
         # Now extract top and bottom sections from the blurred background
         # and combine with the main clip
@@ -200,49 +150,33 @@ class EditingPipeline:
         """
 
         cmd = [
-            self.ffmpeg_path, '-i', blur_temp, '-i', main_clip_path,
-            '-filter_complex',
+            self.ffmpeg_runner.config.ffmpeg_path, '-i', blur_temp, '-i',
+            main_clip_path, '-filter_complex',
             filter_complex.strip(), '-map', '[v]', '-map', '0:a?', '-c:a',
             'copy', '-y', output_path
         ]
-        self._run_ffmpeg(cmd)
+        self.ffmpeg_runner.run_ffmpeg(cmd)
 
     def _combine_clips_vertical(self, clip1_path: str, clip2_path: str,
                                 output_path: str) -> None:
         """Combine two clips vertically while preserving audio"""
         cmd = [
-            self.ffmpeg_path,
-            '-i',
-            clip1_path,
-            '-i',
-            clip2_path,
-            # Complex filter to stack videos vertically
-            '-filter_complex',
-            '[0:v][1:v]vstack=inputs=2[v]',
-            # Map video output from filter
-            '-map',
-            '[v]',
-            # Map audio from first input (camera feed)
-            '-map',
-            '0:a',
-            # Copy audio codec
-            '-c:a',
-            'copy',
-            '-y',
-            output_path
+            self.ffmpeg_runner.config.ffmpeg_path, '-i', clip1_path, '-i',
+            clip2_path, '-filter_complex', '[0:v][1:v]vstack=inputs=2[v]',
+            '-map', '[v]', '-map', '0:a', '-c:a', 'copy', '-y', output_path
         ]
-        self._run_ffmpeg(cmd)
+        self.ffmpeg_runner.run_ffmpeg(cmd)
 
     def _overlay_subtitles(self, input_path: str, output_path: str,
                            segments: List[Dict]) -> None:
-        """Overlay subtitles using ffmpeg subtitles filter (handles Windows paths)."""
+        """Overlay subtitles using ffmpeg subtitles filter"""
         # If no segments or empty list, just copy
         if not segments:
             cmd = [
-                self.ffmpeg_path, '-i', input_path, '-c', 'copy', '-y',
-                output_path
+                self.ffmpeg_runner.config.ffmpeg_path, '-i', input_path, '-c',
+                'copy', '-y', output_path
             ]
-            self._run_ffmpeg(cmd)
+            self.ffmpeg_runner.run_ffmpeg(cmd)
             return
 
         # Filter out invalid segments
@@ -263,10 +197,10 @@ class EditingPipeline:
 
         if not valid_segments:
             cmd = [
-                self.ffmpeg_path, '-i', input_path, '-c', 'copy', '-y',
-                output_path
+                self.ffmpeg_runner.config.ffmpeg_path, '-i', input_path, '-c',
+                'copy', '-y', output_path
             ]
-            self._run_ffmpeg(cmd)
+            self.ffmpeg_runner.run_ffmpeg(cmd)
             return
 
         def _format_timestamp(seconds: float) -> str:
@@ -279,50 +213,43 @@ class EditingPipeline:
             return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
         # Create an SRT file using validated segments
-        srt_temp = self._create_temp_file(suffix='.srt')
+        srt_temp = self.ffmpeg_runner.create_temp_file(suffix='.srt')
         with open(srt_temp, 'w', encoding='utf-8') as f:
             for idx, seg in enumerate(valid_segments, 1):
                 start_ts = _format_timestamp(seg['start'])
                 end_ts = _format_timestamp(seg['end'])
                 f.write(f"{idx}\n")
                 f.write(f"{start_ts} --> {end_ts}\n")
-                # escape any stray newlines already in text
+                # Escape any stray newlines already in text
                 for line in seg['text'].splitlines():
                     f.write(f"{line}\n")
                 f.write("\n")
 
         # Build safe path for ffmpeg subtitles filter
         abs_path = os.path.abspath(srt_temp)
-        # Use forward slashes (safer)
-        ff_path = abs_path.replace('\\', '/')
-
-        # Escape colon characters (so C:/ doesn't get treated as option separators)
-        # e.g. "C:/Users/..." -> "C\: /Users/..." (single backslash before colon)
-        # Note: ffmpeg expects backslash as escape within filter expr.
-        ff_path_escaped = ff_path.replace(':', '\\:')
-
-        # For extra safety wrap in single quotes inside the filter expression.
-        vf_expr = f"subtitles='{ff_path_escaped}'"
+        # Use forward slashes and escape colons for cross-platform compatibility
+        ff_path = abs_path.replace('\\', '/').replace(':', '\\:')
+        vf_expr = f"subtitles='{ff_path}':force_style='Fontsize=24,PrimaryColour=&Hffffff,OutlineColour=&H000000,Outline=2'"
 
         cmd = [
-            self.ffmpeg_path, '-i', input_path, '-vf', vf_expr, '-c:a', 'copy',
-            '-y', output_path
+            self.ffmpeg_runner.config.ffmpeg_path, '-i', input_path, '-vf',
+            vf_expr, '-c:a', 'copy', '-y', output_path
         ]
 
-        self._run_ffmpeg(cmd)
+        self.ffmpeg_runner.run_ffmpeg(cmd)
 
     def run(self):
         try:
-            logging.info("Starting video processing with ffmpeg...")
+            logging.info("Starting video processing...")
 
             # Extract filename for output
             filename = os.path.splitext(os.path.basename(self.input_path))[0]
             os.makedirs(self.output_dir, exist_ok=True)
             output_path = f"{self.output_dir}{filename}-converted.mp4"
 
-            # Step 1: Set audio
+            # Set audio
             logging.info("Applying audio to the video...")
-            audio_temp = self._create_temp_file()
+            audio_temp = self.ffmpeg_runner.create_temp_file()
             self._set_audio(self.input_path, self.muted_audio, audio_temp)
 
             crop_width = 1080
@@ -331,7 +258,7 @@ class EditingPipeline:
             if self.include_cam:
                 # Process camera feed
                 logging.info("Processing camera feed...")
-                cam_temp = self._create_temp_file()
+                cam_temp = self.ffmpeg_runner.create_temp_file()
                 cam_h = self._process_camera_feed(audio_temp, cam_temp,
                                                   self.cam_x, self.cam_y,
                                                   self.cam_width,
@@ -341,26 +268,26 @@ class EditingPipeline:
 
             # Process main clip
             logging.info("Processing main clip...")
-            main_temp = self._create_temp_file()
+            main_temp = self.ffmpeg_runner.create_temp_file()
             self._process_main_clip(audio_temp, main_temp, crop_height, cam_h,
                                     crop_width)
 
             # Combine or blur
             if not self.include_cam:
                 logging.info("Blurring background...")
-                composited_temp = self._create_temp_file()
+                composited_temp = self.ffmpeg_runner.create_temp_file()
                 self._blur_background(audio_temp, composited_temp, crop_width,
                                       crop_height, cam_h, main_temp)
             else:
                 logging.info("Combining camera feed and main clip...")
-                composited_temp = self._create_temp_file()
+                composited_temp = self.ffmpeg_runner.create_temp_file()
                 self._combine_clips_vertical(cam_temp, main_temp,
                                              composited_temp)
 
             # Add subtitles
             if self.segments:
                 logging.info("Overlaying subtitles...")
-                final_temp = self._create_temp_file()
+                final_temp = self.ffmpeg_runner.create_temp_file()
                 self._overlay_subtitles(composited_temp, final_temp,
                                         self.segments)
             else:
@@ -370,10 +297,9 @@ class EditingPipeline:
             # Final encode with proper codec settings
             logging.info("Writing final video to file...")
             cmd = [
-                self.ffmpeg_path,
+                self.ffmpeg_runner.config.ffmpeg_path,
                 '-i',
                 final_temp,
-                # Ensure we map all streams
                 '-map',
                 '0',  # Map all streams from input
                 '-c:v',
@@ -391,14 +317,17 @@ class EditingPipeline:
                 '-y',
                 output_path
             ]
-            self._run_ffmpeg(cmd)
+            self.ffmpeg_runner.run_ffmpeg(cmd)
 
             logging.info(f"Video processing completed: {output_path}")
             return output_path
 
+        except FFmpegError as e:
+            logging.error(f"Video processing failed: {e}")
+            raise
         except Exception as e:
             logging.error(f"An error occurred during video processing: {e}")
             raise
         finally:
-            # Clean up temporary files
-            self._cleanup_temp_files()
+            # Clean up is handled by the FFmpegRunner in the conversion pipeline
+            pass
