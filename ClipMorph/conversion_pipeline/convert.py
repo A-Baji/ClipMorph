@@ -1,7 +1,5 @@
 import logging
 import os
-import subprocess
-import tempfile
 from typing import List, Tuple
 
 from better_profanity import profanity
@@ -9,7 +7,8 @@ from better_profanity import profanity
 from clipmorph.conversion_pipeline.edit import EditingPipeline
 from clipmorph.conversion_pipeline.transcribe import TranscriptionPipeline
 from clipmorph.conversion_pipeline.transcribe import write_srt_file
-from clipmorph.ffmpeg import get_ffmpeg_paths
+from clipmorph.ffmpeg import FFmpegError
+from clipmorph.ffmpeg import FFmpegRunner
 
 
 class ConversionPipeline:
@@ -19,68 +18,7 @@ class ConversionPipeline:
         self.no_subs = no_subs
         self.no_confirm = no_confirm
         self.kwargs = kwargs
-        self.ffmpeg_path, self.ffprobe_path = get_ffmpeg_paths()
-        self.temp_files = []
-
-    def _cleanup_temp_files(self):
-        """Clean up temporary files created during processing"""
-        for temp_file in self.temp_files:
-            try:
-                if os.path.exists(temp_file):
-                    os.remove(temp_file)
-            except OSError:
-                pass
-        self.temp_files.clear()
-
-    def _create_temp_file(self, suffix='.wav'):
-        """Create a temporary file and track it for cleanup"""
-        temp_fd, temp_path = tempfile.mkstemp(suffix=suffix)
-        os.close(temp_fd)  # Close the file descriptor, we only need the path
-        self.temp_files.append(temp_path)
-        return temp_path
-
-    def _run_ffmpeg(self, cmd: List[str]) -> None:
-        """Run ffmpeg command with error handling"""
-        try:
-            result = subprocess.run(cmd,
-                                    capture_output=True,
-                                    text=True,
-                                    check=True)
-            logging.debug(f"FFmpeg command succeeded: {' '.join(cmd)}")
-        except subprocess.CalledProcessError as e:
-            logging.error(f"FFmpeg command failed: {' '.join(cmd)}")
-            logging.error(f"Error output: {e.stderr}")
-            raise
-
-    def _extract_audio(self, input_path: str) -> str:
-        """
-        Extract audio from video file using ffmpeg
-        
-        Args:
-            input_path: Path to the input video file
-            
-        Returns:
-            Path to the extracted audio file
-        """
-        audio_temp = self._create_temp_file(suffix='.wav')
-
-        cmd = [
-            self.ffmpeg_path,
-            '-i',
-            input_path,
-            '-vn',  # No video
-            '-acodec',
-            'pcm_s16le',  # Uncompressed WAV for quality
-            '-ar',
-            '44100',  # Sample rate
-            '-ac',
-            '2',  # Stereo
-            '-y',
-            audio_temp
-        ]
-
-        self._run_ffmpeg(cmd)
-        return audio_temp
+        self.ffmpeg_runner = FFmpegRunner()
 
     def _detect_profanity(self, segments, custom_words=None):
         """Detect profanity in transcribed segments and return intervals to mute"""
@@ -105,42 +43,32 @@ class ConversionPipeline:
         Returns:
             Path to the muted audio file
         """
-        if not intervals:
-            # If no intervals to mute, just return a copy
-            muted_temp = self._create_temp_file(suffix='.wav')
-            cmd = [
-                self.ffmpeg_path, '-i', audio_path, '-c', 'copy', '-y',
-                muted_temp
-            ]
-            self._run_ffmpeg(cmd)
-            return muted_temp
+        output_path = self.ffmpeg_runner.create_temp_file('.wav')
 
-        muted_temp = self._create_temp_file(suffix='.wav')
+        if not intervals:
+            # If no intervals to mute, just copy
+            cmd = [
+                self.ffmpeg_runner.config.ffmpeg_path, '-i', audio_path, '-c',
+                'copy', '-y', output_path
+            ]
+            self.ffmpeg_runner.run_ffmpeg(cmd)
+            return output_path
 
         # Build volume filter with enable conditions for each mute interval
         volume_filters = []
         for start, end in intervals:
-            # Create a condition to mute during this interval
             enable_condition = f"between(t,{start},{end})"
             volume_filters.append(f"volume=0:enable='{enable_condition}'")
 
-        # Combine all volume filters
         filter_string = ','.join(volume_filters)
 
         cmd = [
-            self.ffmpeg_path,
-            '-i',
-            audio_path,
-            '-af',
-            filter_string,
-            '-c:a',
-            'pcm_s16le',  # Keep as uncompressed WAV
-            '-y',
-            muted_temp
+            self.ffmpeg_runner.config.ffmpeg_path, '-i', audio_path, '-af',
+            filter_string, '-c:a', 'pcm_s16le', '-y', output_path
         ]
 
-        self._run_ffmpeg(cmd)
-        return muted_temp
+        self.ffmpeg_runner.run_ffmpeg(cmd)
+        return output_path
 
     def _censor_subtitles(self, segments):
         """Censor profane words in subtitle segments."""
@@ -158,8 +86,7 @@ class ConversionPipeline:
         print(f"Generated {len(segments)} subtitle segments:")
         print("=" * 60)
 
-        for i, segment in enumerate(segments[:20],
-                                    1):  # Show first 20 segments
+        for i, segment in enumerate(segments[:20], 1):
             start_time = segment.get('start', 0)
             end_time = segment.get('end', 0)
             text = segment.get('text', '').strip()
@@ -189,10 +116,32 @@ class ConversionPipeline:
             else:
                 print("Please enter 'y' for yes or 'n' for no.")
 
+    def _validate_output(self, output_path: str):
+        """Validate the generated output file."""
+        if not os.path.exists(output_path):
+            raise FFmpegError("Output file was not created")
+
+        file_size = os.path.getsize(output_path)
+        if file_size < 1024:  # Less than 1KB
+            raise FFmpegError(
+                "Output file is suspiciously small, likely corrupted")
+
+        # Validate it's a proper video file
+        try:
+            self.ffmpeg_runner.get_video_info(output_path)
+        except FFmpegError:
+            raise FFmpegError("Generated file is not a valid video")
+
+        return file_size
+
     def run(self):
         try:
+            # Validate input file first
+            logging.info("Validating input file...")
+            self.ffmpeg_runner.validate_input_file(self.input_path)
+
             logging.info("Extracting audio from video...")
-            audio_path = self._extract_audio(self.input_path)
+            audio_path = self.ffmpeg_runner.extract_audio(self.input_path)
 
             segments = []
             muted_audio_path = audio_path
@@ -217,7 +166,7 @@ class ConversionPipeline:
                             use_subtitles = self._ask_subtitle_confirmation()
 
                         if use_subtitles:
-                            logging.debug("Writing subtitles (.srt)...")
+                            logging.info("Processing subtitles...")
                             write_srt_file(segments)
 
                             logging.info("Detecting profanity in audio...")
@@ -239,8 +188,7 @@ class ConversionPipeline:
                             logging.info(
                                 "Skipping subtitle overlay as requested by user."
                             )
-                            segments = [
-                            ]  # Don't pass segments to editing pipeline
+                            segments = []
                     else:
                         logging.warning(
                             "No subtitles were generated from transcription.")
@@ -255,32 +203,28 @@ class ConversionPipeline:
 
             logging.info("Editing video...")
 
-            # Pass the paths to EditingPipeline along with ffmpeg paths
+            # Pass FFmpeg runner to editing pipeline
             final_output = EditingPipeline(
                 input_path=self.input_path,
                 muted_audio=muted_audio_path,
                 segments=segments if use_subtitles else [],
-                ffmpeg_path=self.ffmpeg_path,
-                ffprobe_path=self.ffprobe_path,
+                ffmpeg_runner=self.ffmpeg_runner,
                 **self.kwargs).run()
 
-            # Simple output validation
-            if not os.path.exists(final_output):
-                raise RuntimeError("Output file was not created")
-
-            file_size = os.path.getsize(final_output)
-            if file_size < 1024:  # Less than 1KB
-                raise RuntimeError(
-                    "Output file is suspiciously small, likely corrupted")
+            # Validate output
+            file_size = self._validate_output(final_output)
 
             logging.info(
                 f"✓ Generated {file_size // (1024*1024)}MB video: {final_output}"
             )
             return final_output
 
+        except FFmpegError as e:
+            logging.error(f"FFmpeg error: {e}")
+            raise
         except Exception as e:
-            logging.error(f"An error occurred during conversion: {e}")
+            logging.error(f"Conversion failed: {e}")
             raise
         finally:
             # Clean up temporary files
-            self._cleanup_temp_files()
+            self.ffmpeg_runner.cleanup_temp_files()
