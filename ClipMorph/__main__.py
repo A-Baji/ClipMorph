@@ -50,6 +50,10 @@ def main():
     else:
         # Lazy import heavy dependencies only when needed
         from clipmorph.conversion_pipeline import ConversionPipeline
+
+        # Add no_confirm to conversion_args so the pipeline can access it
+        conversion_args['no_confirm'] = no_confirm
+
         conversion_output = ConversionPipeline(**conversion_args).run()
 
     # Check if upload should be skipped
