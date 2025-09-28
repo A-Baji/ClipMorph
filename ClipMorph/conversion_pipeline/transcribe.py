@@ -2,6 +2,7 @@ from functools import cached_property
 import gc
 import logging
 import os
+import re
 from typing import Any, Dict, List
 
 import torch
@@ -78,6 +79,58 @@ class TranscriptionPipeline:
             logging.error(f"Failed to load LLM model: {e}")
             return None
 
+    def _filter_empty_segments(
+            self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Filter out empty or invalid segments from Whisper output."""
+        filtered_segments = []
+
+        for segment in segments:
+            text = segment.get('text', '').strip()
+
+            # Skip completely empty segments
+            if not text:
+                logging.debug(
+                    f"Skipping empty segment at {segment.get('start', 0):.2f}s"
+                )
+                continue
+
+            # Skip segments with only non-word characters (punctuation, whitespace)
+            if not re.search(r'\w', text):
+                logging.debug(
+                    f"Skipping non-word segment: '{text}' at {segment.get('start', 0):.2f}s"
+                )
+                continue
+
+            # Skip segments that are likely hallucinations (very short with low confidence)
+            if len(text) < 3 and segment.get('avg_logprob', 0) < -1.0:
+                logging.debug(
+                    f"Skipping likely hallucination: '{text}' at {segment.get('start', 0):.2f}s"
+                )
+                continue
+
+            # Skip segments with very low confidence
+            if segment.get('avg_logprob', 0) < -1.5:
+                logging.debug(
+                    f"Skipping low confidence segment: '{text}' at {segment.get('start', 0):.2f}s"
+                )
+                continue
+
+            # Skip segments that are too short in duration (likely noise)
+            start = segment.get('start', 0)
+            end = segment.get('end', 0)
+            duration = end - start
+            if duration < 0.3:  # Less than 300ms
+                logging.debug(
+                    f"Skipping short duration segment: '{text}' ({duration:.2f}s)"
+                )
+                continue
+
+            filtered_segments.append(segment)
+
+        logging.info(
+            f"Filtered segments: {len(segments)} -> {len(filtered_segments)}")
+        return filtered_segments
+
     def _get_transcription_segments(self) -> List[Dict[str, Any]]:
         """Get transcription segments using cached Whisper model."""
         result = self._whisper_model.transcribe(
@@ -92,17 +145,26 @@ class TranscriptionPipeline:
             patience=1.0,
             condition_on_previous_text=False,
             suppress_tokens=[-1],
-            no_speech_threshold=0.7,
+            no_speech_threshold=0.8,  # Increased from 0.7 to be more aggressive
             logprob_threshold=-1.0,
-            hallucination_silence_threshold=1.0,
-            compression_ratio_threshold=2.6)
+            hallucination_silence_threshold=2.0,  # Increased from 1.0
+            compression_ratio_threshold=
+            2.4,  # Decreased from 2.6 to be more strict
+        )
 
         self._cleanup_model('_whisper_model')
-        return result['segments']
+
+        # Filter out empty/invalid segments before returning
+        segments = result.get('segments', [])
+        return self._filter_empty_segments(segments)
 
     def _align_segments(
             self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Align segments using cached alignment model."""
+        if not segments:
+            logging.warning("No segments to align")
+            return []
+
         align_data = self._align_model_data
         aligned = whisperx.align(segments,
                                  align_data["model"],
@@ -112,23 +174,31 @@ class TranscriptionPipeline:
                                  return_char_alignments=False)
 
         self._cleanup_model('_align_model_data')
-        return aligned['segments']
+
+        # Filter aligned segments again to catch any that became empty after alignment
+        aligned_segments = aligned.get('segments', [])
+        return self._filter_empty_segments(aligned_segments)
 
     def _diarize_assign_speakers(
             self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Diarize and assign speakers using cached diarization model."""
+        if not segments:
+            logging.warning("No segments for diarization")
+            return []
+
         diarizer = self._diarization_model
         if not diarizer:
             logging.warning(
                 "Diarization model not available, skipping speaker assignment."
             )
             return segments
+
         diarize_segs = diarizer(self._audio)
         result = whisperx.diarize.assign_word_speakers(diarize_segs,
                                                        {"segments": segments})
 
         self._cleanup_model('_diarization_model')
-        return result["segments"]
+        return result.get("segments", [])
 
     def _group_words_into_phrases(
             self,
@@ -143,29 +213,43 @@ class TranscriptionPipeline:
         # Filter out invalid segments first
         valid_segments = []
         for seg in segments:
-            if not seg.get("words"):
+            words = seg.get("words", [])
+            if not words:
                 continue
 
             valid_words = []
-            for word in seg["words"]:
-                if (isinstance(word.get("start"), (int, float))
-                        and isinstance(word.get("end"),
-                                       (int, float)) and word.get("word")):
-                    valid_words.append(word)
+            for word in words:
+                word_text = word.get("word", "").strip()
+                start = word.get("start")
+                end = word.get("end")
+
+                # Skip empty words or words with invalid timestamps
+                if (not word_text or not isinstance(start, (int, float))
+                        or not isinstance(end, (int, float)) or start >= end):
+                    continue
+
+                # Skip words that are just punctuation or whitespace
+                if not re.search(r'\w', word_text):
+                    continue
+
+                valid_words.append(word)
 
             if valid_words:
                 seg["words"] = valid_words
                 valid_segments.append(seg)
 
         if not valid_segments:
+            logging.warning("No valid segments after word filtering")
             return []
 
         output = []
         num_segments = len(valid_segments)
-        for i, seg in enumerate(segments):
+
+        for i, seg in enumerate(valid_segments):
             words = seg.get("words", [])
             if not words:
                 continue
+
             sub_start = words[0].get("start")
             sub_end = words[0].get("end")
             sub_words = [words[0]]
@@ -179,6 +263,7 @@ class TranscriptionPipeline:
                     gap = curr_start - prev_end
                 else:
                     gap = 0
+
                 if gap > max_gap or len(sub_words) >= max_words_per_segment:
                     segments_buffer.append({
                         "start": sub_start,
@@ -203,7 +288,7 @@ class TranscriptionPipeline:
 
             next_orig_start = None
             if i + 1 < num_segments:
-                next_seg_words = segments[i + 1].get("words", [])
+                next_seg_words = valid_segments[i + 1].get("words", [])
                 if next_seg_words:
                     next_orig_start = next_seg_words[0].get("start")
 
@@ -223,16 +308,29 @@ class TranscriptionPipeline:
                 else:
                     actual_pad = end_padding
 
+                # Build the text from valid words only
+                text_parts = []
+                for w in new_seg.get("words", []):
+                    word_text = w.get("word", "").strip()
+                    if word_text and re.search(r'\w', word_text):
+                        text_parts.append(word_text)
+
+                final_text = " ".join(text_parts).strip()
+
+                # Skip if we ended up with empty text after filtering
+                if not final_text:
+                    continue
+
                 seg_out = {
                     "start": new_seg.get("start"),
                     "end": new_seg.get("end") + actual_pad,
-                    "text":
-                    " ".join(w.get("word") for w in new_seg.get("words")),
+                    "text": final_text,
                     "speaker": new_seg.get("speaker"),
                     "words": new_seg.get("words"),
                 }
                 output.append(seg_out)
 
+        logging.info(f"Generated {len(output)} phrase segments")
         return output
 
     def _cleanup(self):
@@ -259,10 +357,16 @@ class TranscriptionPipeline:
             logging.info("Generating transcription segments...")
             segments = self._get_transcription_segments()
 
+            if not segments:
+                logging.warning("No valid segments found in transcription")
+                return []
+
             logging.info("Aligning segments with audio...")
             aligned_segments = self._align_segments(segments)
             if not aligned_segments:
-                logging.warning("Failed to align segments; invalid segments.")
+                logging.warning(
+                    "Failed to align segments; no valid segments after alignment."
+                )
                 return []
 
             logging.info("Diarizing and assigning speakers to segments...")

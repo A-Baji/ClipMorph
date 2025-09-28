@@ -14,8 +14,10 @@ from clipmorph.ffmpeg import get_ffmpeg_paths
 
 class ConversionPipeline:
 
-    def __init__(self, input_path, **kwargs):
+    def __init__(self, input_path, no_subs=False, no_confirm=False, **kwargs):
         self.input_path = input_path
+        self.no_subs = no_subs
+        self.no_confirm = no_confirm
         self.kwargs = kwargs
         self.ffmpeg_path, self.ffprobe_path = get_ffmpeg_paths()
         self.temp_files = []
@@ -146,50 +148,134 @@ class ConversionPipeline:
             segment["text"] = profanity.censor(segment["text"])
         return segments
 
+    def _log_subtitles(self, segments):
+        """Log the generated subtitles for user review."""
+        if not segments:
+            logging.info("No subtitles were generated.")
+            return
+
+        print("\n" + "=" * 60)
+        print(f"Generated {len(segments)} subtitle segments:")
+        print("=" * 60)
+
+        for i, segment in enumerate(segments[:20],
+                                    1):  # Show first 20 segments
+            start_time = segment.get('start', 0)
+            end_time = segment.get('end', 0)
+            text = segment.get('text', '').strip()
+
+            # Format time as MM:SS
+            start_min, start_sec = divmod(int(start_time), 60)
+            end_min, end_sec = divmod(int(end_time), 60)
+
+            print(
+                f"{i:2d}. [{start_min:02d}:{start_sec:02d}-{end_min:02d}:{end_sec:02d}] {text}"
+            )
+
+        if len(segments) > 20:
+            print(f"... and {len(segments) - 20} more segments")
+
+        print("=" * 60)
+
+    def _ask_subtitle_confirmation(self):
+        """Ask user if they want to include subtitles in the video."""
+        while True:
+            response = input(
+                "\nAdd these subtitles to the video? (y/n): ").strip().lower()
+            if response in ['y', 'yes']:
+                return True
+            elif response in ['n', 'no']:
+                return False
+            else:
+                print("Please enter 'y' for yes or 'n' for no.")
+
     def run(self):
         try:
             logging.info("Extracting audio from video...")
             audio_path = self._extract_audio(self.input_path)
 
-            logging.info("Transcribing audio...")
-            segments = TranscriptionPipeline(audio_path).run()
+            segments = []
+            muted_audio_path = audio_path
+            use_subtitles = False
 
-            muted_audio_path = None
-            if not segments:
-                logging.warning(
-                    "Failed to transcribe audio. No subtitles will be generated and profanity will not be censored."
-                )
-                # Use original audio when no transcription/muting needed
-                muted_audio_path = audio_path
+            if not self.no_subs:
+                logging.info("Transcribing audio...")
+                try:
+                    segments = TranscriptionPipeline(audio_path).run()
+
+                    if segments:
+                        # Log subtitles for user review
+                        self._log_subtitles(segments)
+
+                        # Ask for confirmation unless --no-confirm is set
+                        if self.no_confirm:
+                            use_subtitles = True
+                            logging.info(
+                                "Auto-confirming subtitle addition (--no-confirm flag)"
+                            )
+                        else:
+                            use_subtitles = self._ask_subtitle_confirmation()
+
+                        if use_subtitles:
+                            logging.debug("Writing subtitles (.srt)...")
+                            write_srt_file(segments)
+
+                            logging.info("Detecting profanity in audio...")
+                            intervals = self._detect_profanity(segments)
+
+                            if intervals:
+                                logging.info(
+                                    "Muting profane audio segments...")
+                                muted_audio_path = self._mute_audio(
+                                    intervals, audio_path)
+                            else:
+                                logging.info(
+                                    "No profanity detected, using original audio..."
+                                )
+
+                            logging.info("Censoring subtitles...")
+                            segments = self._censor_subtitles(segments)
+                        else:
+                            logging.info(
+                                "Skipping subtitle overlay as requested by user."
+                            )
+                            segments = [
+                            ]  # Don't pass segments to editing pipeline
+                    else:
+                        logging.warning(
+                            "No subtitles were generated from transcription.")
+
+                except Exception as e:
+                    logging.warning(
+                        f"Transcription failed: {e}. Continuing without subtitles."
+                    )
+                    segments = []
             else:
-                logging.debug("Generating subtitles (.srt)...")
-                write_srt_file(segments)
-
-                logging.info("Detecting profanity in audio...")
-                intervals = self._detect_profanity(segments)
-
-                if intervals:
-                    logging.info("Muting profane audio segments...")
-                    muted_audio_path = self._mute_audio(intervals, audio_path)
-                else:
-                    logging.info(
-                        "No profanity detected, using original audio...")
-                    muted_audio_path = audio_path
-
-                logging.info("Censoring subtitles...")
-                segments = self._censor_subtitles(segments)
+                logging.info("Skipping transcription (--no-subs flag)")
 
             logging.info("Editing video...")
+
             # Pass the paths to EditingPipeline along with ffmpeg paths
-            final_output = EditingPipeline(input_path=self.input_path,
-                                           muted_audio=muted_audio_path,
-                                           segments=segments,
-                                           ffmpeg_path=self.ffmpeg_path,
-                                           ffprobe_path=self.ffprobe_path,
-                                           **self.kwargs).run()
+            final_output = EditingPipeline(
+                input_path=self.input_path,
+                muted_audio=muted_audio_path,
+                segments=segments if use_subtitles else [],
+                ffmpeg_path=self.ffmpeg_path,
+                ffprobe_path=self.ffprobe_path,
+                **self.kwargs).run()
 
-            logging.info(f"Saved converted video to {final_output}")
+            # Simple output validation
+            if not os.path.exists(final_output):
+                raise RuntimeError("Output file was not created")
 
+            file_size = os.path.getsize(final_output)
+            if file_size < 1024:  # Less than 1KB
+                raise RuntimeError(
+                    "Output file is suspiciously small, likely corrupted")
+
+            logging.info(
+                f"✓ Generated {file_size // (1024*1024)}MB video: {final_output}"
+            )
             return final_output
 
         except Exception as e:

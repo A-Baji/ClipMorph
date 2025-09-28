@@ -27,17 +27,19 @@ def _create_parser():
 
     # Input and basic options (neither conversion nor upload specific)
     parser.add_argument("input_path", help="Path to the input video file.")
-    parser.add_argument("--no-confirm",
-                        "-y",
-                        action="store_true",
-                        help="Bypass upload confirmation prompt.")
+    parser.add_argument(
+        "--no-confirm",
+        "-y",
+        action="store_true",
+        help="Bypass subtitles and upload confirmation prompt.")
     parser.add_argument("--clean",
                         "-c",
                         action="store_true",
                         help="Delete output video after upload.")
-    parser.add_argument("--no-conversion",
-                        action="store_true",
-                        help="Skip conversion and upload input video directly.")
+    parser.add_argument(
+        "--no-conversion",
+        action="store_true",
+        help="Skip conversion and upload input video directly.")
 
     # Conversion pipeline options
     conversion_group = parser.add_argument_group('Conversion Options')
@@ -67,6 +69,10 @@ def _create_parser():
         type=str,
         default="output/",
         help="Custom output directory for the processed video.")
+    conversion_group.add_argument(
+        "--no-subs",
+        action="store_true",
+        help="Skip transcription and subtitle generation entirely.")
 
     # Upload control options
     upload_group = parser.add_argument_group('Upload Control')
@@ -154,7 +160,8 @@ def separate_args_by_category(args, parser):
 
     # Special handling for positional arguments and main control args
     main_control_args = {
-        'input_path', 'no_confirm', 'clean', 'no_conversion', 'no_upload', 'upload_to', 'skip'
+        'input_path', 'no_confirm', 'clean', 'no_conversion', 'no_upload',
+        'upload_to', 'skip'
     }
     conversion_args.add('input_path')  # input_path goes to conversion
 
