@@ -186,11 +186,13 @@ class EditingPipeline:
             try:
                 start = float(seg.get('start', 0))
                 end = float(seg.get('end', 0))
+                speaker = seg.get('speaker', 'default')
                 if text and start is not None and end is not None:
                     valid_segments.append({
                         'text': text,
                         'start': start,
-                        'end': end
+                        'end': end,
+                        'speaker': speaker
                     })
             except (TypeError, ValueError):
                 continue
@@ -212,19 +214,47 @@ class EditingPipeline:
             h = total_ms // 3600000
             return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
-        # Create an SRT file using validated segments
+        COLOR_PALETTE = [
+            '#00BFFF',  # Deep Sky Blue
+            '#FFD700',  # Gold
+            '#32CD32',  # Lime Green
+            '#FF4500',  # Orange Red
+            '#7B68EE',  # Medium Slate Blue
+            '#FF69B4',  # Hot Pink
+            '#FFA500',  # Orange
+            '#ADFF2F',  # Green Yellow
+            '#40E0D0',  # Turquoise
+            '#FFFFFF'  # White (default)
+        ]
+
+        # Get unique speakers from segments and sort for consistent colors
+        speakers = sorted(
+            {seg['speaker']
+             for seg in valid_segments if seg.get('speaker')})
+
+        # Create color mapping for speakers
+        speaker_colors = {}
+        for idx, speaker in enumerate(speakers):
+            if idx < len(COLOR_PALETTE) - 1:
+                speaker_colors[speaker] = COLOR_PALETTE[idx]
+            else:
+                speaker_colors[speaker] = COLOR_PALETTE[-1]  # Default to white
+
+        # Create an SRT file using validated segments with color tags
         srt_temp = self.ffmpeg_runner.create_temp_file(suffix='.srt')
         with open(srt_temp, 'w', encoding='utf-8') as f:
             for idx, seg in enumerate(valid_segments, 1):
                 start_ts = _format_timestamp(seg['start'])
                 end_ts = _format_timestamp(seg['end'])
+                speaker = seg.get('speaker', 'default')
+                color = speaker_colors.get(speaker, COLOR_PALETTE[-1])
+
                 f.write(f"{idx}\n")
                 f.write(f"{start_ts} --> {end_ts}\n")
-                # Escape any stray newlines already in text
+                # Add color formatting to each line
                 for line in seg['text'].splitlines():
-                    f.write(f"{line}\n")
+                    f.write(f'<font color="{color}">{line}</font>\n')
                 f.write("\n")
-
         # Get path to Roboto font
         font_path = os.path.join(os.path.dirname(__file__), '..', 'resources',
                                  'fonts', 'roboto', 'Roboto-Bold.ttf')
