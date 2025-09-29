@@ -225,15 +225,54 @@ class EditingPipeline:
                     f.write(f"{line}\n")
                 f.write("\n")
 
-        # Build safe path for ffmpeg subtitles filter
+        # Get path to Roboto font
+        font_path = os.path.join(os.path.dirname(__file__), '..', 'resources',
+                                 'fonts', 'roboto', 'Roboto-Bold.ttf')
+        # Normalize path for ffmpeg
+        font_path = os.path.abspath(font_path).replace('\\', '/').replace(
+            ':', '\\:')
+
+        subtitle_style = (
+            f'Fontfile={font_path},'  # Use embedded font file
+            'Fontname=Roboto,'  # Font family name
+            'Fontsize=18,'  # Font size
+            'PrimaryColour=&Hffffff,'  # Text color (white)
+            'OutlineColour=&H000000,'  # Outline color (black)
+            'BackColour=&H80000000,'  # Background color (semi-transparent)
+            'Bold=1,'  # Bold text
+            'Outline=1,'  # Outline width
+            'Shadow=1,'  # Shadow size
+            'Blur=0.6,'  # Add slight blur for anti-aliasing
+            'MarginV=40,'  # Vertical margin from bottom
+            'Spacing=0.2'  # Add slight spacing between letters
+        )
+
+        # Build safe path for ffmpeg subtitles filter with lanczos scaling
         abs_path = os.path.abspath(srt_temp)
-        # Use forward slashes and escape colons for cross-platform compatibility
         ff_path = abs_path.replace('\\', '/').replace(':', '\\:')
-        vf_expr = f"subtitles='{ff_path}':force_style='Fontsize=24,PrimaryColour=&Hffffff,OutlineColour=&H000000,Outline=2'"
+
+        # Combine subtitle overlay with lanczos scaling
+        vf_expr = (
+            f"scale=flags=lanczos,subtitles='{ff_path}':force_style='{subtitle_style}',"
+            "scale=flags=lanczos"  # Second scale pass for final refinement
+        )
 
         cmd = [
-            self.ffmpeg_runner.config.ffmpeg_path, '-i', input_path, '-vf',
-            vf_expr, '-c:a', 'copy', '-y', output_path
+            self.ffmpeg_runner.config.ffmpeg_path,
+            '-i',
+            input_path,
+            '-vf',
+            vf_expr,
+            '-c:v',
+            'libx264',  # Use H.264 codec
+            '-preset',
+            'slow',  # Higher quality preset
+            '-crf',
+            '18',  # Higher quality CRF (lower = better)
+            '-c:a',
+            'copy',  # Copy audio stream
+            '-y',
+            output_path
         ]
 
         self.ffmpeg_runner.run_ffmpeg(cmd)
