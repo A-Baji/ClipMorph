@@ -1,6 +1,36 @@
 # Example ClipMorph Configuration File
-# This file shows how to configure platform-specific upload settings
+# This file shows all available configuration options
 
+# General settings
+general:
+  no_confirm: false  # Bypass subtitles and upload confirmation prompt
+  clean: false       # Delete output video after upload
+  no_conversion: false  # Skip conversion and upload input video directly
+
+# Video conversion settings
+conversion:
+  no_cam: false  # Exclude the camera feed from the output
+  camera:
+    x: 20        # Top left x coordinate of camera feed
+    y: 20        # Top left y coordinate of camera feed
+    width: 320   # Width in pixels of camera feed
+    height: 240  # Height in pixels of camera feed
+  output_dir: "output"  # Custom output directory for processed videos
+  no_subs: false  # Skip transcription and subtitle generation
+
+# Upload control settings
+upload:
+  no_upload: false  # Skip all uploads
+  upload_to: []     # List of platforms to upload to (empty = all)
+  skip: []          # List of platforms to skip
+
+# Content metadata
+content:
+  title: ""         # Title/caption for the content
+  description: ""   # Description for the content
+  tags: []         # List of tags/keywords
+
+# Platform-specific settings
 platforms:
   youtube:
     category: "20"  # Gaming category
