@@ -19,6 +19,7 @@ class ConversionPipeline:
         self.no_confirm = no_confirm
         self.kwargs = kwargs
         self.ffmpeg_runner = FFmpegRunner()
+        self.segments = []
 
     def _detect_profanity(self, segments, custom_words=None):
         """Detect profanity in transcribed segments and return intervals to mute"""
@@ -90,13 +91,17 @@ class ConversionPipeline:
             start_time = segment.get('start', 0)
             end_time = segment.get('end', 0)
             text = segment.get('text', '').strip()
+            speaker = segment.get('speaker', '')
 
             # Format time as MM:SS
             start_min, start_sec = divmod(int(start_time), 60)
             end_min, end_sec = divmod(int(end_time), 60)
 
+            # Add speaker label if available
+            speaker_label = f"{speaker}: " if speaker else ""
+
             print(
-                f"{i:2d}. [{start_min:02d}:{start_sec:02d}-{end_min:02d}:{end_sec:02d}] {text}"
+                f"{i:2d}. [{start_min:02d}:{start_sec:02d}-{end_min:02d}:{end_sec:02d}] {speaker_label}{text}"
             )
 
         if len(segments) > 20:
@@ -105,16 +110,70 @@ class ConversionPipeline:
         print("=" * 60)
 
     def _ask_subtitle_confirmation(self):
-        """Ask user if they want to include subtitles in the video."""
+        """Ask user if they want to include subtitles and select which ones to omit."""
         while True:
             response = input(
-                "\nAdd these subtitles to the video? (y/n): ").strip().lower()
+                "\nProceed with generated subtitles or select lines to omit? (y/n/select): "
+            ).strip().lower()
+
+            if response in ['n', 'no']:
+                return False
+
             if response in ['y', 'yes']:
                 return True
-            elif response in ['n', 'no']:
-                return False
-            else:
-                print("Please enter 'y' for yes or 'n' for no.")
+
+            if response == 'select':
+                while True:
+                    omit_input = input(
+                        "\nEnter line numbers to omit (e.g., 1,3-5,7) or press Enter to keep all: "
+                    ).strip()
+
+                    if not omit_input:
+                        return True
+
+                    try:
+                        # Parse the input string into a set of line numbers
+                        omit_numbers = set()
+                        for part in omit_input.split(','):
+                            if '-' in part:
+                                start, end = map(int, part.split('-'))
+                                omit_numbers.update(range(start, end + 1))
+                            else:
+                                omit_numbers.add(int(part))
+
+                        # Validate line numbers are in range
+                        invalid_numbers = [
+                            i for i in omit_numbers
+                            if i < 1 or i > len(self.segments)
+                        ]
+                        if invalid_numbers:
+                            print(
+                                f"Invalid line numbers: {', '.join(map(str, invalid_numbers))}."
+                            )
+                            print(
+                                f"Please enter numbers between 1 and {len(self.segments)}."
+                            )
+                            continue
+
+                        # Mark segments for removal
+                        for i in sorted(omit_numbers, reverse=True):
+                            del self.segments[i - 1]
+
+                        logging.info(
+                            f"Omitted {len(omit_numbers)} subtitle segments")
+                        print("\nUpdated subtitles:")
+                        self._log_subtitles(self.segments)
+                        return True
+
+                    except ValueError:
+                        print(
+                            "Invalid format. Please use numbers and ranges (e.g., 1,3-5,7)"
+                        )
+                        continue
+
+            print(
+                "Please enter 'y' for yes, 'n' for no, or 'select' to choose lines to omit."
+            )
 
     def _validate_output(self, output_path: str):
         """Validate the generated output file."""
@@ -150,11 +209,11 @@ class ConversionPipeline:
             if not self.no_subs:
                 logging.info("Transcribing audio...")
                 try:
-                    segments = TranscriptionPipeline(audio_path).run()
+                    self.segments = TranscriptionPipeline(audio_path).run()
 
-                    if segments:
+                    if self.segments:
                         # Log subtitles for user review
-                        self._log_subtitles(segments)
+                        self._log_subtitles(self.segments)
 
                         # Ask for confirmation unless --no-confirm is set
                         if self.no_confirm:
@@ -167,10 +226,10 @@ class ConversionPipeline:
 
                         if use_subtitles:
                             logging.info("Processing subtitles...")
-                            write_srt_file(segments)
+                            write_srt_file(self.segments)
 
                             logging.info("Detecting profanity in audio...")
-                            intervals = self._detect_profanity(segments)
+                            intervals = self._detect_profanity(self.segments)
 
                             if intervals:
                                 logging.info(
@@ -183,12 +242,13 @@ class ConversionPipeline:
                                 )
 
                             logging.info("Censoring subtitles...")
-                            segments = self._censor_subtitles(segments)
+                            self.segments = self._censor_subtitles(
+                                self.segments)
                         else:
                             logging.info(
                                 "Skipping subtitle overlay as requested by user."
                             )
-                            segments = []
+                            self.segments = []
                     else:
                         logging.warning(
                             "No subtitles were generated from transcription.")
@@ -207,7 +267,7 @@ class ConversionPipeline:
             final_output = EditingPipeline(
                 input_path=self.input_path,
                 muted_audio=muted_audio_path,
-                segments=segments if use_subtitles else [],
+                segments=self.segments if use_subtitles else [],
                 ffmpeg_runner=self.ffmpeg_runner,
                 **self.kwargs).run()
 

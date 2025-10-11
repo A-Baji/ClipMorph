@@ -1,4 +1,30 @@
 {
+  "general": {
+    "no_confirm": false,
+    "clean": false,
+    "no_conversion": false
+  },
+  "conversion": {
+    "no_cam": false,
+    "camera": {
+      "x": 20,
+      "y": 20,
+      "width": 320,
+      "height": 240
+    },
+    "output_dir": "output",
+    "no_subs": false
+  },
+  "upload": {
+    "no_upload": false,
+    "upload_to": [],
+    "skip": []
+  },
+  "content": {
+    "title": "",
+    "description": "",
+    "tags": []
+  },
   "platforms": {
     "youtube": {
       "category": "20",

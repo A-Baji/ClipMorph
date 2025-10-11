@@ -3,12 +3,96 @@
 import argparse
 import json
 from pathlib import Path
+import shutil
+
+import yaml
+
+
+def create_config_template(output_path=None):
+    """Create a template YAML configuration file."""
+    template = {
+        "general": {
+            "no_confirm":
+            False,  # Bypass subtitles and upload confirmation prompt
+            "clean": False,  # Delete output video after upload
+            "no_conversion":
+            False  # Skip conversion and upload input video directly
+        },
+        "conversion": {
+            "no_cam": False,  # Exclude the camera feed from the output
+            "camera": {
+                "x": 20,  # Top left x coordinate of camera feed
+                "y": 20,  # Top left y coordinate of camera feed
+                "width": 320,  # Width in pixels of camera feed
+                "height": 240  # Height in pixels of camera feed
+            },
+            "output_dir":
+            "output",  # Custom output directory for processed videos
+            "no_subs": False  # Skip transcription and subtitle generation
+        },
+        "upload": {
+            "no_upload": False,  # Skip all uploads
+            "upload_to": [],  # List of platforms to upload to (empty = all)
+            "skip": []  # List of platforms to skip
+        },
+        "content": {
+            "title": "",  # Title/caption for the content
+            "description": "",  # Description for the content
+            "tags": []  # List of tags/keywords
+        },
+        "platforms": {
+            "youtube": {
+                "category": "20",  # Gaming category
+                "privacy_status": "unlisted"  # public, unlisted, or private
+            },
+            "instagram": {
+                "share_to_feed":
+                False,  # Don't share to main feed (story only)
+                "thumb_offset": 3000  # Thumbnail at 3 seconds
+            },
+            "tiktok": {
+                "privacy_level":
+                "MUTUAL_FOLLOW_FRIENDS"  # PUBLIC_TO_EVERYONE, MUTUAL_FOLLOW_FRIENDS, or SELF_ONLY
+            },
+            "twitter": {
+            }  # Twitter uses account-level privacy, no platform-specific options currently
+        }
+    }
+
+    # If no output path specified, use default
+    if not output_path:
+        output_path = Path.cwd() / "clipmorph.yaml"
+    else:
+        output_path = Path(output_path)
+
+    # Check if file already exists
+    if output_path.exists():
+        backup_path = output_path.with_suffix(output_path.suffix + ".backup")
+        shutil.copy2(output_path, backup_path)
+        print(f"Existing config file backed up to: {backup_path}")
+
+    # Write the template with comments preserved
+    with open(output_path, 'w') as f:
+        yaml.dump(template, f, sort_keys=False, default_flow_style=False)
+        print(f"Created config template at: {output_path}")
 
 
 def parse_args_with_parser():
     """Parse arguments and return both args and parser for automatic categorization."""
     parser = _create_parser()
     args = parser.parse_args()
+
+    # Handle init command
+    if args.init:
+        create_config_template(args.config_path)
+        return None, parser
+
+    # Validate required args for normal operation
+    if not args.input_path:
+        parser.error("input_path is required unless --init is specified")
+
+    if not args.no_upload and not args.title:
+        parser.error("--title is required unless --no-upload is specified")
 
     # Process platform overrides
     args.platform_overrides = _process_platform_overrides(args)
@@ -26,7 +110,17 @@ def _create_parser():
         description="Convert and upload a video to short-form platforms.")
 
     # Input and basic options (neither conversion nor upload specific)
-    parser.add_argument("input_path", help="Path to the input video file.")
+    parser.add_argument("input_path",
+                        nargs='?',
+                        help="Path to the input video file.")
+    parser.add_argument(
+        "--init",
+        action="store_true",
+        help="Create a template configuration file in the current directory.")
+    parser.add_argument(
+        "--config-path",
+        type=str,
+        help="Custom path for the generated config file when using --init.")
     parser.add_argument(
         "--no-confirm",
         "-y",
@@ -121,6 +215,18 @@ def parse_args():
     """Parse command line arguments."""
     parser = _create_parser()
     args = parser.parse_args()
+
+    # Handle init command
+    if args.init:
+        create_config_template(args.config_path)
+        return None
+
+    # Validate required args for normal operation
+    if not args.input_path:
+        parser.error("input_path is required unless --init is specified")
+
+    if not args.no_upload and not args.title:
+        parser.error("--title is required unless --no-upload is specified")
 
     # Process platform overrides
     args.platform_overrides = _process_platform_overrides(args)
@@ -222,5 +328,7 @@ def _process_platform_overrides(args):
         if isinstance(params, dict):
             for param, value in params.items():
                 flattened[f"{platform}_{param}"] = value
+
+    return flattened
 
     return flattened

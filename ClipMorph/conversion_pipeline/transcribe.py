@@ -67,18 +67,6 @@ class TranscriptionPipeline:
         return whisperx.diarize.DiarizationPipeline(use_auth_token=hf_token,
                                                     device=DEVICE)
 
-    @cached_property
-    def _llm_model(self):
-        """Load LLM model on first access."""
-        try:
-            logging.info("Loading Canary-Qwen-2.5B model...")
-            import nemo.collections.speechlm2 as slm
-            return slm.models.SALM.from_pretrained(
-                "nvidia/canary-qwen-2.5b").eval()
-        except Exception as e:
-            logging.error(f"Failed to load LLM model: {e}")
-            return None
-
     def _filter_empty_segments(
             self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Filter out empty or invalid segments from Whisper output."""
@@ -337,7 +325,7 @@ class TranscriptionPipeline:
         """Clean up GPU memory and cached models."""
         for attr in [
                 '_audio', '_whisper_model', '_align_model_data',
-                '_diarization_model', '_llm_model'
+                '_diarization_model'
         ]:
             try:
                 delattr(self, attr)
