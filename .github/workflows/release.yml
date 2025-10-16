@@ -58,14 +58,18 @@ jobs:
         # Update version file
         echo "__version__ = \"${{ github.event.inputs.version }}\"" > clipmorph/__version__.py
         
-        # Commit changes
+        # Commit changes (allow empty if no changes)
         git add clipmorph/__version__.py
-        git commit -m "Release v${{ github.event.inputs.version }}"
+        git diff --staged --quiet || git commit -m "Release v${{ github.event.inputs.version }}"
         
         # Create tag
         git tag -a "v${{ github.event.inputs.version }}" -m "Release v${{ github.event.inputs.version }}"
         
         # Push changes using the app token
         git remote set-url origin "https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/${{ github.repository }}.git"
-        git push origin main
+        
+        # Only push to main if there were changes
+        git diff --quiet HEAD origin/main || git push origin main
+        
+        # Always push the tag
         git push origin "v${{ github.event.inputs.version }}"
