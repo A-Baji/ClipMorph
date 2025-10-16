@@ -21,12 +21,27 @@ jobs:
         ref: main
         fetch-depth: 0
     
+    - name: Validate version format
+      run: |
+        VERSION="${{ github.event.inputs.version }}"
+        
+        # Check if version matches X.Y.Z format (where X, Y, Z are numbers)
+        if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "❌ Error: Version must be in format X.Y.Z (e.g., 1.2.3)"
+          echo "Received: $VERSION"
+          exit 1
+        fi
+        
+        echo "✓ Version format is valid: $VERSION"
+    
     - name: Check if version tag exists
       run: |
         if git rev-parse "v${{ github.event.inputs.version }}" >/dev/null 2>&1; then
-          echo "Error: Version v${{ github.event.inputs.version }} already exists"
+          echo "❌ Error: Version v${{ github.event.inputs.version }} already exists"
           exit 1
         fi
+        
+        echo "✓ Version tag does not exist yet"
 
     - name: Generate GitHub App token
       id: generate_token
@@ -39,7 +54,7 @@ jobs:
       run: |
         git config user.name "GitHub Actions"
         git config user.email "actions@github.com"
-        
+        ls -la
         # Update version file
         echo "__version__ = \"${{ github.event.inputs.version }}\"" > clipmorph/__version__.py
         
