@@ -1,0 +1,105 @@
+name: Build Executables
+
+on:
+  push:
+    tags:
+      - 'v*'  # Trigger on version tags
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+        include:
+          - os: windows-latest
+            output_name: clipmorph.exe
+            asset_name: clipmorph-windows.exe
+          - os: macos-latest
+            output_name: clipmorph
+            asset_name: clipmorph-macos
+          - os: ubuntu-latest
+            output_name: clipmorph
+            asset_name: clipmorph-linux
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11.14'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller
+        pip install .
+
+    - name: Create PyInstaller Spec
+      run: |
+        python -c "
+        import os
+        spec = f'''
+        # -*- mode: python ; coding: utf-8 -*-
+
+        a = Analysis(
+            ['clipmorph/__main__.py'],
+            pathex=[],
+            binaries=[],
+            datas=[
+                ('clipmorph/ffmpeg', 'clipmorph/ffmpeg'),
+                ('clipmorph/resources', 'clipmorph/resources'),
+            ],
+            hiddenimports=[],
+            hookspath=[],
+            hooksconfig={{}},
+            runtime_hooks=[],
+            excludes=[],
+            noarchive=False,
+        )
+        pyz = PYZ(a.pure)
+        exe = EXE(
+            pyz,
+            a.scripts,
+            a.binaries,
+            a.datas,
+            [],
+            name='${{ matrix.output_name }}',
+            debug=False,
+            bootloader_ignore_signals=False,
+            strip=False,
+            upx=True,
+            upx_exclude=[],
+            runtime_tmpdir=None,
+            console=True,
+            disable_windowed_traceback=False,
+            argv_emulation=False,
+            target_arch=None,
+            codesign_identity=None,
+            entitlements_file=None,
+        )
+        '''
+        with open('clipmorph.spec', 'w') as f:
+            f.write(spec)
+        "
+      shell: python
+
+    - name: Build with PyInstaller
+      run: pyinstaller clipmorph.spec
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: ${{ matrix.asset_name }}
+        path: dist/${{ matrix.output_name }}
+
+    - name: Create Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: dist/${{ matrix.output_name }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
