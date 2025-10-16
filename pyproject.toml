@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clipmorph"
+dynamic = ["version", "dependencies"]
+authors = [
+    { name = "A-Baji" }
+]
+description = "A tool for converting and uploading short-form content to multiple platforms"
+readme = "README.md"
+requires-python = ">=3.11.0"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[tool.setuptools]
+packages = ["clipmorph"]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+version = {attr = "clipmorph.__version__"}
+dependencies = {file = "requirements.txt"}
+
+[tool.setuptools.package-data]
+clipmorph = [
+    "ffmpeg/linux/*",
+    "ffmpeg/mac/*",
+    "ffmpeg/windows/*",
+    "resources/fonts/roboto/*"
+]
+
+[project.scripts]
+clipmorph = "clipmorph.__main__:main"

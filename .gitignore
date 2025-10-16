@@ -210,3 +210,4 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+clipmorph-version-manager.2025-10-15.private-key.pem
