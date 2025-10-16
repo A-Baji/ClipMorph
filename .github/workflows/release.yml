@@ -13,13 +13,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      id-token: write
     
     steps:
     - uses: actions/checkout@v3
       with:
         ref: main
         fetch-depth: 0
+        token: ${{ secrets.PAT_TOKEN }}  # PAT for checkout and push
     
     - name: Validate version format
       run: |
@@ -42,13 +42,6 @@ jobs:
         fi
         
         echo "✓ Version tag does not exist yet"
-
-    - name: Generate GitHub App token
-      id: generate_token
-      uses: tibdex/github-app-token@v2
-      with:
-        app_id: ${{ secrets.APP_ID }}
-        private_key: ${{ secrets.APP_PRIVATE_KEY }}
         
     - name: Update version and create tag
       run: |
@@ -65,11 +58,8 @@ jobs:
         # Create tag
         git tag -a "v${{ github.event.inputs.version }}" -m "Release v${{ github.event.inputs.version }}"
         
-        # Push changes using the app token
-        git remote set-url origin "https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/${{ github.repository }}.git"
+        # Push changes (PAT is already configured from checkout)
+        git push origin main || echo "No changes to push to main"
         
-        # Only push to main if there were changes
-        git diff --quiet HEAD origin/main || git push origin main
-        
-        # Always push the tag
+        # Push the tag - this will trigger build.yml automatically
         git push origin "v${{ github.event.inputs.version }}"
