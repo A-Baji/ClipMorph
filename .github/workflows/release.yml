@@ -54,7 +54,7 @@ jobs:
       run: |
         git config user.name "GitHub Actions"
         git config user.email "actions@github.com"
-        ls -la
+        
         # Update version file
         echo "__version__ = \"${{ github.event.inputs.version }}\"" > clipmorph/__version__.py
         
