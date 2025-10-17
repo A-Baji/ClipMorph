@@ -20,9 +20,9 @@ jobs:
           - os: macos-latest
             output_name: clipmorph
             asset_name: clipmorph-macos
-          - os: ubuntu-latest
-            output_name: clipmorph
-            asset_name: clipmorph-linux
+          # - os: ubuntu-latest
+          #   output_name: clipmorph
+          #   asset_name: clipmorph-linux
 
     steps:
     - uses: actions/checkout@v3
