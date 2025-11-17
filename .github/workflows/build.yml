@@ -187,11 +187,12 @@ jobs:
     - name: Analyze build size
       run: |
         echo "=== Build size analysis ==="
-        du -sh dist/clipmorph
+        du -sh dist/clipmorph || true
         echo ""
         echo "=== Top 20 largest files ==="
-        find dist/clipmorph -type f -exec du -h {} + | sort -rh | head -20
+        find dist/clipmorph -type f -exec du -h {} + 2>/dev/null | sort -rh 2>/dev/null | head -20 || true
       shell: bash
+      continue-on-error: true
 
     - name: Package distribution
       run: |
