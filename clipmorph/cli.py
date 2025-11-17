@@ -91,6 +91,7 @@ def parse_args_with_parser():
     if not args.input_path:
         parser.error("input_path is required unless --init is specified")
 
+    # Title is only required if uploading
     if not args.no_upload and not args.title:
         parser.error("--title is required unless --no-upload is specified")
 
@@ -186,10 +187,10 @@ def _create_parser():
 
     # Common upload parameters
     content_group = parser.add_argument_group('Content Options')
-    content_group.add_argument("--title",
-                               required=True,
-                               type=str,
-                               help="Title/caption for the content.")
+    content_group.add_argument(
+        "--title",
+        type=str,  # Removed required=True
+        help="Title/caption for the content (required unless --no-upload).")
     content_group.add_argument("--description",
                                type=str,
                                help="Description for the content.")
@@ -225,6 +226,7 @@ def parse_args():
     if not args.input_path:
         parser.error("input_path is required unless --init is specified")
 
+    # Title is only required if uploading
     if not args.no_upload and not args.title:
         parser.error("--title is required unless --no-upload is specified")
 
