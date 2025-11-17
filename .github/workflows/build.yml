@@ -16,11 +16,11 @@ jobs:
         include:
           - os: windows-latest
             output_name: clipmorph.exe
-            asset_name: clipmorph-windows.exe
+            asset_name: clipmorph-windows-installer.exe
             ffmpeg_dir: windows
           - os: macos-latest
             output_name: clipmorph
-            asset_name: clipmorph-macos
+            asset_name: clipmorph-macos.tar.gz
             ffmpeg_dir: mac
           - os: ubuntu-latest
             output_name: clipmorph
@@ -88,16 +88,34 @@ jobs:
         pip install pyinstaller --no-cache-dir
         pip install . --no-cache-dir
 
-    - name: Clean up after installation
-      run: |
-        pip cache purge
-        rm -rf ~/.cache/pip
-      shell: bash
-
     - name: Create PyInstaller Spec
       run: |
         cat > clipmorph.spec << 'EOF'
         # -*- mode: python ; coding: utf-8 -*-
+
+        import sys
+
+        # Exclude unnecessary packages that bloat the build
+        excludes = [
+            # Testing frameworks
+            'pytest', 'unittest', 'nose', 'hypothesis',
+            # Documentation/dev tools
+            'sphinx', 'docutils', 'IPython', 'jupyter',
+            # GUI frameworks (not needed for CLI)
+            'tkinter', 'PyQt5', 'PyQt6', 'PySide2', 'PySide6',
+            # Alternative ML backends (if not using)
+            'tensorflow', 'tensorboard', 'jax', 'flax',
+            # Large scipy submodules not needed
+            'scipy.spatial', 'scipy.ndimage', 'scipy.signal.windows',
+            # Matplotlib backends not needed
+            'matplotlib.backends.backend_qt5agg',
+            'matplotlib.backends.backend_tkagg',
+            'matplotlib.backends.backend_wxagg',
+            # Other heavy packages
+            'sympy', 'bokeh', 'dask', 'distributed',
+            # Development tools
+            'setuptools', 'pip', 'wheel', 'distutils',
+        ]
 
         a = Analysis(
             ['clipmorph/__main__.py'],
@@ -107,27 +125,43 @@ jobs:
                 ('clipmorph/ffmpeg/${{ matrix.ffmpeg_dir }}', 'clipmorph/ffmpeg/${{ matrix.ffmpeg_dir }}'),
                 ('clipmorph/resources', 'clipmorph/resources'),
             ],
-            hiddenimports=[],
+            hiddenimports=[
+                'whisper',
+                'whisperx', 
+                'torch',
+                'torchaudio',
+            ],
             hookspath=[],
-            hooksconfig={},
+            hooksconfig={
+                'matplotlib': {
+                    'backends': ['Agg']  # Only include non-GUI backend
+                }
+            },
             runtime_hooks=[],
-            excludes=[],
+            excludes=excludes,
             noarchive=False,
         )
+        
+        # Remove duplicate binaries to reduce size
+        seen = set()
+        filtered_binaries = []
+        for binary in a.binaries:
+            if binary[0] not in seen:
+                seen.add(binary[0])
+                filtered_binaries.append(binary)
+        a.binaries = filtered_binaries
+        
         pyz = PYZ(a.pure)
         exe = EXE(
             pyz,
             a.scripts,
-            a.binaries,
-            a.datas,
             [],
+            exclude_binaries=True,
             name='${{ matrix.output_name }}',
             debug=False,
             bootloader_ignore_signals=False,
-            strip=False,
-            upx=True,
-            upx_exclude=[],
-            runtime_tmpdir=None,
+            strip=True,
+            upx=False,
             console=True,
             disable_windowed_traceback=False,
             argv_emulation=False,
@@ -135,22 +169,83 @@ jobs:
             codesign_identity=None,
             entitlements_file=None,
         )
+        coll = COLLECT(
+            exe,
+            a.binaries,
+            a.datas,
+            strip=True,
+            upx=False,
+            upx_exclude=[],
+            name='clipmorph',
+        )
         EOF
       shell: bash
 
     - name: Build with PyInstaller
       run: pyinstaller clipmorph.spec
 
+    - name: Analyze build size
+      run: |
+        echo "=== Build size analysis ==="
+        du -sh dist/clipmorph
+        echo ""
+        echo "=== Top 20 largest files ==="
+        find dist/clipmorph -type f -exec du -h {} + | sort -rh | head -20
+      shell: bash
+
+    - name: Package distribution
+      run: |
+        cd dist
+        if [ "$RUNNER_OS" == "Windows" ]; then
+          # Create self-extracting 7z archive for Windows
+          7z a -sfx7z.sfx ../clipmorph-windows-installer.exe clipmorph/
+        elif [ "$RUNNER_OS" == "macOS" ]; then
+          # Create .app bundle for macOS
+          mkdir -p ClipMorph.app/Contents/MacOS
+          cp -r clipmorph/* ClipMorph.app/Contents/MacOS/
+          tar -czf ../clipmorph-macos.tar.gz ClipMorph.app
+        else
+          # Create AppImage for Linux (single executable)
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool-x86_64.AppImage
+          
+          mkdir -p ClipMorph.AppDir/usr/bin
+          cp -r clipmorph/* ClipMorph.AppDir/usr/bin/
+          
+          cat > ClipMorph.AppDir/AppRun << 'APPRUN'
+        #!/bin/bash
+        SELF=$(readlink -f "$0")
+        HERE=${SELF%/*}
+        exec "$HERE/usr/bin/clipmorph" "$@"
+        APPRUN
+          chmod +x ClipMorph.AppDir/AppRun
+          
+          cat > ClipMorph.AppDir/clipmorph.desktop << 'DESKTOP'
+        [Desktop Entry]
+        Name=ClipMorph
+        Exec=clipmorph
+        Type=Application
+        Categories=Utility;
+        DESKTOP
+          
+          # Create a simple icon (1x1 pixel PNG - minimal)
+          echo "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" | base64 -d > ClipMorph.AppDir/clipmorph.png
+          
+          ./appimagetool-x86_64.AppImage ClipMorph.AppDir ../clipmorph-linux
+          chmod +x ../clipmorph-linux
+        fi
+      shell: bash
+
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.asset_name }}
-        path: dist/${{ matrix.output_name }}
+        path: ${{ matrix.asset_name }}
 
     - name: Create Release
       if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v1
       with:
-        files: dist/${{ matrix.output_name }}
+        files: ${{ matrix.asset_name }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
