@@ -27,7 +27,7 @@ jobs:
     steps:
     - uses: actions/checkout@v3
       with:
-        lfs: true  # Enable LFS checkout
+        lfs: true
     
     - name: Checkout LFS objects
       run: git lfs pull
@@ -73,9 +73,7 @@ jobs:
 
     - name: Create PyInstaller Spec
       run: |
-        python -c "
-        import os
-        spec = f'''
+        cat > clipmorph.spec << 'EOF'
         # -*- mode: python ; coding: utf-8 -*-
 
         a = Analysis(
@@ -88,7 +86,7 @@ jobs:
             ],
             hiddenimports=[],
             hookspath=[],
-            hooksconfig={{}},
+            hooksconfig={},
             runtime_hooks=[],
             excludes=[],
             noarchive=False,
@@ -114,11 +112,8 @@ jobs:
             codesign_identity=None,
             entitlements_file=None,
         )
-        '''
-        with open('clipmorph.spec', 'w') as f:
-            f.write(spec)
-        "
-      shell: python
+        EOF
+      shell: bash
 
     - name: Build with PyInstaller
       run: pyinstaller clipmorph.spec
