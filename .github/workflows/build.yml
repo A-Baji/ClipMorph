@@ -35,6 +35,21 @@ jobs:
     - name: Checkout LFS objects
       run: git lfs pull
     
+    - name: Free up disk space (Linux only)
+      if: runner.os == 'Linux'
+      run: |
+        echo "=== Before cleanup ==="
+        df -h
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /opt/ghc
+        sudo rm -rf /usr/local/share/boost
+        sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+        sudo apt-get clean
+        docker system prune -af
+        echo "=== After cleanup ==="
+        df -h
+      shell: bash
+    
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
@@ -160,7 +175,7 @@ jobs:
             name='${{ matrix.output_name }}',
             debug=False,
             bootloader_ignore_signals=False,
-            strip=True,
+            strip=False,
             upx=False,
             console=True,
             disable_windowed_traceback=False,
@@ -173,7 +188,7 @@ jobs:
             exe,
             a.binaries,
             a.datas,
-            strip=True,
+            strip=False,
             upx=False,
             upx_exclude=[],
             name='clipmorph',
@@ -191,6 +206,9 @@ jobs:
         echo ""
         echo "=== Top 20 largest files ==="
         find dist/clipmorph -type f -exec du -h {} + 2>/dev/null | sort -rh 2>/dev/null | head -20 || true
+        echo ""
+        echo "=== Disk space after build ==="
+        df -h
       shell: bash
       continue-on-error: true
 
