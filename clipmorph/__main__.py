@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 
 from clipmorph.cli import parse_args_with_parser
 from clipmorph.cli import separate_args_by_category
+from clipmorph.ffmpeg import configure_ffmpeg  # Add this import
 
 
 def _determine_enabled_platforms(upload_to, skip):
@@ -25,6 +26,9 @@ def _determine_enabled_platforms(upload_to, skip):
 
 def main():
     load_dotenv()
+
+    # Configure FFmpeg at runtime (will fail fast if not available)
+    configure_ffmpeg()
 
     # Parse arguments and get both args and parser for automatic separation
     args, parser = parse_args_with_parser()
