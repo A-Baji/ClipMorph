@@ -17,12 +17,15 @@ jobs:
           - os: windows-latest
             output_name: clipmorph.exe
             asset_name: clipmorph-windows.exe
+            ffmpeg_dir: windows
           - os: macos-latest
             output_name: clipmorph
             asset_name: clipmorph-macos
+            ffmpeg_dir: mac
           - os: ubuntu-latest
             output_name: clipmorph
             asset_name: clipmorph-linux
+            ffmpeg_dir: linux
 
     steps:
     - uses: actions/checkout@v3
@@ -51,6 +54,20 @@ jobs:
         fi
       shell: bash
 
+    - name: Remove unnecessary FFmpeg binaries to save space
+      run: |
+        if [ "$RUNNER_OS" == "macOS" ]; then
+          rm -rf clipmorph/ffmpeg/windows clipmorph/ffmpeg/linux
+          echo "Removed Windows and Linux FFmpeg binaries"
+        elif [ "$RUNNER_OS" == "Linux" ]; then
+          rm -rf clipmorph/ffmpeg/windows clipmorph/ffmpeg/mac
+          echo "Removed Windows and macOS FFmpeg binaries"
+        elif [ "$RUNNER_OS" == "Windows" ]; then
+          rm -rf clipmorph/ffmpeg/mac clipmorph/ffmpeg/linux
+          echo "Removed macOS and Linux FFmpeg binaries"
+        fi
+      shell: bash
+
     - name: Verify FFmpeg binaries
       run: |
         if [ "$RUNNER_OS" == "macOS" ]; then
@@ -67,9 +84,15 @@ jobs:
         
     - name: Install dependencies
       run: |
-        python -m pip install --upgrade pip
-        pip install pyinstaller
-        pip install .
+        python -m pip install --upgrade pip --no-cache-dir
+        pip install pyinstaller --no-cache-dir
+        pip install . --no-cache-dir
+
+    - name: Clean up after installation
+      run: |
+        pip cache purge
+        rm -rf ~/.cache/pip
+      shell: bash
 
     - name: Create PyInstaller Spec
       run: |
@@ -81,7 +104,7 @@ jobs:
             pathex=[],
             binaries=[],
             datas=[
-                ('clipmorph/ffmpeg', 'clipmorph/ffmpeg'),
+                ('clipmorph/ffmpeg/${{ matrix.ffmpeg_dir }}', 'clipmorph/ffmpeg/${{ matrix.ffmpeg_dir }}'),
                 ('clipmorph/resources', 'clipmorph/resources'),
             ],
             hiddenimports=[],
