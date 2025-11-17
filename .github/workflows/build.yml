@@ -16,11 +16,11 @@ jobs:
         include:
           - os: windows-latest
             output_name: clipmorph.exe
-            asset_name: clipmorph-windows-installer.exe
+            asset_name: clipmorph-windows.exe
             ffmpeg_dir: windows
           - os: macos-latest
             output_name: clipmorph
-            asset_name: clipmorph-macos.tar.gz
+            asset_name: clipmorph-macos
             ffmpeg_dir: mac
           - os: ubuntu-latest
             output_name: clipmorph
@@ -105,30 +105,23 @@ jobs:
 
     - name: Create PyInstaller Spec
       run: |
-        cat > clipmorph.spec << 'EOF'
+        if [ "$RUNNER_OS" == "Windows" ] || [ "$RUNNER_OS" == "macOS" ]; then
+          # Single executable for Windows and macOS
+          cat > clipmorph.spec << 'EOF'
         # -*- mode: python ; coding: utf-8 -*-
 
         import sys
 
-        # Exclude unnecessary packages that bloat the build
         excludes = [
-            # Testing frameworks
             'pytest', 'unittest', 'nose', 'hypothesis',
-            # Documentation/dev tools
             'sphinx', 'docutils', 'IPython', 'jupyter',
-            # GUI frameworks (not needed for CLI)
             'tkinter', 'PyQt5', 'PyQt6', 'PySide2', 'PySide6',
-            # Alternative ML backends (if not using)
             'tensorflow', 'tensorboard', 'jax', 'flax',
-            # Large scipy submodules not needed
             'scipy.spatial', 'scipy.ndimage', 'scipy.signal.windows',
-            # Matplotlib backends not needed
             'matplotlib.backends.backend_qt5agg',
             'matplotlib.backends.backend_tkagg',
             'matplotlib.backends.backend_wxagg',
-            # Other heavy packages
             'sympy', 'bokeh', 'dask', 'distributed',
-            # Development tools
             'setuptools', 'pip', 'wheel', 'distutils',
         ]
 
@@ -140,24 +133,78 @@ jobs:
                 ('clipmorph/ffmpeg/${{ matrix.ffmpeg_dir }}', 'clipmorph/ffmpeg/${{ matrix.ffmpeg_dir }}'),
                 ('clipmorph/resources', 'clipmorph/resources'),
             ],
-            hiddenimports=[
-                'whisper',
-                'whisperx', 
-                'torch',
-                'torchaudio',
-            ],
+            hiddenimports=['whisper', 'whisperx', 'torch', 'torchaudio'],
             hookspath=[],
-            hooksconfig={
-                'matplotlib': {
-                    'backends': ['Agg']  # Only include non-GUI backend
-                }
-            },
+            hooksconfig={'matplotlib': {'backends': ['Agg']}},
             runtime_hooks=[],
             excludes=excludes,
             noarchive=False,
         )
         
-        # Remove duplicate binaries to reduce size
+        seen = set()
+        filtered_binaries = []
+        for binary in a.binaries:
+            if binary[0] not in seen:
+                seen.add(binary[0])
+                filtered_binaries.append(binary)
+        a.binaries = filtered_binaries
+        
+        pyz = PYZ(a.pure)
+        exe = EXE(
+            pyz,
+            a.scripts,
+            a.binaries,
+            a.datas,
+            [],
+            name='${{ matrix.output_name }}',
+            debug=False,
+            bootloader_ignore_signals=False,
+            strip=False,
+            upx=False,
+            console=True,
+            disable_windowed_traceback=False,
+            argv_emulation=False,
+            target_arch=None,
+            codesign_identity=None,
+            entitlements_file=None,
+        )
+        EOF
+        else
+          # Directory-based build for Linux
+          cat > clipmorph.spec << 'EOF'
+        # -*- mode: python ; coding: utf-8 -*-
+
+        import sys
+
+        excludes = [
+            'pytest', 'unittest', 'nose', 'hypothesis',
+            'sphinx', 'docutils', 'IPython', 'jupyter',
+            'tkinter', 'PyQt5', 'PyQt6', 'PySide2', 'PySide6',
+            'tensorflow', 'tensorboard', 'jax', 'flax',
+            'scipy.spatial', 'scipy.ndimage', 'scipy.signal.windows',
+            'matplotlib.backends.backend_qt5agg',
+            'matplotlib.backends.backend_tkagg',
+            'matplotlib.backends.backend_wxagg',
+            'sympy', 'bokeh', 'dask', 'distributed',
+            'setuptools', 'pip', 'wheel', 'distutils',
+        ]
+
+        a = Analysis(
+            ['clipmorph/__main__.py'],
+            pathex=[],
+            binaries=[],
+            datas=[
+                ('clipmorph/ffmpeg/${{ matrix.ffmpeg_dir }}', 'clipmorph/ffmpeg/${{ matrix.ffmpeg_dir }}'),
+                ('clipmorph/resources', 'clipmorph/resources'),
+            ],
+            hiddenimports=['whisper', 'whisperx', 'torch', 'torchaudio'],
+            hookspath=[],
+            hooksconfig={'matplotlib': {'backends': ['Agg']}},
+            runtime_hooks=[],
+            excludes=excludes,
+            noarchive=False,
+        )
+        
         seen = set()
         filtered_binaries = []
         for binary in a.binaries:
@@ -194,6 +241,7 @@ jobs:
             name='clipmorph',
         )
         EOF
+        fi
       shell: bash
 
     - name: Build with PyInstaller
@@ -202,10 +250,11 @@ jobs:
     - name: Analyze build size
       run: |
         echo "=== Build size analysis ==="
-        du -sh dist/clipmorph || true
-        echo ""
-        echo "=== Top 20 largest files ==="
-        find dist/clipmorph -type f -exec du -h {} + 2>/dev/null | sort -rh 2>/dev/null | head -20 || true
+        if [ "$RUNNER_OS" == "Windows" ] || [ "$RUNNER_OS" == "macOS" ]; then
+          du -sh dist/${{ matrix.output_name }} || true
+        else
+          du -sh dist/clipmorph || true
+        fi
         echo ""
         echo "=== Disk space after build ==="
         df -h
@@ -214,43 +263,38 @@ jobs:
 
     - name: Package distribution
       run: |
-        cd dist
-        if [ "$RUNNER_OS" == "Windows" ]; then
-          # Create self-extracting 7z archive for Windows
-          7z a -sfx7z.sfx ../clipmorph-windows-installer.exe clipmorph/
-        elif [ "$RUNNER_OS" == "macOS" ]; then
-          # Create .app bundle for macOS
-          mkdir -p ClipMorph.app/Contents/MacOS
-          cp -r clipmorph/* ClipMorph.app/Contents/MacOS/
-          tar -czf ../clipmorph-macos.tar.gz ClipMorph.app
+        if [ "$RUNNER_OS" == "Windows" ] || [ "$RUNNER_OS" == "macOS" ]; then
+          # Single executable - just move it
+          mv dist/${{ matrix.output_name }} ${{ matrix.asset_name }}
         else
-          # Create AppImage for Linux (single executable)
-          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
-          chmod +x appimagetool-x86_64.AppImage
+          # Linux: Create self-extracting archive
+          cd dist
+          tar -czf payload.tar.gz clipmorph/
           
-          mkdir -p ClipMorph.AppDir/usr/bin
-          cp -r clipmorph/* ClipMorph.AppDir/usr/bin/
-          
-          cat > ClipMorph.AppDir/AppRun << 'APPRUN'
+          # Create self-extracting shell script
+          cat > ../clipmorph-linux << 'SELFEXTRACT'
         #!/bin/bash
-        SELF=$(readlink -f "$0")
-        HERE=${SELF%/*}
-        exec "$HERE/usr/bin/clipmorph" "$@"
-        APPRUN
-          chmod +x ClipMorph.AppDir/AppRun
+        # Self-extracting installer for ClipMorph
+        
+        EXTRACT_DIR="$HOME/.clipmorph"
+        PAYLOAD_LINE=$(awk '/^__PAYLOAD_BEGINS__/ { print NR + 1; exit 0; }' "$0")
+        
+        # Extract on first run or if extraction directory doesn't exist
+        if [ ! -d "$EXTRACT_DIR" ] || [ ! -f "$EXTRACT_DIR/clipmorph/clipmorph" ]; then
+            echo "Extracting ClipMorph (first run only)..."
+            mkdir -p "$EXTRACT_DIR"
+            tail -n +$PAYLOAD_LINE "$0" | tar -xzf - -C "$EXTRACT_DIR"
+            echo "Extraction complete!"
+        fi
+        
+        # Run the actual executable with all passed arguments
+        exec "$EXTRACT_DIR/clipmorph/clipmorph" "$@"
+        
+        __PAYLOAD_BEGINS__
+        SELFEXTRACT
           
-          cat > ClipMorph.AppDir/clipmorph.desktop << 'DESKTOP'
-        [Desktop Entry]
-        Name=ClipMorph
-        Exec=clipmorph
-        Type=Application
-        Categories=Utility;
-        DESKTOP
-          
-          # Create a simple icon (1x1 pixel PNG - minimal)
-          echo "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" | base64 -d > ClipMorph.AppDir/clipmorph.png
-          
-          ./appimagetool-x86_64.AppImage ClipMorph.AppDir ../clipmorph-linux
+          # Append the compressed payload
+          cat payload.tar.gz >> ../clipmorph-linux
           chmod +x ../clipmorph-linux
         fi
       shell: bash
