@@ -332,12 +332,27 @@ jobs:
           name: clipmorph-linux
         continue-on-error: false
 
-      - name: Create or update GitHub Release and attach files
+      - name: Create or update GitHub Release (dispatched run)
+        if: github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN && secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
         with:
+          tag_name: ${{ github.event.inputs.version }}
+          name: ${{ github.event.inputs.version }}
           files: |
             clipmorph-windows.exe
             clipmorph-macos
             clipmorph-linux
+
+      - name: Create or update GitHub Release (tag push)
+        if: github.event_name != 'workflow_dispatch'
+        uses: softprops/action-gh-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN && secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+        with:
+          name: ${{ github.ref }}
+          files: |
+            clipmorph-windows.exe
+            clipmorph-macos
+            clipmorph-linux
