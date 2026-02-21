@@ -33,3 +33,7 @@ MIT License - see [LICENSE](LICENSE) file for details.
 - Uses Whisper for transcription
 - Uses PyAnnote for speaker diarization
 - FFmpeg for video processing
+
+## Release
+
+Developer release instructions and troubleshooting are in [docs/RELEASE.md](docs/RELEASE.md).

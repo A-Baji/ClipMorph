@@ -84,7 +84,7 @@ jobs:
         PAT: ${{ secrets.PAT_TOKEN }}
       run: |
         echo "Triggering Build and Release workflow for tag v$VERSION"
-        API_URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/build.yml/dispatches"
+        API_URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/build_and_release.yml/dispatches"
         PAYLOAD=$(printf '{"ref":"v%s"}' "$VERSION")
         resp=$(curl -s -o /dev/stderr -w "%{http_code}" -X POST \
           -H "Accept: application/vnd.github+json" \
