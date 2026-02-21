@@ -1,0 +1,96 @@
+name: Tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'New version number (without v prefix, format: X.Y.Z)'
+        required: true
+        type: string
+      allow_existing_tag:
+        description: 'If true, continue when the tag already exists (non-fatal)'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        ref: main
+        fetch-depth: 0
+        token: ${{ secrets.PAT_TOKEN }}  # PAT for checkout and push
+    
+    - name: Validate version format
+      run: |
+        VERSION="${{ github.event.inputs.version }}"
+        
+        if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "❌ Error: Version must be in format X.Y.Z (e.g., 1.2.3)"
+          echo "Received: $VERSION"
+          exit 1
+        fi
+        
+        echo "✓ Version format is valid: $VERSION"
+
+    - name: Check if version tag exists
+      id: check_tag
+      run: |
+        VERSION="${{ github.event.inputs.version }}"
+        ALLOW_EXISTING="${{ github.event.inputs.allow_existing_tag }}"
+
+        if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+          echo "Tag v$VERSION already exists"
+          echo "tag_exists=true" >> $GITHUB_OUTPUT
+          if [ "$ALLOW_EXISTING" != "true" ]; then
+            echo "❌ Existing tag and 'allow_existing_tag' is not set. Aborting."
+            exit 1
+          else
+            echo "Continuing despite existing tag because allow_existing_tag=true"
+          fi
+        else
+          echo "Tag v$VERSION does not exist yet"
+          echo "tag_exists=false" >> $GITHUB_OUTPUT
+        fi
+        
+    - name: Update version file and commit (if changed)
+      run: |
+        git config user.name "GitHub Actions"
+        git config user.email "actions@github.com"
+
+        echo "__version__ = \"${{ github.event.inputs.version }}\"" > clipmorph/__version__.py
+
+        git add clipmorph/__version__.py
+        git diff --staged --quiet || git commit -m "Release v${{ github.event.inputs.version }}"
+
+        git push origin main || echo "No changes to push to main"
+
+    - name: Create and push tag (only if it does not already exist)
+      if: steps.check_tag.outputs.tag_exists == 'false'
+      run: |
+        git tag -a "v${{ github.event.inputs.version }}" -m "Release v${{ github.event.inputs.version }}"
+        git push origin "v${{ github.event.inputs.version }}"
+
+    - name: Trigger Build and Release for existing tag (when allowed)
+      if: steps.check_tag.outputs.tag_exists == 'true' && github.event.inputs.allow_existing_tag == 'true'
+      env:
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        VERSION: ${{ github.event.inputs.version }}
+        PAT: ${{ secrets.PAT_TOKEN }}
+      run: |
+        echo "Triggering Build and Release workflow for tag v$VERSION"
+        API_URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/build.yml/dispatches"
+        PAYLOAD=$(printf '{"ref":"v%s"}' "$VERSION")
+        resp=$(curl -s -o /dev/stderr -w "%{http_code}" -X POST \
+          -H "Accept: application/vnd.github+json" \
+          -H "Authorization: token ${PAT}" \
+          -d "$PAYLOAD" "$API_URL")
+        if [ "$resp" -ge 400 ]; then
+          echo "Failed to dispatch build workflow, status: $resp"
+          exit 1
+        fi
