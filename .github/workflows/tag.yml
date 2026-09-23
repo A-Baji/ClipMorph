@@ -68,8 +68,7 @@ jobs:
         git add clipmorph/__version__.py
         git diff --staged --quiet || git commit -m "Release v${{ github.event.inputs.version }}"
 
-        # A push with nothing to push exits 0 anyway; don't mask real failures
-        git push origin main
+        git push origin main || echo "No changes to push to main"
 
     - name: Create and push tag (only if it does not already exist)
       if: steps.check_tag.outputs.tag_exists == 'false'
