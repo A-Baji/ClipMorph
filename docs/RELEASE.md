@@ -55,7 +55,7 @@ Note: the PAT used to dispatch must have Actions/Workflows dispatch permission (
 
 ## Implementation notes
 
-- The pipeline produces three artifacts: `clipmorph-windows.exe`, `clipmorph-macos`, and `clipmorph-linux` (self-extracting). The `create_release` job checks out the build commit, creates the tag after the matrix succeeds, downloads each artifact, and uses `gh release` once to create or update the Release.
+- The pipeline produces three artifacts: `clipmorph-windows.zip`, `clipmorph-macos.zip`, and `clipmorph-linux` (self-extracting). The Windows and macOS archives contain onedir builds so the large ML runtime is not extracted on every launch. The `create_release` job checks out the build commit, creates the tag after the matrix succeeds, downloads each artifact, and uses `gh release` once to create or update the Release.
 - The `pyproject.toml` uses dynamic version from `clipmorph.__version__`, so updating that file keeps package version metadata consistent with the tag.
 
 ## If your org forbids PATs
