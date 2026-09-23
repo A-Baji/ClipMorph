@@ -9,7 +9,7 @@ import yaml
 
 
 SUPPORTED_PLATFORMS = {'youtube', 'instagram', 'tiktok', 'twitter'}
-CONFIG_SECTIONS = {'general', 'conversion', 'upload', 'content', 'platforms'}
+CONFIG_SECTIONS = {'general', 'conversion', 'layout', 'upload', 'content', 'platforms'}
 
 
 def build_platform_default_config():
@@ -86,6 +86,8 @@ def _flatten_config_values(config):
     values.update(config.get('general', {}))
     values.update(config.get('upload', {}))
     values.update(config.get('content', {}))
+    if 'layout' in config:
+        values['layout'] = config['layout']
 
     conversion = config.get('conversion', {})
     if conversion:
@@ -124,6 +126,7 @@ def _apply_config_defaults(args):
 
     defaults = {
         'data_dir': None,
+        'layout': None,
         'no_confirm': False,
         'clean': False,
         'no_conversion': False,

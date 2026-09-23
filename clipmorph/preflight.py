@@ -36,12 +36,19 @@ class PreflightValidator:
     def validate(self, *, input_path: str, output_dir: str, no_conversion: bool,
                  no_upload: bool, enabled_platforms: list[str], title: str | None,
                  cam_x: int, cam_y: int, cam_width: int, cam_height: int,
-                 platform_overrides: dict[str, Any] | None = None) -> list[str]:
+                 platform_overrides: dict[str, Any] | None = None,
+                 layout: dict[str, Any] | None = None) -> list[str]:
         warnings = []
         self._validate_input(input_path)
         info = self.ffmpeg_runner.get_video_info(input_path)
         self._validate_video_stream(info)
         self._validate_output_dir(output_dir, no_conversion)
+        if layout is not None:
+            from clipmorph.layout import validate_layout
+            video = next(stream for stream in info["streams"]
+                         if stream.get("codec_type") == "video")
+            validate_layout(layout, video["width"], video["height"],
+                            float(info.get("format", {}).get("duration", 0) or 0))
 
         if not no_conversion:
             self._validate_camera(info, cam_x, cam_y, cam_width, cam_height)
