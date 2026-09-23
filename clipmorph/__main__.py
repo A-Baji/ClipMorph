@@ -24,6 +24,26 @@ def _determine_enabled_platforms(upload_to, skip):
     return enabled_platforms
 
 
+def _run_preflight(args, enabled_platforms, ffmpeg_runner):
+    from clipmorph.preflight import PreflightValidator
+
+    warnings = PreflightValidator(ffmpeg_runner).validate(
+        input_path=args.input_path,
+        output_dir=args.output_dir,
+        no_conversion=args.no_conversion,
+        no_upload=args.no_upload,
+        enabled_platforms=enabled_platforms,
+        title=args.title,
+        cam_x=args.cam_x,
+        cam_y=args.cam_y,
+        cam_width=args.cam_width,
+        cam_height=args.cam_height,
+        platform_overrides=args.platform_overrides)
+    for warning in warnings:
+        logging.warning("Preflight: %s", warning)
+    return warnings
+
+
 def main():
     load_dotenv()
 
@@ -44,6 +64,14 @@ def main():
     no_upload = getattr(args, "no_upload", False)
     upload_to = getattr(args, "upload_to", None)
     skip = getattr(args, "skip", None)
+    enabled_platforms = _determine_enabled_platforms(upload_to, skip)
+
+    from clipmorph.ffmpeg import FFmpegRunner
+    ffmpeg_runner = FFmpegRunner()
+    _run_preflight(args, enabled_platforms, ffmpeg_runner)
+    if args.dry_run:
+        print("Preflight passed. No conversion or upload was performed.")
+        return
 
     # Automatically separate conversion and upload args based on argument groups
     conversion_args, upload_args = separate_args_by_category(args, parser)
@@ -70,7 +98,6 @@ def main():
         return
 
     # Determine enabled platforms
-    enabled_platforms = _determine_enabled_platforms(upload_to, skip)
     if not enabled_platforms:
         print("No platforms selected for upload.")
         return

@@ -88,6 +88,7 @@ def _apply_config_defaults(args):
         'no_confirm': False,
         'clean': False,
         'no_conversion': False,
+        'dry_run': False,
         'include_cam': True,
         'cam_x': 1420,
         'cam_y': 790,
@@ -240,6 +241,10 @@ def _create_parser():
         "--no-conversion",
         action="store_true",
         help="Skip conversion and upload input video directly.")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate the planned run without converting or uploading.")
 
     # Conversion pipeline options
     conversion_group = parser.add_argument_group('Conversion Options')
