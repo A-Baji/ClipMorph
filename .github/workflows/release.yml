@@ -19,11 +19,11 @@ on:
 jobs:
   release:
     name: Prepare release tag
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.release.outputs.tag }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         ref: main
         fetch-depth: 0
@@ -71,7 +71,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+        os: [windows-latest, macos-latest, ubuntu-24.04]
         include:
           - os: windows-latest
             output_name: clipmorph.exe
@@ -81,13 +81,13 @@ jobs:
             output_name: clipmorph
             asset_name: clipmorph-macos
             ffmpeg_dir: mac
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             output_name: clipmorph
             asset_name: clipmorph-linux
             ffmpeg_dir: linux
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v5
       with:
         ref: ${{ needs.release.outputs.tag }}
         lfs: true
@@ -367,7 +367,7 @@ jobs:
 
   create_release:
     name: Create Release and Attach Artifacts
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [release, build]
     steps:
       - name: Download Windows artifact
