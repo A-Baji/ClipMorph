@@ -11,6 +11,7 @@ from clipmorph.cli import summarize_runtime_configuration
 from clipmorph.ffmpeg import configure_ffmpeg  # Add this import
 from clipmorph.job import JobManifest
 from clipmorph.job import source_sha256
+from clipmorph.layout import validate_layout
 
 
 def _determine_enabled_platforms(upload_to, skip):
@@ -43,7 +44,8 @@ def _run_preflight(args, enabled_platforms, ffmpeg_runner):
         cam_y=args.cam_y,
         cam_width=args.cam_width,
         cam_height=args.cam_height,
-        platform_overrides=args.platform_overrides)
+        platform_overrides=args.platform_overrides,
+        layout=getattr(args, "layout", None))
     for warning in warnings:
         logging.warning("Preflight: %s", warning)
     return warnings
