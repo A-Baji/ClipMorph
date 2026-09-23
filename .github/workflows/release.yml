@@ -216,7 +216,7 @@ jobs:
                 ('clipmorph/ffmpeg/${{ matrix.ffmpeg_dir }}', 'clipmorph/ffmpeg/${{ matrix.ffmpeg_dir }}'),
                 ('clipmorph/resources', 'clipmorph/resources'),
             ],
-            hiddenimports=['whisper', 'whisperx', 'torch', 'torchaudio'],
+            hiddenimports=['dotenv', 'whisper', 'whisperx', 'torch', 'torchaudio'],
             hookspath=[],
             hooksconfig={'matplotlib': {'backends': ['Agg']}},
             runtime_hooks=[],
@@ -280,7 +280,7 @@ jobs:
                 ('clipmorph/ffmpeg/${{ matrix.ffmpeg_dir }}', 'clipmorph/ffmpeg/${{ matrix.ffmpeg_dir }}'),
                 ('clipmorph/resources', 'clipmorph/resources'),
             ],
-            hiddenimports=['whisper', 'whisperx', 'torch', 'torchaudio'],
+            hiddenimports=['dotenv', 'whisper', 'whisperx', 'torch', 'torchaudio'],
             hookspath=[],
             hooksconfig={'matplotlib': {'backends': ['Agg']}},
             runtime_hooks=[],
@@ -329,6 +329,17 @@ jobs:
 
     - name: Build with PyInstaller
       run: pyinstaller clipmorph.spec
+
+    - name: Smoke test packaged executable
+      run: |
+        if [ "$RUNNER_OS" == "Windows" ]; then
+          dist/${{ matrix.output_name }} --help
+        elif [ "$RUNNER_OS" == "macOS" ]; then
+          dist/${{ matrix.output_name }} --help
+        else
+          dist/clipmorph/clipmorph --help
+        fi
+      shell: bash
 
     - name: Analyze build size
       run: |
