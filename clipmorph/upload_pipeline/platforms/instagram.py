@@ -3,6 +3,8 @@ import os
 import time
 import urllib.parse
 import webbrowser
+from datetime import timedelta
+import uuid
 
 from google.cloud import storage
 from google.oauth2 import service_account
@@ -110,6 +112,7 @@ class InstagramUploadPipeline(BaseUploadPipeline):
         self.google_creds = None
         self.page_token = None
         self.ig_user_id = None
+        self._uploaded_blob_name = None
 
         # Progress bar configuration (redistributed for smoother UX)
         self.progress_allocations = {
@@ -274,14 +277,19 @@ class InstagramUploadPipeline(BaseUploadPipeline):
         if not self.google_creds:
             self._authenticate_google()
 
-        destination_blob_name = os.path.basename(video_path)
+        destination_blob_name = (
+            f"clipmorph/{uuid.uuid4().hex}/{os.path.basename(video_path)}")
         storage_client = storage.Client(credentials=self.google_creds)
         bucket = storage_client.bucket(self.gcs_bucket_name)
         blob = bucket.blob(destination_blob_name)
         blob.upload_from_filename(video_path)
+        self._uploaded_blob_name = destination_blob_name
         self._update_progress("video_upload",
                               "Video uploaded to cloud storage")
-        return blob.public_url
+        return blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(hours=1),
+            method="GET")
 
     def _delete_video(self, video_path):
         """
@@ -290,11 +298,14 @@ class InstagramUploadPipeline(BaseUploadPipeline):
         if not self.google_creds:
             self._authenticate_google()
 
-        blob_name = os.path.basename(video_path)
+        blob_name = self._uploaded_blob_name
+        if not blob_name:
+            return False
         storage_client = storage.Client(credentials=self.google_creds)
         bucket = storage_client.bucket(self.gcs_bucket_name)
         blob = bucket.blob(blob_name)
         blob.delete()
+        self._uploaded_blob_name = None
         self._update_progress("cleanup", "Cleaned up temporary files")
         return True
 
