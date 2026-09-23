@@ -8,6 +8,108 @@ import shutil
 import yaml
 
 
+SUPPORTED_PLATFORMS = {'youtube', 'instagram', 'tiktok', 'twitter'}
+CONFIG_SECTIONS = {'general', 'conversion', 'upload', 'content', 'platforms'}
+
+
+def _load_config_data(config_path):
+    """Load and validate the supported YAML/JSON configuration shape."""
+    if not config_path:
+        return {}
+
+    path = Path(config_path)
+    if not path.exists():
+        raise ValueError(f"Configuration file does not exist: {path}")
+
+    try:
+        with open(path, 'r', encoding='utf-8') as config_file:
+            data = (yaml.safe_load(config_file)
+                    if path.suffix.lower() in {'.yml', '.yaml'} else
+                    json.load(config_file))
+    except (OSError, json.JSONDecodeError, yaml.YAMLError) as error:
+        raise ValueError(f"Unable to read configuration file {path}: {error}")
+
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError("Configuration root must be an object")
+
+    unknown_sections = set(data) - CONFIG_SECTIONS
+    if unknown_sections:
+        raise ValueError(
+            f"Unknown configuration section(s): {', '.join(sorted(unknown_sections))}"
+        )
+    return data
+
+
+def _flatten_config_values(config):
+    """Convert the documented nested configuration into CLI destinations."""
+    values = {}
+    values.update(config.get('general', {}))
+    values.update(config.get('upload', {}))
+    values.update(config.get('content', {}))
+
+    conversion = config.get('conversion', {})
+    if conversion:
+        values.update({key: value for key, value in conversion.items()
+                       if key != 'camera'})
+        camera = conversion.get('camera', {})
+        for key in ('x', 'y', 'width', 'height'):
+            if key in camera:
+                values[f'cam_{key}'] = camera[key]
+        if 'no_cam' in conversion:
+            values['include_cam'] = not conversion['no_cam']
+
+    platforms = config.get('platforms', {})
+    if not isinstance(platforms, dict):
+        raise ValueError("Configuration 'platforms' must be an object")
+    unknown_platforms = set(platforms) - SUPPORTED_PLATFORMS
+    if unknown_platforms:
+        raise ValueError(
+            f"Unknown platform(s): {', '.join(sorted(unknown_platforms))}")
+    for platform, params in platforms.items():
+        if not isinstance(params, dict):
+            raise ValueError(f"Configuration for {platform} must be an object")
+        for param, value in params.items():
+            values[f'{platform}_{param}'] = value
+
+    return values
+
+
+def _apply_config_defaults(args):
+    """Apply config values only where the corresponding CLI option is absent."""
+    config_values = _flatten_config_values(_load_config_data(
+        getattr(args, 'config', None)))
+    for key, value in config_values.items():
+        if not hasattr(args, key):
+            setattr(args, key, value)
+
+    defaults = {
+        'no_confirm': False,
+        'clean': False,
+        'no_conversion': False,
+        'include_cam': True,
+        'cam_x': 1420,
+        'cam_y': 790,
+        'cam_width': 480,
+        'cam_height': 270,
+        'output_dir': 'output/',
+        'no_subs': False,
+        'no_upload': False,
+        'upload_to': None,
+        'skip': None,
+        'title': None,
+        'description': None,
+        'tags': None,
+        'platform_overrides': None,
+    }
+    for key, value in defaults.items():
+        if not hasattr(args, key):
+            setattr(args, key, value)
+
+    return args
+
+
 def create_config_template(output_path=None):
     """Create a template YAML configuration file."""
     template = {
@@ -83,12 +185,14 @@ def parse_args_with_parser():
     args = parser.parse_args()
 
     # Handle init command
-    if args.init:
+    if getattr(args, 'init', False):
         create_config_template(args.config_path)
         return None, parser
 
     # Validate required args for normal operation
-    if not args.input_path:
+    args = _apply_config_defaults(args)
+
+    if not getattr(args, 'input_path', None):
         parser.error("input_path is required unless --init is specified")
 
     # Title is only required if uploading
@@ -108,7 +212,8 @@ def parse_args_with_parser():
 def _create_parser():
     """Create and configure the argument parser."""
     parser = argparse.ArgumentParser(
-        description="Convert and upload a video to short-form platforms.")
+        description="Convert and upload a video to short-form platforms.",
+        argument_default=argparse.SUPPRESS)
 
     # Input and basic options (neither conversion nor upload specific)
     parser.add_argument("input_path",
@@ -145,24 +250,19 @@ def _create_parser():
         help="Exclude the camera feed from the output.")
     conversion_group.add_argument("--cam-x",
                                   type=int,
-                                  default=1420,
                                   help="Top left x coordinate of camera feed.")
     conversion_group.add_argument("--cam-y",
                                   type=int,
-                                  default=790,
                                   help="Top left y coordinate of camera feed.")
     conversion_group.add_argument("--cam-width",
                                   type=int,
-                                  default=480,
                                   help="Width in pixels of camera feed.")
     conversion_group.add_argument("--cam-height",
                                   type=int,
-                                  default=270,
                                   help="Height in pixels of camera feed.")
     conversion_group.add_argument(
         "--output-dir",
         type=str,
-        default="output/",
         help="Custom output directory for the processed video.")
     conversion_group.add_argument(
         "--no-subs",
@@ -218,12 +318,14 @@ def parse_args():
     args = parser.parse_args()
 
     # Handle init command
-    if args.init:
+    if getattr(args, 'init', False):
         create_config_template(args.config_path)
         return None
 
     # Validate required args for normal operation
-    if not args.input_path:
+    args = _apply_config_defaults(args)
+
+    if not getattr(args, 'input_path', None):
         parser.error("input_path is required unless --init is specified")
 
     # Title is only required if uploading
@@ -292,29 +394,9 @@ def _process_platform_overrides(args):
     """Process platform overrides from config file or JSON string."""
     overrides = {}
 
-    # Load from config file if provided
-    if args.config:
-        config_path = Path(args.config)
-        if config_path.exists():
-            with open(config_path, 'r') as f:
-                if config_path.suffix.lower() in ['.yml', '.yaml']:
-                    try:
-                        import yaml
-                        config_data = yaml.safe_load(f)
-                    except ImportError:
-                        raise ImportError(
-                            "PyYAML is required for YAML config files. Install with: pip install pyyaml"
-                        )
-                else:  # JSON
-                    config_data = json.load(f)
-
-                # Extract platform overrides from config
-                if 'platforms' in config_data:
-                    overrides.update(config_data['platforms'])
-                elif any(platform in config_data for platform in
-                         ['youtube', 'instagram', 'tiktok', 'twitter']):
-                    # Direct platform config at root level
-                    overrides.update(config_data)
+    config_data = _load_config_data(getattr(args, 'config', None))
+    if 'platforms' in config_data:
+        overrides.update(config_data['platforms'])
 
     # Load from JSON string if provided (takes precedence over config file)
     if hasattr(args, 'platform_overrides') and args.platform_overrides:
