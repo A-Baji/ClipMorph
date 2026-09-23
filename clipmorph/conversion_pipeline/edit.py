@@ -1,5 +1,6 @@
 import logging
 import os
+import uuid
 from typing import Any, Dict, List
 
 from clipmorph.ffmpeg import FFmpegError
@@ -315,6 +316,9 @@ class EditingPipeline:
             filename = os.path.splitext(os.path.basename(self.input_path))[0]
             os.makedirs(self.output_dir, exist_ok=True)
             output_path = f"{self.output_dir}{filename}-converted.mp4"
+            if os.path.exists(output_path):
+                output_path = (
+                    f"{self.output_dir}{filename}-converted-{uuid.uuid4().hex[:8]}.mp4")
 
             # Set audio
             logging.info("Applying audio to the video...")

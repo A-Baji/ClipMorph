@@ -9,8 +9,6 @@ import torch
 import whisper
 import whisperx
 
-SRT_PATH = "subtitles.srt"
-
 GAMING_PROMPT = ("Yo what the hell was that?\n"
                  "No way bro did you see that?\n"
                  "WHAT?\n"
@@ -368,7 +366,7 @@ class TranscriptionPipeline:
             self._cleanup()
 
 
-def write_srt_file(phrases: List[Dict[str, Any]]):
+def write_srt_file(phrases: List[Dict[str, Any]], output_path: str):
     """Write SRT file for debugging purposes."""
 
     def format_timestamp(seconds: float) -> str:
@@ -377,7 +375,7 @@ def write_srt_file(phrases: List[Dict[str, Any]]):
             (seconds % 3600) // 60), int(seconds % 60)
         return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
-    with open(SRT_PATH, "w", encoding="utf-8") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         for idx, phrase in enumerate(phrases, 1):
             f.write(f"{idx}\n")
             f.write(

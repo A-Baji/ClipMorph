@@ -229,7 +229,8 @@ class ConversionPipeline:
 
                         if use_subtitles:
                             logging.info("Processing subtitles...")
-                            write_srt_file(self.segments)
+                            subtitle_path = self.ffmpeg_runner.create_temp_file('.srt')
+                            write_srt_file(self.segments, subtitle_path)
 
                             logging.info("Detecting profanity in audio...")
                             intervals = self._detect_profanity(self.segments)
