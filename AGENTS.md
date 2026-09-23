@@ -4,6 +4,8 @@
 
 ClipMorph is a Python 3.11+ CLI that converts gaming videos to vertical short-form content and uploads results to YouTube, Instagram, TikTok, and Twitter/X. The package entry point is `clipmorph.__main__:main`, exposed as the `clipmorph` command by `pyproject.toml`.
 
+The repository workflow uses `dev` as the working and integration branch. All completed work flows from `dev` to `main` through the repository's approved merge process; do not develop directly on `main`.
+
 ## Repository map
 
 - `clipmorph/cli.py`: argument parsing, config loading, defaults, and CLI initialization.
@@ -40,6 +42,7 @@ The dependency set includes large media and ML packages. Prefer focused unit tes
 ## Change rules
 
 - Maintain a single source of truth for each rule, configuration value, workflow, and piece of project knowledge. Reference the authoritative location instead of copying it into parallel docs, configs, or implementations; when duplication is unavoidable, generate it or add a check that detects drift.
+- Make and publish normal changes on `dev`; merge `dev` into `main` only through the repository's approved merge process.
 - Preserve the CLI contract and documented YAML/JSON configuration shape. Add or update focused tests when changing parsing, defaults, validation, or initialization behavior.
 - Keep media processing behind the conversion pipeline and keep platform API behavior inside the relevant upload platform module. Do not duplicate orchestration in platform implementations.
 - Treat preflight as the boundary before conversion or upload. New input, geometry, output, or credential requirements should be validated there when possible.
