@@ -404,6 +404,12 @@ jobs:
     runs-on: ubuntu-24.04
     needs: [release, build]
     steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+          fetch-depth: 0
+
       - name: Download Windows artifact
         uses: actions/download-artifact@v5
         with:
