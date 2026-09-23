@@ -19,3 +19,4 @@
 - Dependency-free `--init` and `--help` startup paths.
 - Job-isolated Instagram staging objects with signed URLs and safe cleanup.
 - Streaming TikTok uploads with bounded memory usage and retry-safe file reopening.
+- Job-scoped subtitle artifacts and collision-resistant converted output names.

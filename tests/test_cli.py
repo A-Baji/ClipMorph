@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from clipmorph.__main__ import main
 from clipmorph.preflight import PreflightError, PreflightValidator
+from clipmorph.conversion_pipeline.transcribe import write_srt_file
 from clipmorph.upload_pipeline import UploadPipeline
 from clipmorph.upload_pipeline.platforms.tiktok import TikTokUploadPipeline
 
@@ -138,6 +139,19 @@ class OAuthTests(unittest.TestCase):
             request_data = put.call_args.kwargs["data"]
             self.assertFalse(isinstance(request_data, bytes))
             self.assertTrue(hasattr(request_data, "read"))
+
+
+class ArtifactIsolationTests(unittest.TestCase):
+    def test_srt_writer_uses_explicit_job_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subtitle_path = Path(temp_dir) / "job.srt"
+            write_srt_file([{
+                "start": 0,
+                "end": 1,
+                "text": "Hello",
+            }], str(subtitle_path))
+            self.assertTrue(subtitle_path.exists())
+            self.assertIn("Hello", subtitle_path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
