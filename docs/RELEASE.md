@@ -43,7 +43,7 @@ gh workflow run tag.yml --ref main -f version=0.1.1 -f allow_existing_tag=true
 3. Behavior:
   - `tag.yml` detects the tag already exists.
   - If `allow_existing_tag` is `false` (default), the workflow will abort to avoid accidental re-releases.
-  - If `allow_existing_tag` is `true`, the workflow will skip creating a new tag and will dispatch the `build_and_release.yml` workflow for the existing tag (this uses `PAT_TOKEN`). The `Build and Release` workflow will then run as if the tag were just pushed, rebuild artifacts, and the downstream `create_release` job will attach/overwrite assets on the Release.
+  - If `allow_existing_tag` is `true`, the workflow will skip creating a new tag and will dispatch the `build_and_release.yml` workflow using the tag ref (`{"ref": "vX.Y.Z"}`, this uses `PAT_TOKEN`). The `Build and Release` workflow then runs as if the tag were just pushed (its `github.ref` is `refs/tags/vX.Y.Z`), rebuilds artifacts, and the `create_release` job attaches/overwrites the assets on the Release for that tag.
 
 Note: the PAT used to dispatch must have Actions/Workflows dispatch permission (see "Secrets and permissions").
 
@@ -57,14 +57,14 @@ Note: the PAT used to dispatch must have Actions/Workflows dispatch permission (
 
 - The build produces three artifacts: `clipmorph-windows.exe`, `clipmorph-macos`, and `clipmorph-linux` (self-extracting). The `create_release` job downloads each artifact and then calls `softprops/action-gh-release` once to attach them to the Release — this avoids race conditions from multiple matrix jobs each trying to create/update the Release.
 - The `pyproject.toml` uses dynamic version from `clipmorph.__version__`, so updating that file keeps package version metadata consistent with the tag.
+- The `create_release` job only runs when the workflow's ref is a tag (`github.ref` starts with `refs/tags/`). This covers both real tag pushes and dispatches targeting a tag ref (which is how `tag.yml` re-triggers builds). A manual `workflow_dispatch` on a branch still builds and uploads all three artifacts, but skips release creation — use the tag flow to actually publish.
+- The release name/tag comes from `github.ref_name` (e.g. `v0.1.1`), so it is correct for both tag pushes and tag-ref dispatches without any workflow inputs.
 
 ## If your org forbids PATs
 
 If a PAT cannot be used, alternatives include:
 - Using a GitHub App with permissions to dispatch workflows.
 - Implementing an external artifact store (S3) and an `attach-release` workflow that runs with a privileged account to collect and attach artifacts.
-
-If you want, I can add a short `CONTRIBUTING.md` section that points to this doc and lists who may run releases and how to create/authorize the PAT. 
 
 ---
 File locations:
