@@ -27,11 +27,15 @@ def _determine_enabled_platforms(upload_to, skip):
 def main():
     load_dotenv()
 
-    # Configure FFmpeg at runtime (will fail fast if not available)
-    configure_ffmpeg()
-
     # Parse arguments and get both args and parser for automatic separation
     args, parser = parse_args_with_parser()
+
+    # --help and --init do not need media-processing dependencies.
+    if args is None:
+        return
+
+    # Configure FFmpeg only when a conversion or upload workflow is requested.
+    configure_ffmpeg()
 
     # Extract main control arguments
     no_confirm = getattr(args, "no_confirm", False)
