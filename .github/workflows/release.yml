@@ -179,6 +179,7 @@ jobs:
         else
           pip install . --no-cache-dir
         fi
+      shell: bash
 
     - name: Verify CPU-only PyTorch on Linux
       if: runner.os == 'Linux'
