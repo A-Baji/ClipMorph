@@ -12,6 +12,7 @@ from clipmorph.cli import build_platform_default_config, summarize_runtime_confi
 from clipmorph.preflight import PreflightError, PreflightValidator
 from clipmorph.conversion_pipeline.transcribe import TranscriptionPipeline, resolve_transcription_device, write_srt_file
 from clipmorph.job import JobManifest
+from clipmorph.service import JobService
 from clipmorph.upload_pipeline import UploadPipeline
 from clipmorph.upload_pipeline.platforms.tiktok import TikTokUploadPipeline
 
@@ -40,6 +41,17 @@ class CliInitializationTests(unittest.TestCase):
             self.assertTrue(config_path.exists())
             self.assertIn("general:", config_path.read_text(encoding="utf-8"))
             configure.assert_not_called()
+
+    def test_data_dir_is_available_as_a_runtime_override(self):
+        with patch.object(sys, "argv", [
+                "clipmorph", "--no-upload", "--data-dir", "custom-data",
+                "input.mp4"
+        ]):
+            from clipmorph.cli import parse_args_with_parser
+            with patch("clipmorph.cli._load_config_data", return_value={}):
+                with patch("pathlib.Path.exists", return_value=True):
+                    args, _ = parse_args_with_parser()
+        self.assertEqual(args.data_dir, "custom-data")
 
     def test_init_backs_up_existing_template(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -166,8 +178,53 @@ class ArtifactIsolationTests(unittest.TestCase):
             manifest.record_platform("YouTube", {"success": True},
                                     str(jobs_dir))
             loaded = JobManifest.load(manifest.job_id, str(jobs_dir))
+            self.assertEqual(loaded.schema_version, 1)
             self.assertEqual(loaded.source_sha256, manifest.source_sha256)
             self.assertTrue(loaded.platforms["YouTube"]["success"])
+
+    def test_manifest_persists_step_and_artifact_metadata(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "input.mp4"
+            source.write_bytes(b"video")
+            artifact = Path(temp_dir) / "converted.mp4"
+            manifest = JobManifest.create(str(source), {}, temp_dir)
+            manifest.set_step("conversion", "running", temp_dir)
+            manifest.set_artifact(str(artifact), temp_dir)
+            loaded = JobManifest.load(manifest.job_id, temp_dir)
+
+            self.assertEqual(loaded.steps["conversion"]["status"], "running")
+            self.assertEqual(loaded.artifacts["primary"]["source_sha256"],
+                             manifest.source_sha256)
+
+
+class JobServiceTests(unittest.TestCase):
+    def test_service_persists_completed_job(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "input.mp4"
+            source.write_bytes(b"video")
+            service = JobService(Path(temp_dir) / "data")
+            try:
+                manifest = service.create_job(
+                    str(source), {},
+                    lambda job, token: job.set_step(
+                        "conversion", "completed", service.jobs_dir))
+                service._futures[manifest.job_id].result(timeout=2)
+                self.assertEqual(service.get_job(manifest.job_id).status,
+                                 "completed")
+            finally:
+                service.close()
+
+    def test_service_cancels_queued_job(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "input.mp4"
+            source.write_bytes(b"video")
+            service = JobService(Path(temp_dir) / "data")
+            try:
+                manifest = service.create_job(str(source), {})
+                cancelled = service.cancel_job(manifest.job_id)
+                self.assertEqual(cancelled.status, "cancelled")
+            finally:
+                service.close()
 
     def test_manifest_keeps_mixed_platforms_as_partial_failure(self):
         with tempfile.TemporaryDirectory() as temp_dir:

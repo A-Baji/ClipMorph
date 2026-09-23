@@ -1,5 +1,7 @@
 import logging
 import os
+import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -8,6 +10,7 @@ from clipmorph.cli import separate_args_by_category
 from clipmorph.cli import summarize_runtime_configuration
 from clipmorph.ffmpeg import configure_ffmpeg  # Add this import
 from clipmorph.job import JobManifest
+from clipmorph.job import source_sha256
 
 
 def _determine_enabled_platforms(upload_to, skip):
@@ -49,6 +52,12 @@ def _run_preflight(args, enabled_platforms, ffmpeg_runner):
 def main():
     load_dotenv()
 
+    if len(sys.argv) > 1 and sys.argv[1] == "web":
+        sys.argv.pop(1)
+        from clipmorph.web import main as web_main
+        web_main()
+        return
+
     # Parse arguments and get both args and parser for automatic separation
     args, parser = parse_args_with_parser()
 
@@ -88,12 +97,15 @@ def main():
 
     configuration = {key: value for key, value in vars(args).items()
                      if key not in {'input_path', 'resume'}}
+    jobs_dir = Path(args.data_dir) / "jobs" if args.data_dir else None
     if args.resume:
-        manifest = JobManifest.load(args.resume)
+        manifest = JobManifest.load(args.resume, jobs_dir)
         if manifest.source_path != os.path.abspath(args.input_path):
             raise ValueError("Resume job source does not match input_path")
+        if manifest.source_sha256 != source_sha256(args.input_path):
+            raise ValueError("Resume job source content does not match the manifest")
     else:
-        manifest = JobManifest.create(args.input_path, configuration)
+        manifest = JobManifest.create(args.input_path, configuration, jobs_dir)
     manifest.set_status("preflighted")
 
     # Automatically separate conversion and upload args based on argument groups

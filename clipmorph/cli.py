@@ -123,6 +123,7 @@ def _apply_config_defaults(args):
             setattr(args, key, value)
 
     defaults = {
+        'data_dir': None,
         'no_confirm': False,
         'clean': False,
         'no_conversion': False,
@@ -282,6 +283,10 @@ def _create_parser():
         "--resume",
         metavar="JOB_ID",
         help="Resume a previous job manifest by ID.")
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        help="Override the platform-specific ClipMorph data directory.")
 
     # Conversion pipeline options
     conversion_group = parser.add_argument_group('Conversion Options')
