@@ -277,7 +277,7 @@ class TranscriptionConfigTests(unittest.TestCase):
 
 class ReviewedTranscriptTests(unittest.TestCase):
     def test_word_annotations_replace_censored_text(self):
-        pipeline = ConversionPipeline("input.mp4", no_subs=True)
+        pipeline = object.__new__(ConversionPipeline)
         segments = [{
             "text": "Say darn now",
             "words": [{"word": "darn", "censored": True, "replacement": "***"}],
