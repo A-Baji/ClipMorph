@@ -111,9 +111,21 @@ jobs:
       shell: bash
     
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v6
       with:
         python-version: '3.11'
+
+    - name: Install CPU-only PyTorch on Linux
+      if: runner.os == 'Linux'
+      run: |
+        python -m pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+        python - <<'PY'
+        from importlib.metadata import version
+
+        with open("torch-constraints.txt", "w", encoding="utf-8") as constraints:
+            constraints.write(f"torch=={version('torch')}\n")
+            constraints.write(f"torchaudio=={version('torchaudio')}\n")
+        PY
 
     - name: Set execute permissions for FFmpeg binaries (Unix only)
       if: runner.os != 'Windows'
@@ -161,7 +173,17 @@ jobs:
       run: |
         python -m pip install --upgrade pip --no-cache-dir
         pip install pyinstaller --no-cache-dir
-        pip install . --no-cache-dir
+        if [ "$RUNNER_OS" == "Linux" ]; then
+          pip install . --no-cache-dir --constraint torch-constraints.txt
+          rm torch-constraints.txt
+        else
+          pip install . --no-cache-dir
+        fi
+
+    - name: Verify CPU-only PyTorch on Linux
+      if: runner.os == 'Linux'
+      run: |
+        python -c "import torch; print(f'Torch {torch.__version__}, CUDA runtime: {torch.version.cuda}'); assert torch.version.cuda is None, 'CUDA-enabled Torch was installed'"
 
     - name: Create PyInstaller Spec
       run: |
