@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import os
 import secrets
@@ -112,16 +113,16 @@ class TikTokUploadPipeline(BaseUploadPipeline):
     def _generate_code_challenge(self, code_verifier):
         """Generate a PKCE code challenge from code verifier."""
         sha256 = hashlib.sha256(code_verifier.encode('utf-8')).digest()
-        return sha256.hex()
+        return base64.urlsafe_b64encode(sha256).rstrip(b'=').decode('ascii')
 
-    def _generate_auth_url(self, code_challenge):
+    def _generate_auth_url(self, code_challenge, state):
         """Generate TikTok OAuth authorization URL."""
         params = {
             "client_key": self.client_key,
             "response_type": "code",
             "scope": self.scope,
             "redirect_uri": self.redirect_uri,
-            "state": "random_state_string",
+            "state": state,
             "code_challenge": code_challenge,
             "code_challenge_method": "S256"
         }
@@ -158,9 +159,8 @@ class TikTokUploadPipeline(BaseUploadPipeline):
             self.refresh_token = self.generate_refresh_token()
             if self.progress_bar:
                 self.progress_bar.write(
-                    "\nIMPORTANT: To skip the manual OAuth process in future runs, "
-                    "set this refresh token in your environment:\n"
-                    f"TIKTOK_REFRESH_TOKEN={self.refresh_token}\n")
+                    "\nTikTok refresh token generated. Store it securely in "
+                    "TIKTOK_REFRESH_TOKEN; it is not displayed by ClipMorph.\n")
 
         data = {
             'client_key': self.client_key,
@@ -294,47 +294,37 @@ class TikTokUploadPipeline(BaseUploadPipeline):
             return True
 
     def generate_refresh_token(self):
-        """
-        Generates a refresh token through OAuth2 PKCE flow.
-        This should be run once to obtain the refresh token for future use.
-        """
+        """Generate a refresh token through the OAuth2 PKCE flow."""
         if not all([self.client_key, self.client_secret]):
             raise ValueError(
                 "Client Key and Client Secret are required for token generation"
             )
 
-        # Generate PKCE values
         code_verifier = self._generate_code_verifier()
         code_challenge = self._generate_code_challenge(code_verifier)
-
-        # Step 1: Direct user to TikTok authorization URL
-        auth_url = self._generate_auth_url(code_challenge)
+        self.oauth_state = secrets.token_urlsafe(32)
+        auth_url = self._generate_auth_url(code_challenge, self.oauth_state)
         print("Open this URL in your browser and authorize the app:")
         print(auth_url)
 
-        # Step 2: User pastes redirect URL after authorization
         redirected_url = input(
-            "\nPaste the full redirect URL here after authorization: ").strip(
-            )
+            "\nPaste the full redirect URL here after authorization: ").strip()
         parsed = urllib.parse.urlparse(redirected_url)
         query = urllib.parse.parse_qs(parsed.query)
         auth_code = query.get("code", [None])[0]
-
+        returned_state = query.get("state", [None])[0]
         if not auth_code:
             raise ValueError("Authorization code not found in the URL")
+        if returned_state != self.oauth_state:
+            raise ValueError("OAuth state mismatch; authorization was rejected")
 
-        # Step 3: Exchange code for access token and refresh token
-        token_response = self._exchange_code_for_token(auth_code,
-                                                       code_verifier)
-
+        token_response = self._exchange_code_for_token(auth_code, code_verifier)
         refresh_token = token_response.get("refresh_token")
         if not refresh_token:
             raise RuntimeError("Failed to obtain refresh token")
 
-        print("\nIMPORTANT: To skip the manual OAuth process in future runs, "
-              "set this refresh token in your environment:")
-        print(f"TIKTOK_REFRESH_TOKEN={refresh_token}")
-
+        print("\nTikTok refresh token generated. Store it securely in "
+              "TIKTOK_REFRESH_TOKEN; it is not displayed by ClipMorph.")
         return refresh_token
 
     def run(self,
