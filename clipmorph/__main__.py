@@ -150,6 +150,9 @@ def main():
     )
     print("=" * 60)
 
+    if successful_uploads != len(upload_results):
+        raise SystemExit(1)
+
     # Cleanup if requested (but don't delete original input file)
     if clean and not no_conversion:
         try:

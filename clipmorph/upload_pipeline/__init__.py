@@ -53,32 +53,38 @@ class UploadPipeline:
         """
         self.max_workers = max_workers
         self.enabled_platforms = {}
+        self.initialization_errors = {}
 
         # Initialize enabled platforms
         if youtube:
             try:
                 self.enabled_platforms['YouTube'] = YouTubeUploadPipeline()
             except Exception as e:
-                logging.warning(f"Failed to initialize YouTube pipeline: {e}")
+                self._record_initialization_error('YouTube', e)
 
         if instagram:
             try:
                 self.enabled_platforms['Instagram'] = InstagramUploadPipeline()
             except Exception as e:
-                logging.warning(
-                    f"Failed to initialize Instagram pipeline: {e}")
+                self._record_initialization_error('Instagram', e)
 
         if tiktok:
             try:
                 self.enabled_platforms['TikTok'] = TikTokUploadPipeline()
             except Exception as e:
-                logging.warning(f"Failed to initialize TikTok pipeline: {e}")
+                self._record_initialization_error('TikTok', e)
 
         if twitter:
             try:
                 self.enabled_platforms['Twitter'] = TwitterUploadPipeline()
             except Exception as e:
-                logging.warning(f"Failed to initialize Twitter pipeline: {e}")
+                self._record_initialization_error('Twitter', e)
+
+    def _record_initialization_error(self, platform_name: str, error: Exception):
+        message = (f"Unable to initialize {platform_name}: {error}. "
+                   "Check its credentials and platform configuration.")
+        self.initialization_errors[platform_name] = message
+        logging.warning(message)
 
     def _smart_truncate_content(self, title: str, description: str, tags: list,
                                 max_chars: int) -> str:
@@ -259,12 +265,22 @@ class UploadPipeline:
         Returns:
             Dictionary mapping platform names to their upload results
         """
-        if not self.enabled_platforms:
-            logging.error(
-                "No platforms are enabled or successfully initialized")
+        if not self.enabled_platforms and not self.initialization_errors:
+            logging.error("No platforms were requested")
             return {}
 
-        results = {}
+        results = {
+            platform: {
+                'platform': platform,
+                'success': False,
+                'result': None,
+                'error': error,
+            }
+            for platform, error in self.initialization_errors.items()
+        }
+
+        if not self.enabled_platforms:
+            return results
 
         # Use ThreadPoolExecutor for parallel uploads
         with ThreadPoolExecutor(max_workers=min(
