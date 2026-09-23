@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from clipmorph.__main__ import main
 from clipmorph.preflight import PreflightError, PreflightValidator
+from clipmorph.upload_pipeline import UploadPipeline
 
 
 class FakeFFmpegRunner:
@@ -90,6 +91,18 @@ class PreflightTests(unittest.TestCase):
                     cam_height=1,
                     platform_overrides=None)
             self.assertTrue(any("youtube" in warning for warning in warnings))
+
+
+class UploadPipelineTests(unittest.TestCase):
+    def test_initialization_failure_remains_in_results(self):
+        with patch("clipmorph.upload_pipeline.YouTubeUploadPipeline",
+                   side_effect=ValueError("missing credentials")):
+            pipeline = UploadPipeline(youtube=True)
+
+        results = pipeline.run("video.mp4", "A title")
+        self.assertIn("YouTube", results)
+        self.assertFalse(results["YouTube"]["success"])
+        self.assertIn("missing credentials", results["YouTube"]["error"])
 
 
 if __name__ == "__main__":
