@@ -9,6 +9,7 @@ from unittest.mock import patch
 from clipmorph.__main__ import main
 from clipmorph.preflight import PreflightError, PreflightValidator
 from clipmorph.conversion_pipeline.transcribe import write_srt_file
+from clipmorph.job import JobManifest
 from clipmorph.upload_pipeline import UploadPipeline
 from clipmorph.upload_pipeline.platforms.tiktok import TikTokUploadPipeline
 
@@ -152,6 +153,19 @@ class ArtifactIsolationTests(unittest.TestCase):
             }], str(subtitle_path))
             self.assertTrue(subtitle_path.exists())
             self.assertIn("Hello", subtitle_path.read_text(encoding="utf-8"))
+
+    def test_job_manifest_persists_source_hash_and_platform_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "input.mp4"
+            source.write_bytes(b"video")
+            jobs_dir = Path(temp_dir) / "jobs"
+            manifest = JobManifest.create(str(source), {"dry_run": False},
+                                          str(jobs_dir))
+            manifest.record_platform("YouTube", {"success": True},
+                                    str(jobs_dir))
+            loaded = JobManifest.load(manifest.job_id, str(jobs_dir))
+            self.assertEqual(loaded.source_sha256, manifest.source_sha256)
+            self.assertTrue(loaded.platforms["YouTube"]["success"])
 
 
 if __name__ == "__main__":

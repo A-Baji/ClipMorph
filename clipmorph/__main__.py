@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from clipmorph.cli import parse_args_with_parser
 from clipmorph.cli import separate_args_by_category
 from clipmorph.ffmpeg import configure_ffmpeg  # Add this import
+from clipmorph.job import JobManifest
 
 
 def _determine_enabled_platforms(upload_to, skip):
@@ -73,6 +74,16 @@ def main():
         print("Preflight passed. No conversion or upload was performed.")
         return
 
+    configuration = {key: value for key, value in vars(args).items()
+                     if key not in {'input_path', 'resume'}}
+    if args.resume:
+        manifest = JobManifest.load(args.resume)
+        if manifest.source_path != os.path.abspath(args.input_path):
+            raise ValueError("Resume job source does not match input_path")
+    else:
+        manifest = JobManifest.create(args.input_path, configuration)
+    manifest.set_status("preflighted")
+
     # Automatically separate conversion and upload args based on argument groups
     conversion_args, upload_args = separate_args_by_category(args, parser)
     conversion_args['strict'] = args.strict
@@ -81,6 +92,7 @@ def main():
     if no_conversion:
         # Use input video directly
         conversion_output = conversion_args['input_path']
+        manifest.set_artifact(conversion_output)
         print(
             f"Skipping conversion, using input video directly: {conversion_output}"
         )
@@ -91,13 +103,16 @@ def main():
         # Add no_confirm to conversion_args so the pipeline can access it
         conversion_args['no_confirm'] = no_confirm
 
+        manifest.set_status("converting")
         conversion_pipeline = ConversionPipeline(**conversion_args)
         conversion_output = conversion_pipeline.run()
+        manifest.set_artifact(conversion_output)
         for warning in conversion_pipeline.warnings:
             logging.warning("Conversion warning: %s", warning)
 
     # Check if upload should be skipped
     if no_upload:
+        manifest.set_status("completed")
         print("Upload skipped (--no-upload flag).")
         return
 
@@ -143,6 +158,7 @@ def main():
     print("=" * 60)
     successful_uploads = 0
     for platform, result in upload_results.items():
+        manifest.record_platform(platform, result)
         if result['success']:
             successful_uploads += 1
             print(f"✓ {platform}: Success - {result['result']}")
