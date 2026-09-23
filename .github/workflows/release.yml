@@ -460,10 +460,13 @@ jobs:
           fi
 
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --title "$TAG" --notes "ClipMorph $TAG" --verify-tag
+            gh release create "$TAG" --title "$TAG" --notes-file CHANGELOG.md --verify-tag
+           else
+            gh release edit "$TAG" --notes-file CHANGELOG.md
           fi
           gh release upload "$TAG" \
             clipmorph-windows.zip \
             clipmorph-macos.zip \
             clipmorph-linux \
+            CHANGELOG.md \
             --clobber
