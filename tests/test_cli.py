@@ -7,8 +7,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from clipmorph.__main__ import main
+from clipmorph.batch import BatchProcessor
+from clipmorph.cli import build_platform_default_config, summarize_runtime_configuration
 from clipmorph.preflight import PreflightError, PreflightValidator
-from clipmorph.conversion_pipeline.transcribe import write_srt_file
+from clipmorph.conversion_pipeline.transcribe import TranscriptionPipeline, resolve_transcription_device, write_srt_file
 from clipmorph.job import JobManifest
 from clipmorph.upload_pipeline import UploadPipeline
 from clipmorph.upload_pipeline.platforms.tiktok import TikTokUploadPipeline
@@ -175,6 +177,70 @@ class ArtifactIsolationTests(unittest.TestCase):
             manifest.record_platform("YouTube", {"success": False}, temp_dir)
             manifest.record_platform("TikTok", {"success": True}, temp_dir)
             self.assertEqual(manifest.status, "partial_failure")
+
+
+class ConfigDefaultsTests(unittest.TestCase):
+    def test_runtime_defaults_are_centralized_and_consistent(self):
+        defaults = build_platform_default_config()
+        self.assertEqual(defaults["youtube"]["category"], "22")
+        self.assertEqual(defaults["youtube"]["privacy_status"], "public")
+        self.assertEqual(defaults["instagram"]["share_to_feed"], True)
+        self.assertEqual(defaults["tiktok"]["privacy_level"], "PUBLIC_TO_EVERYONE")
+
+    def test_dry_run_reports_effective_platform_values(self):
+        summary = summarize_runtime_configuration({
+            "youtube_privacy_status": "private",
+            "youtube_category": "20",
+            "tiktok_privacy_level": "SELF_ONLY",
+        })
+        self.assertEqual(summary["youtube"]["privacy_status"], "private")
+        self.assertEqual(summary["youtube"]["category"], "20")
+        self.assertEqual(summary["tiktok"]["privacy_level"], "SELF_ONLY")
+
+
+class TranscriptionConfigTests(unittest.TestCase):
+    def test_requested_device_falls_back_to_cpu(self):
+        with patch("clipmorph.conversion_pipeline.transcribe.torch.cuda.is_available",
+                   return_value=False):
+            self.assertEqual(resolve_transcription_device("cuda"), "cpu")
+
+    def test_transcription_pipeline_applies_requested_runtime_config(self):
+        with patch("clipmorph.conversion_pipeline.transcribe.whisper.load_model") as load_model:
+            pipeline = TranscriptionPipeline(
+                "sample.wav",
+                language="fr",
+                model_name="tiny",
+                device="cpu",
+                compute_type="int8",
+            )
+            _ = pipeline._whisper_model
+            load_model.assert_called_once_with("tiny", device="cpu")
+
+
+class BatchProcessorTests(unittest.TestCase):
+    def test_batch_processor_deduplicates_and_continues_after_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dir_path = Path(temp_dir)
+            first = dir_path / "first.mp4"
+            second = dir_path / "second.mp4"
+            first.write_bytes(b"video")
+            second.write_bytes(b"video")
+
+            with patch.object(BatchProcessor, "_process_single_item",
+                             side_effect=[
+                                 {"input": str(first), "status": "failed", "reason": "failed"},
+                                 {"input": str(second), "status": "processed", "hash": "hash-value"},
+                             ]):
+                results = BatchProcessor(input_path=str(dir_path),
+                                         max_workers=2,
+                                         max_upload_workers=2,
+                                         max_ffmpeg_workers=2,
+                                         max_cpu_workers=2,
+                                         max_gpu_workers=2)._process_directory()
+
+            self.assertEqual(results["total_items"], 2)
+            self.assertEqual(results["processed"], 1)
+            self.assertEqual(results["failed"], 1)
 
 
 if __name__ == "__main__":

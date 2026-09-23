@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 
 from clipmorph.cli import parse_args_with_parser
 from clipmorph.cli import separate_args_by_category
+from clipmorph.cli import summarize_runtime_configuration
 from clipmorph.ffmpeg import configure_ffmpeg  # Add this import
 from clipmorph.job import JobManifest
 
@@ -71,7 +72,18 @@ def main():
     ffmpeg_runner = FFmpegRunner()
     _run_preflight(args, enabled_platforms, ffmpeg_runner)
     if args.dry_run:
-        print("Preflight passed. No conversion or upload was performed.")
+        platform_summary = summarize_runtime_configuration(
+            {
+                key: value
+                for key, value in vars(args).items()
+                if key.startswith(("youtube_", "instagram_", "tiktok_", "twitter_"))
+            }
+        )
+        print("Preflight passed. Effective runtime configuration:")
+        for platform, values in platform_summary.items():
+            if values:
+                print(f"  {platform}: {values}")
+        print("No conversion or upload was performed.")
         return
 
     configuration = {key: value for key, value in vars(args).items()

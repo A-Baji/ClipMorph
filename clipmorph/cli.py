@@ -12,6 +12,44 @@ SUPPORTED_PLATFORMS = {'youtube', 'instagram', 'tiktok', 'twitter'}
 CONFIG_SECTIONS = {'general', 'conversion', 'upload', 'content', 'platforms'}
 
 
+def build_platform_default_config():
+    """Return the canonical platform defaults shared by runtime logic and examples."""
+    return {
+        'youtube': {
+            'category': '22',
+            'privacy_status': 'public',
+        },
+        'instagram': {
+            'share_to_feed': True,
+            'thumb_offset': 0,
+        },
+        'tiktok': {
+            'privacy_level': 'PUBLIC_TO_EVERYONE',
+        },
+        'twitter': {},
+    }
+
+
+def summarize_runtime_configuration(runtime_values=None):
+    """Merge runtime overrides with canonical defaults for display and dry-run output."""
+    defaults = build_platform_default_config()
+    runtime_values = runtime_values or {}
+
+    for key, value in runtime_values.items():
+        if not isinstance(key, str):
+            continue
+        if key.startswith('youtube_'):
+            defaults['youtube'][key[len('youtube_'):]] = value
+        elif key.startswith('instagram_'):
+            defaults['instagram'][key[len('instagram_'):]] = value
+        elif key.startswith('tiktok_'):
+            defaults['tiktok'][key[len('tiktok_'):]] = value
+        elif key.startswith('twitter_'):
+            defaults.setdefault('twitter', {})[key[len('twitter_'):]] = value
+
+    return defaults
+
+
 def _load_config_data(config_path):
     """Load and validate the supported YAML/JSON configuration shape."""
     if not config_path:
@@ -115,6 +153,7 @@ def _apply_config_defaults(args):
 
 def create_config_template(output_path=None):
     """Create a template YAML configuration file."""
+    platform_defaults = build_platform_default_config()
     template = {
         "general": {
             "no_confirm":
@@ -133,7 +172,11 @@ def create_config_template(output_path=None):
             },
             "output_dir":
             "output",  # Custom output directory for processed videos
-            "no_subs": False  # Skip transcription and subtitle generation
+            "no_subs": False,  # Skip transcription and subtitle generation
+            "transcription_language": "en",  # Whisper language code or auto
+            "transcription_model": "large-v3",  # Whisper model size
+            "transcription_device": "auto",  # auto, cpu, cuda, or mps
+            "transcription_compute_type": "float16"  # float16/int8/float32 for runtime compatibility
         },
         "upload": {
             "no_upload": False,  # Skip all uploads
@@ -145,23 +188,7 @@ def create_config_template(output_path=None):
             "description": "",  # Description for the content
             "tags": []  # List of tags/keywords
         },
-        "platforms": {
-            "youtube": {
-                "category": "20",  # Gaming category
-                "privacy_status": "unlisted"  # public, unlisted, or private
-            },
-            "instagram": {
-                "share_to_feed":
-                False,  # Don't share to main feed (story only)
-                "thumb_offset": 3000  # Thumbnail at 3 seconds
-            },
-            "tiktok": {
-                "privacy_level":
-                "MUTUAL_FOLLOW_FRIENDS"  # PUBLIC_TO_EVERYONE, MUTUAL_FOLLOW_FRIENDS, or SELF_ONLY
-            },
-            "twitter": {
-            }  # Twitter uses account-level privacy, no platform-specific options currently
-        }
+        "platforms": platform_defaults,
     }
 
     # If no output path specified, use default
@@ -283,6 +310,24 @@ def _create_parser():
         "--no-subs",
         action="store_true",
         help="Skip transcription and subtitle generation entirely.")
+    conversion_group.add_argument(
+        "--transcription-language",
+        default="en",
+        help="Whisper language code to use for transcription, or 'auto'.")
+    conversion_group.add_argument(
+        "--transcription-model",
+        default="large-v3",
+        help="Whisper model to use: tiny, base, small, medium, large, large-v3.")
+    conversion_group.add_argument(
+        "--transcription-device",
+        default="auto",
+        choices=["auto", "cpu", "cuda", "mps"],
+        help="Transcription device to prefer for Whisper inference.")
+    conversion_group.add_argument(
+        "--transcription-compute-type",
+        default="float16",
+        choices=["float16", "float32", "int8"],
+        help="Runtime compute type to use when the selected model supports it.")
 
     # Upload control options
     upload_group = parser.add_argument_group('Upload Control')
