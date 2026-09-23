@@ -77,11 +77,11 @@ jobs:
         include:
           - os: windows-latest
             output_name: clipmorph.exe
-            asset_name: clipmorph-windows.exe
+            asset_name: clipmorph-windows.zip
             ffmpeg_dir: windows
           - os: macos-latest
             output_name: clipmorph
-            asset_name: clipmorph-macos
+            asset_name: clipmorph-macos.zip
             ffmpeg_dir: mac
           - os: ubuntu-24.04
             output_name: clipmorph
@@ -191,7 +191,7 @@ jobs:
     - name: Create PyInstaller Spec
       run: |
         if [ "$RUNNER_OS" == "Windows" ] || [ "$RUNNER_OS" == "macOS" ]; then
-          # Single executable for Windows and macOS
+          # Directory-based build avoids extracting the full ML runtime on every launch.
           cat > clipmorph.spec << 'EOF'
         # -*- mode: python ; coding: utf-8 -*-
 
@@ -238,9 +238,8 @@ jobs:
         exe = EXE(
             pyz,
             a.scripts,
-            a.binaries,
-            a.datas,
             [],
+            exclude_binaries=True,
             name='${{ matrix.output_name }}',
             debug=False,
             bootloader_ignore_signals=False,
@@ -252,6 +251,15 @@ jobs:
             target_arch=None,
             codesign_identity=None,
             entitlements_file=None,
+        )
+        coll = COLLECT(
+            exe,
+            a.binaries,
+            a.datas,
+            strip=False,
+            upx=False,
+            upx_exclude=[],
+            name='clipmorph',
         )
         EOF
         else
@@ -335,9 +343,9 @@ jobs:
     - name: Smoke test packaged executable
       run: |
         if [ "$RUNNER_OS" == "Windows" ]; then
-          dist/${{ matrix.output_name }} --help
+          dist/clipmorph/${{ matrix.output_name }} --help
         elif [ "$RUNNER_OS" == "macOS" ]; then
-          dist/${{ matrix.output_name }} --help
+          dist/clipmorph/${{ matrix.output_name }} --help
         else
           dist/clipmorph/clipmorph --help
         fi
@@ -347,7 +355,7 @@ jobs:
       run: |
         echo "=== Build size analysis ==="
         if [ "$RUNNER_OS" == "Windows" ] || [ "$RUNNER_OS" == "macOS" ]; then
-          du -sh dist/${{ matrix.output_name }} || true
+          du -sh dist/clipmorph || true
         else
           du -sh dist/clipmorph || true
         fi
@@ -359,9 +367,10 @@ jobs:
 
     - name: Package distribution
       run: |
-        if [ "$RUNNER_OS" == "Windows" ] || [ "$RUNNER_OS" == "macOS" ]; then
-          # Single executable - just move it
-          mv dist/${{ matrix.output_name }} ${{ matrix.asset_name }}
+        if [ "$RUNNER_OS" == "Windows" ]; then
+          7z a -tzip "${{ matrix.asset_name }}" dist/clipmorph/*
+        elif [ "$RUNNER_OS" == "macOS" ]; then
+          ditto -c -k --sequesterRsrc --keepParent dist/clipmorph "${{ matrix.asset_name }}"
         else
           # Linux: Create self-extracting archive
           cd dist
@@ -415,13 +424,13 @@ jobs:
       - name: Download Windows artifact
         uses: actions/download-artifact@v5
         with:
-          name: clipmorph-windows.exe
+          name: clipmorph-windows.zip
         continue-on-error: false
 
       - name: Download macOS artifact
         uses: actions/download-artifact@v5
         with:
-          name: clipmorph-macos
+          name: clipmorph-macos.zip
         continue-on-error: false
 
       - name: Download Linux artifact
@@ -454,7 +463,7 @@ jobs:
             gh release create "$TAG" --title "$TAG" --notes "ClipMorph $TAG" --verify-tag
           fi
           gh release upload "$TAG" \
-            clipmorph-windows.exe \
-            clipmorph-macos \
+            clipmorph-windows.zip \
+            clipmorph-macos.zip \
             clipmorph-linux \
             --clobber
