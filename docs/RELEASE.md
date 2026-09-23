@@ -1,10 +1,10 @@
-# Release Flow (Version → Tag → Build and Release)
+# Release Flow (Version → Build → Tag and Release)
 
 This document explains the project's release flow and how to run it locally or from the GitHub UI.
 
 ## Overview
 
-- `.github/workflows/release.yml` is the single release pipeline. Run it manually with a version `X.Y.Z`; it updates `main`, creates the annotated tag `vX.Y.Z`, builds platform artifacts, and creates or updates the GitHub Release.
+- `.github/workflows/release.yml` is the single release pipeline. Run it manually with a version `X.Y.Z`; it updates `main`, builds and smoke-tests platform artifacts from one commit, then creates the annotated tag `vX.Y.Z` and GitHub Release only after the builds succeed.
 
 ## Secrets and permissions
 
@@ -24,12 +24,13 @@ Ensure any organization SSO or repo policy authorizes the PAT account.
 gh workflow run release.yml --ref main -f version=0.1.1
 ```
 
-3. The `release` job validates the version, updates `clipmorph/__version__.py`, pushes `main`, and creates the annotated tag `vX.Y.Z`.
-4. The build matrix checks out that exact tag, builds Windows/macOS/Linux artifacts, and then attaches them to the GitHub Release for `vX.Y.Z`.
+3. The `release` job validates the version, updates `clipmorph/__version__.py`, pushes `main`, and passes the resulting commit SHA to the build jobs. It does not create the tag yet.
+4. The build matrix checks out that exact commit, builds and smoke-tests Windows/macOS/Linux artifacts, and uploads them as workflow artifacts.
+5. Only after all build jobs succeed, the release job creates or reuses the annotated tag and attaches the artifacts to the GitHub Release for `vX.Y.Z`.
 
 ## Rerunning a failed build/release for an existing tag
 
-If a `Build and Release` run failed and the Git tag already exists, you can re-run the build without deleting the tag:
+If a `Build and Release` run failed after the tag was created, you can re-run the build without deleting the tag:
 
 1. Run the `Build and Release` workflow again with the same `version` and set `allow_existing_tag` to `true`.
 2. Example (gh CLI):
@@ -41,7 +42,8 @@ gh workflow run release.yml --ref main -f version=0.1.1 -f allow_existing_tag=tr
 3. Behavior:
   - The `release` job detects the tag already exists.
   - If `allow_existing_tag` is `false` (default), the workflow will abort to avoid accidental re-releases.
-  - If `allow_existing_tag` is `true`, the workflow will skip creating a new tag, build the existing tag, and attach or overwrite its release assets.
+  - If `allow_existing_tag` is `true`, the workflow will reuse the existing tag's commit, rebuild it, and attach or overwrite its release assets.
+  - If a build fails before tag creation, rerun with the same version and `allow_existing_tag=false`; the workflow will reuse the version commit on `main` and create the tag only after a successful build.
 
 Note: the PAT used to dispatch must have Actions/Workflows dispatch permission (see "Secrets and permissions").
 
@@ -53,7 +55,7 @@ Note: the PAT used to dispatch must have Actions/Workflows dispatch permission (
 
 ## Implementation notes
 
-- The pipeline produces three artifacts: `clipmorph-windows.exe`, `clipmorph-macos`, and `clipmorph-linux` (self-extracting). The `create_release` job downloads each artifact and then calls `softprops/action-gh-release` once to attach them to the Release — this avoids race conditions from multiple matrix jobs each trying to create/update the Release.
+- The pipeline produces three artifacts: `clipmorph-windows.exe`, `clipmorph-macos`, and `clipmorph-linux` (self-extracting). The `create_release` job checks out the build commit, creates the tag after the matrix succeeds, downloads each artifact, and uses `gh release` once to create or update the Release.
 - The `pyproject.toml` uses dynamic version from `clipmorph.__version__`, so updating that file keeps package version metadata consistent with the tag.
 
 ## If your org forbids PATs

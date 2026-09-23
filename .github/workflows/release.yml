@@ -22,6 +22,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.release.outputs.tag }}
+      commit_sha: ${{ steps.release.outputs.commit_sha }}
     steps:
     - uses: actions/checkout@v5
       with:
@@ -52,6 +53,7 @@ jobs:
             echo "Tag $TAG already exists; set allow_existing_tag=true to reuse it."
             exit 1
           fi
+          COMMIT_SHA=$(git rev-list -n 1 "refs/tags/$TAG")
         else
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
@@ -59,11 +61,11 @@ jobs:
           git add clipmorph/__version__.py
           git diff --staged --quiet || git commit -m "Release $TAG"
           git push origin HEAD:main
-          git tag -a "$TAG" -m "Release $TAG"
-          git push origin "$TAG"
+          COMMIT_SHA=$(git rev-parse HEAD)
         fi
 
         echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+        echo "commit_sha=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build on ${{ matrix.os }}
@@ -89,7 +91,7 @@ jobs:
     steps:
     - uses: actions/checkout@v5
       with:
-        ref: ${{ needs.release.outputs.tag }}
+        ref: ${{ needs.release.outputs.commit_sha }}
         lfs: true
     
     - name: Checkout LFS objects
@@ -407,7 +409,7 @@ jobs:
       - name: Checkout release tag
         uses: actions/checkout@v5
         with:
-          ref: ${{ needs.release.outputs.tag }}
+          ref: ${{ needs.release.outputs.commit_sha }}
           fetch-depth: 0
 
       - name: Download Windows artifact
@@ -433,6 +435,21 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_TOKEN && secrets.PAT_TOKEN || github.token }}
         run: |
           TAG="${{ needs.release.outputs.tag }}"
+          COMMIT_SHA="${{ needs.release.outputs.commit_sha }}"
+
+          if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
+            EXISTING_COMMIT_SHA=$(git rev-list -n 1 "refs/tags/$TAG")
+            if [ "$EXISTING_COMMIT_SHA" != "$COMMIT_SHA" ]; then
+              echo "Tag $TAG points to $EXISTING_COMMIT_SHA, expected $COMMIT_SHA."
+              exit 1
+            fi
+          else
+            git config user.name "GitHub Actions"
+            git config user.email "actions@github.com"
+            git tag -a "$TAG" "$COMMIT_SHA" -m "Release $TAG"
+            git push origin "$TAG"
+          fi
+
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" --title "$TAG" --notes "ClipMorph $TAG" --verify-tag
           fi
