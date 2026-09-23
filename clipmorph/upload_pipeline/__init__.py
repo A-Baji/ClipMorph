@@ -3,6 +3,8 @@ from concurrent.futures import ThreadPoolExecutor
 import logging
 from typing import Dict
 
+from clipmorph.cli import build_platform_default_config
+
 from .platforms import InstagramUploadPipeline
 from .platforms import TikTokUploadPipeline
 from .platforms import TwitterUploadPipeline
@@ -156,6 +158,7 @@ class UploadPipeline:
         # Extract common parameters with proper defaults
         description = kwargs.get('description', '') or ''
         tags = kwargs.get('tags', kwargs.get('keywords', [])) or []
+        platform_defaults = build_platform_default_config()
 
         # Map to platform-specific parameters
         if platform_name == 'YouTube':
@@ -165,31 +168,35 @@ class UploadPipeline:
                 description) > 5000 else (description or 'Uploaded via API')
             yt_keywords = tags[:500] if isinstance(
                 tags, str) else tags  # Keep as list for YouTube
+            yt_defaults = platform_defaults['youtube']
 
             return {
                 'title': yt_title,
                 'description': yt_description,
                 'keywords': yt_keywords,
-                'privacy_status': 'public'  # Default, can be overridden
+                'privacy_status': yt_defaults.get('privacy_status', 'public'),
+                'category': yt_defaults.get('category', '22'),
             }
 
         elif platform_name == 'Instagram':
             # Instagram: 2200 character limit for caption
             instagram_caption = self._smart_truncate_content(
                 title, description, tags, 2200)
+            ig_defaults = platform_defaults['instagram']
             return {
                 'caption': instagram_caption,
-                'share_to_feed': True  # Default, can be overridden
+                'share_to_feed': ig_defaults.get('share_to_feed', True),
+                'thumb_offset': ig_defaults.get('thumb_offset', 0),
             }
 
         elif platform_name == 'TikTok':
             # TikTok: 4000 character limit for description
             tiktok_content = self._smart_truncate_content(
                 title, description, tags, 4000)
+            tk_defaults = platform_defaults['tiktok']
             return {
                 'title': tiktok_content,
-                'privacy_level':
-                'PUBLIC_TO_EVERYONE'  # Default, can be overridden
+                'privacy_level': tk_defaults.get('privacy_level', 'PUBLIC_TO_EVERYONE'),
             }
 
         elif platform_name == 'Twitter':

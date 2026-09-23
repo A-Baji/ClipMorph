@@ -20,17 +20,44 @@ GAMING_PROMPT = ("Yo what the hell was that?\n"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
+def resolve_transcription_device(requested: str | None = None) -> str:
+    """Resolve the preferred device and fall back when unavailable."""
+    requested = (requested or "auto").strip().lower()
+    if requested in {"", "auto"}:
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    if requested == "cuda" and not torch.cuda.is_available():
+        logging.warning("CUDA transcription requested but unavailable; falling back to CPU.")
+        return "cpu"
+    if requested == "mps" and not hasattr(torch.backends, "mps"):
+        logging.warning("MPS transcription requested but unavailable; falling back to CPU.")
+        return "cpu"
+    return requested
+
+
 class TranscriptionPipeline:
     """Class to manage all models for transcription pipeline."""
 
-    def __init__(self, audio_path: str):
+    def __init__(self,
+                 audio_path: str,
+                 language: str = "en",
+                 model_name: str = "large-v3",
+                 device: str | None = None,
+                 compute_type: str = "float16"):
         """
         Initialize with audio file path instead of AudioFileClip
-        
+
         Args:
             audio_path: Path to the audio file
+            language: Whisper language code or auto
+            model_name: Whisper model identifier
+            device: runtime device override (auto/cpu/cuda/mps)
+            compute_type: runtime execution type for the model
         """
         self.audio_path = audio_path
+        self.language = language or "en"
+        self.model_name = model_name or "large-v3"
+        self.device = resolve_transcription_device(device)
+        self.compute_type = compute_type or "float16"
 
     @cached_property
     def _audio(self):
@@ -41,8 +68,8 @@ class TranscriptionPipeline:
     @cached_property
     def _whisper_model(self):
         """Load Whisper model on first access."""
-        logging.info("Loading Whisper large-v3 model...")
-        return whisper.load_model("large-v3", device=DEVICE)
+        logging.info("Loading Whisper %s model on %s...", self.model_name, self.device)
+        return whisper.load_model(self.model_name, device=self.device)
 
     @cached_property
     def _align_model_data(self):
@@ -123,7 +150,7 @@ class TranscriptionPipeline:
             self._audio,
             word_timestamps=True,
             task='transcribe',
-            language='en',
+            language=self.language if self.language and self.language.lower() != 'auto' else None,
             initial_prompt=GAMING_PROMPT,
             temperature=0.0,  # Deterministic output
             beam_size=1,
@@ -156,7 +183,7 @@ class TranscriptionPipeline:
                                  align_data["model"],
                                  align_data["metadata"],
                                  self._audio,
-                                 DEVICE,
+                                 self.device,
                                  return_char_alignments=False)
 
         self._cleanup_model('_align_model_data')
@@ -364,6 +391,28 @@ class TranscriptionPipeline:
             return phrase_segments
         finally:
             self._cleanup()
+
+
+def estimate_transcription_requirements(model_name: str = "large-v3",
+                                       device: str | None = None,
+                                       compute_type: str = "float16") -> dict[str, str | int]:
+    """Return basic resource hints for dry-run and configuration guidance."""
+    resolved_device = resolve_transcription_device(device)
+    memory = {
+        "tiny": "~1-2GB",
+        "base": "~2-4GB",
+        "small": "~4-6GB",
+        "medium": "~8-10GB",
+        "large": "~10-14GB",
+        "large-v3": "~10-14GB",
+    }.get(model_name, "~6-12GB")
+    return {
+        "device": resolved_device,
+        "model": model_name,
+        "compute_type": compute_type,
+        "estimated_memory": memory,
+        "recommended_usage": "cpu" if resolved_device == "cpu" else "gpu",
+    }
 
 
 def write_srt_file(phrases: List[Dict[str, Any]], output_path: str):

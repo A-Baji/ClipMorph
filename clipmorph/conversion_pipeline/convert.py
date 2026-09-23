@@ -20,6 +20,10 @@ class ConversionPipeline:
         self.no_confirm = no_confirm
         self.strict = strict
         self.kwargs = kwargs
+        self.transcription_language = kwargs.get('transcription_language', 'en')
+        self.transcription_model = kwargs.get('transcription_model', 'large-v3')
+        self.transcription_device = kwargs.get('transcription_device', 'auto')
+        self.transcription_compute_type = kwargs.get('transcription_compute_type', 'float16')
         self.ffmpeg_runner = FFmpegRunner()
         self.segments = []
         self.warnings = []
@@ -212,7 +216,13 @@ class ConversionPipeline:
             if not self.no_subs:
                 logging.info("Transcribing audio...")
                 try:
-                    self.segments = TranscriptionPipeline(audio_path).run()
+                    self.segments = TranscriptionPipeline(
+                        audio_path,
+                        language=self.transcription_language,
+                        model_name=self.transcription_model,
+                        device=self.transcription_device,
+                        compute_type=self.transcription_compute_type,
+                    ).run()
 
                     if self.segments:
                         # Log subtitles for user review
