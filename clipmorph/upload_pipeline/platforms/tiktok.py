@@ -269,29 +269,29 @@ class TikTokUploadPipeline(BaseUploadPipeline):
             self.MIN_PROGRESS_INCREMENT, self.MAX_PROGRESS_DURING_PROCESSING /
             (estimated_time / self.API_POLL_INTERVAL))
 
-        with open(video_path, 'rb') as f:
-            video_data = f.read()
-            headers = {
-                'Content-Type': 'video/mp4',
-                'Content-Length': str(video_size),
-                'Content-Range': f'bytes 0-{video_size-1}/{video_size}'
-            }
+        headers = {
+            'Content-Type': 'video/mp4',
+            'Content-Length': str(video_size),
+            'Content-Range': f'bytes 0-{video_size-1}/{video_size}'
+        }
 
-            # Update description during upload
-            if self.progress_bar:
-                elapsed = time.time() - start_time
-                self.progress_bar.set_description(
-                    f"[TikTok] Uploading video... ({elapsed:.0f}s)")
+        def upload_stream():
+            # Reopen the stream for each retry so a failed request starts at byte zero.
+            with open(video_path, 'rb') as video_stream:
+                if self.progress_bar:
+                    elapsed = time.time() - start_time
+                    self.progress_bar.set_description(
+                        f"[TikTok] Uploading video... ({elapsed:.0f}s)")
+                return requests.put(
+                    upload_url,
+                    data=video_stream,
+                    headers=headers,
+                    timeout=self.upload_timeout)
 
-            response = self._retry_request(requests.put,
-                                           upload_url,
-                                           data=video_data,
-                                           headers=headers,
-                                           timeout=self.upload_timeout)
+        response = self._retry_request(upload_stream)
 
-            self._update_progress("video_upload",
-                                  "Video uploaded successfully")
-            return True
+        self._update_progress("video_upload", "Video uploaded successfully")
+        return True
 
     def generate_refresh_token(self):
         """Generate a refresh token through the OAuth2 PKCE flow."""

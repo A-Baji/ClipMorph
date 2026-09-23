@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from clipmorph.__main__ import main
@@ -122,6 +123,21 @@ class OAuthTests(unittest.TestCase):
             tiktok_client_secret="secret")
         url = pipeline._generate_auth_url("challenge", "state-value")
         self.assertIn("state=state-value", url)
+
+    def test_tiktok_upload_passes_file_stream_to_http_client(self):
+        pipeline = TikTokUploadPipeline(
+            tiktok_client_key="client",
+            tiktok_client_secret="secret")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video_path = Path(temp_dir) / "video.mp4"
+            video_path.write_bytes(b"video")
+            with patch("clipmorph.upload_pipeline.platforms.tiktok.requests.put") as put:
+                put.return_value = SimpleNamespace(status_code=200, ok=True)
+                pipeline._upload_video_file(str(video_path), "https://upload", 5)
+
+            request_data = put.call_args.kwargs["data"]
+            self.assertFalse(isinstance(request_data, bytes))
+            self.assertTrue(hasattr(request_data, "read"))
 
 
 if __name__ == "__main__":
