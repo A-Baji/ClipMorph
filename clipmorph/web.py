@@ -10,6 +10,8 @@ from pathlib import Path
 
 from clipmorph.job import default_data_dir
 from clipmorph.service import JobService
+from clipmorph.transcript import load_edit_session, save_edit_session
+from clipmorph.transcript import validate_edit_session
 
 
 def create_app(data_dir: str | Path | None = None):
@@ -55,6 +57,34 @@ def create_app(data_dir: str | Path | None = None):
             return asdict(service.get_job(job_id))
         except FileNotFoundError as error:
             raise HTTPException(status_code=404, detail="job not found") from error
+
+    @app.get("/api/v1/jobs/{job_id}/transcript")
+    def get_transcript(job_id: str):
+        try:
+            manifest = service.get_job(job_id)
+            path = manifest.artifacts.get("transcript-edited", {}).get("path")
+            if not path:
+                raise HTTPException(status_code=404, detail="transcript not found")
+            return load_edit_session(path)
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail="job not found") from error
+
+    @app.put("/api/v1/jobs/{job_id}/transcript")
+    def save_transcript(job_id: str, payload: dict):
+        try:
+            manifest = service.get_job(job_id)
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail="job not found") from error
+        if payload.get("source_sha256") != manifest.source_sha256:
+            raise HTTPException(status_code=409, detail="transcript source does not match job")
+        try:
+            validate_edit_session(payload)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        path = service.jobs_dir / job_id / "transcript-edited.json"
+        save_edit_session(payload, path)
+        manifest.record_artifact("transcript-edited", str(path), service.jobs_dir)
+        return payload
 
     @app.post("/api/v1/jobs/{job_id}/cancel")
     def cancel_job(job_id: str, payload: dict | None = None):

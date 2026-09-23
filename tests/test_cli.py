@@ -11,6 +11,7 @@ from clipmorph.batch import BatchProcessor
 from clipmorph.cli import build_platform_default_config, summarize_runtime_configuration
 from clipmorph.preflight import PreflightError, PreflightValidator
 from clipmorph.conversion_pipeline.transcribe import TranscriptionPipeline, resolve_transcription_device, write_srt_file
+from clipmorph.conversion_pipeline.convert import ConversionPipeline
 from clipmorph.job import JobManifest
 from clipmorph.service import JobService
 from clipmorph.upload_pipeline import UploadPipeline
@@ -272,6 +273,17 @@ class TranscriptionConfigTests(unittest.TestCase):
             )
             _ = pipeline._whisper_model
             load_model.assert_called_once_with("tiny", device="cpu")
+
+
+class ReviewedTranscriptTests(unittest.TestCase):
+    def test_word_annotations_replace_censored_text(self):
+        pipeline = object.__new__(ConversionPipeline)
+        segments = [{
+            "text": "Say darn now",
+            "words": [{"word": "darn", "censored": True, "replacement": "***"}],
+        }]
+        self.assertEqual(pipeline._apply_word_annotations(segments)[0]["text"],
+                         "Say *** now")
 
 
 class BatchProcessorTests(unittest.TestCase):

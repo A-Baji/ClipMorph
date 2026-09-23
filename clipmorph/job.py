@@ -95,12 +95,18 @@ class JobManifest:
     def set_artifact(self, artifact_path: str, jobs_dir: str | None = None,
                      name: str = "primary"):
         self.artifact_path = artifact_path
+        self.record_artifact(name, artifact_path, jobs_dir)
+        self.status = "converted"
+        self.save(jobs_dir)
+
+    def record_artifact(self, name: str, artifact_path: str,
+                        jobs_dir: str | None = None,
+                        schema_version: int = MANIFEST_SCHEMA_VERSION):
         self.artifacts[name] = {
             "path": str(Path(artifact_path).resolve()),
-            "schema_version": MANIFEST_SCHEMA_VERSION,
+            "schema_version": schema_version,
             "source_sha256": self.source_sha256,
         }
-        self.status = "converted"
         self.save(jobs_dir)
 
     def record_platform(self, platform: str, result: dict[str, Any],

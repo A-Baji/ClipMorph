@@ -9,6 +9,8 @@ from clipmorph.conversion_pipeline.transcribe import TranscriptionPipeline
 from clipmorph.conversion_pipeline.transcribe import write_srt_file
 from clipmorph.ffmpeg import FFmpegError
 from clipmorph.ffmpeg import FFmpegRunner
+from clipmorph.job import source_sha256
+from clipmorph.transcript import load_edit_session
 
 
 class ConversionPipeline:
@@ -24,6 +26,7 @@ class ConversionPipeline:
         self.transcription_model = kwargs.get('transcription_model', 'large-v3')
         self.transcription_device = kwargs.get('transcription_device', 'auto')
         self.transcription_compute_type = kwargs.get('transcription_compute_type', 'float16')
+        self.reviewed_transcript_path = kwargs.get('reviewed_transcript_path')
         self.ffmpeg_runner = FFmpegRunner()
         self.segments = []
         self.warnings = []
@@ -83,6 +86,26 @@ class ConversionPipeline:
         for segment in segments:
             segment["text"] = profanity.censor(segment["text"])
         return segments
+
+    def _apply_word_annotations(self, segments):
+        """Apply saved per-word replacements without changing segment timing."""
+        for segment in segments:
+            text = segment.get("text", "")
+            for word in segment.get("words", []):
+                if not word.get("censored"):
+                    continue
+                original = str(word.get("word", "")).strip()
+                replacement = word.get("replacement", "***")
+                if original:
+                    text = text.replace(original, str(replacement), 1)
+            segment["text"] = text
+        return segments
+
+    def _load_reviewed_segments(self):
+        session = load_edit_session(self.reviewed_transcript_path)
+        if session["source_sha256"] != source_sha256(self.input_path):
+            raise ValueError("Reviewed transcript source does not match input video")
+        return session["segments"]
 
     def _log_subtitles(self, segments):
         """Log the generated subtitles for user review."""
@@ -213,7 +236,22 @@ class ConversionPipeline:
             muted_audio_path = audio_path
             use_subtitles = False
 
-            if not self.no_subs:
+            if self.reviewed_transcript_path:
+                logging.info("Loading reviewed transcript edit session...")
+                self.segments = self._load_reviewed_segments()
+                self.segments = self._apply_word_annotations(self.segments)
+                intervals = [
+                    (word["start"], word["end"])
+                    for segment in self.segments
+                    for word in segment.get("words", [])
+                    if word.get("censored") and
+                    isinstance(word.get("start"), (int, float)) and
+                    isinstance(word.get("end"), (int, float))
+                ]
+                if intervals:
+                    muted_audio_path = self._mute_audio(intervals, audio_path)
+                use_subtitles = True
+            elif not self.no_subs:
                 logging.info("Transcribing audio...")
                 try:
                     self.segments = TranscriptionPipeline(
