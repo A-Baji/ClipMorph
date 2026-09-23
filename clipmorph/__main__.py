@@ -75,6 +75,7 @@ def main():
 
     # Automatically separate conversion and upload args based on argument groups
     conversion_args, upload_args = separate_args_by_category(args, parser)
+    conversion_args['strict'] = args.strict
 
     # Handle conversion or direct upload
     if no_conversion:
@@ -90,7 +91,10 @@ def main():
         # Add no_confirm to conversion_args so the pipeline can access it
         conversion_args['no_confirm'] = no_confirm
 
-        conversion_output = ConversionPipeline(**conversion_args).run()
+        conversion_pipeline = ConversionPipeline(**conversion_args)
+        conversion_output = conversion_pipeline.run()
+        for warning in conversion_pipeline.warnings:
+            logging.warning("Conversion warning: %s", warning)
 
     # Check if upload should be skipped
     if no_upload:

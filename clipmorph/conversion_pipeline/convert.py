@@ -13,13 +13,16 @@ from clipmorph.ffmpeg import FFmpegRunner
 
 class ConversionPipeline:
 
-    def __init__(self, input_path, no_subs=False, no_confirm=False, **kwargs):
+    def __init__(self, input_path, no_subs=False, no_confirm=False,
+                 strict=False, **kwargs):
         self.input_path = input_path
         self.no_subs = no_subs
         self.no_confirm = no_confirm
+        self.strict = strict
         self.kwargs = kwargs
         self.ffmpeg_runner = FFmpegRunner()
         self.segments = []
+        self.warnings = []
 
     def _detect_profanity(self, segments, custom_words=None):
         """Detect profanity in transcribed segments and return intervals to mute"""
@@ -254,9 +257,11 @@ class ConversionPipeline:
                             "No subtitles were generated from transcription.")
 
                 except Exception as e:
-                    logging.warning(
-                        f"Transcription failed: {e}. Continuing without subtitles."
-                    )
+                    warning = f"Transcription failed: {e}. Continuing without subtitles."
+                    self.warnings.append(warning)
+                    logging.warning(warning)
+                    if self.strict:
+                        raise
                     segments = []
             else:
                 logging.info("Skipping transcription (--no-subs flag)")
