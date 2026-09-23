@@ -90,6 +90,7 @@ def _apply_config_defaults(args):
         'no_conversion': False,
         'dry_run': False,
         'strict': False,
+        'resume': None,
         'include_cam': True,
         'cam_x': 1420,
         'cam_y': 790,
@@ -250,6 +251,10 @@ def _create_parser():
         "--strict",
         action="store_true",
         help="Fail when optional transcription or subtitle processing fails.")
+    parser.add_argument(
+        "--resume",
+        metavar="JOB_ID",
+        help="Resume a previous job manifest by ID.")
 
     # Conversion pipeline options
     conversion_group = parser.add_argument_group('Conversion Options')
