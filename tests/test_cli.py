@@ -8,6 +8,7 @@ from unittest.mock import patch
 from clipmorph.__main__ import main
 from clipmorph.preflight import PreflightError, PreflightValidator
 from clipmorph.upload_pipeline import UploadPipeline
+from clipmorph.upload_pipeline.platforms.tiktok import TikTokUploadPipeline
 
 
 class FakeFFmpegRunner:
@@ -103,6 +104,24 @@ class UploadPipelineTests(unittest.TestCase):
         self.assertIn("YouTube", results)
         self.assertFalse(results["YouTube"]["success"])
         self.assertIn("missing credentials", results["YouTube"]["error"])
+
+
+class OAuthTests(unittest.TestCase):
+    def test_tiktok_pkce_uses_base64url_s256(self):
+        pipeline = TikTokUploadPipeline(
+            tiktok_client_key="client",
+            tiktok_client_secret="secret")
+        verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+        self.assertEqual(
+            pipeline._generate_code_challenge(verifier),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
+
+    def test_tiktok_auth_url_carries_generated_state(self):
+        pipeline = TikTokUploadPipeline(
+            tiktok_client_key="client",
+            tiktok_client_secret="secret")
+        url = pipeline._generate_auth_url("challenge", "state-value")
+        self.assertIn("state=state-value", url)
 
 
 if __name__ == "__main__":

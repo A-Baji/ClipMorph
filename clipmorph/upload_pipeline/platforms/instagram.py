@@ -234,7 +234,7 @@ class InstagramUploadPipeline(BaseUploadPipeline):
                 "fb_exchange_token": self.get_user_access_token()
             },
             timeout=self.request_timeout)
-        logging.info(f"Access token: {response.json()['access_token']}")
+        logging.info("Long-lived Instagram access token generated.")
         return response.json()["access_token"]
 
     def _get_page_access_token(self):
@@ -478,9 +478,8 @@ class InstagramUploadPipeline(BaseUploadPipeline):
                     self.access_token = self._generate_long_lived_access_token(
                     )
                     self.progress_bar.write(
-                        "\nIMPORTANT: To skip the manual OAuth process in future runs, "
-                        "set this access token in your environment:\n"
-                        f"FACEBOOK_ACCESS_TOKEN={self.access_token}\n")
+                        "\nInstagram access token generated. Store it securely in "
+                        "FACEBOOK_ACCESS_TOKEN; it is not displayed by ClipMorph.\n")
 
                 # Get necessary tokens and IDs
                 if not self.page_token:

@@ -146,7 +146,7 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
                     # If refresh fails, generate a new token
                     if self.progress_bar:
                         self.progress_bar.write(
-                            f"[YouTube] Refresh token expired or invalid. Generating new token... ({e})"
+                            "[YouTube] Refresh token expired or invalid. Generating a new token."
                         )
                     self.refresh_token = self.generate_refresh_token()
 
@@ -350,9 +350,8 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
         # Show the setup message whenever a new token is generated
         if self.progress_bar:
             self.progress_bar.write(
-                "\nIMPORTANT: To skip the manual OAuth process in future runs, "
-                "set this refresh token in your environment:\n"
-                f"GOOGLE_REFRESH_TOKEN={creds.refresh_token}\n")
+                "\nYouTube refresh token generated. Store it securely in "
+                "GOOGLE_REFRESH_TOKEN; it is not displayed by ClipMorph.\n")
 
         return creds.refresh_token
 
