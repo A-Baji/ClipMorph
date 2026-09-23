@@ -167,6 +167,15 @@ class ArtifactIsolationTests(unittest.TestCase):
             self.assertEqual(loaded.source_sha256, manifest.source_sha256)
             self.assertTrue(loaded.platforms["YouTube"]["success"])
 
+    def test_manifest_keeps_mixed_platforms_as_partial_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "input.mp4"
+            source.write_bytes(b"video")
+            manifest = JobManifest.create(str(source), {}, temp_dir)
+            manifest.record_platform("YouTube", {"success": False}, temp_dir)
+            manifest.record_platform("TikTok", {"success": True}, temp_dir)
+            self.assertEqual(manifest.status, "partial_failure")
+
 
 if __name__ == "__main__":
     unittest.main()
