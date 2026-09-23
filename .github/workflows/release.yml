@@ -383,7 +383,7 @@ jobs:
       shell: bash
 
     - name: Upload artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v5
       with:
         name: ${{ matrix.asset_name }}
         path: ${{ matrix.asset_name }}
@@ -394,31 +394,33 @@ jobs:
     needs: [release, build]
     steps:
       - name: Download Windows artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: clipmorph-windows.exe
         continue-on-error: false
 
       - name: Download macOS artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: clipmorph-macos
         continue-on-error: false
 
       - name: Download Linux artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: clipmorph-linux
         continue-on-error: false
 
       - name: Create or update GitHub Release
-        uses: softprops/action-gh-release@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN && secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ needs.release.outputs.tag }}
-          name: ${{ needs.release.outputs.tag }}
-          files: |
-            clipmorph-windows.exe
-            clipmorph-macos
-            clipmorph-linux
+          GH_TOKEN: ${{ secrets.PAT_TOKEN && secrets.PAT_TOKEN || github.token }}
+        run: |
+          TAG="${{ needs.release.outputs.tag }}"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "$TAG" --notes "ClipMorph $TAG" --verify-tag
+          fi
+          gh release upload "$TAG" \
+            clipmorph-windows.exe \
+            clipmorph-macos \
+            clipmorph-linux \
+            --clobber
