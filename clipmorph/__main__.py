@@ -89,7 +89,11 @@ def main():
     conversion_args['strict'] = args.strict
 
     # Handle conversion or direct upload
-    if no_conversion:
+    if args.resume and manifest.artifact_path and os.path.exists(
+            manifest.artifact_path):
+        conversion_output = manifest.artifact_path
+        logging.info("Resuming from existing artifact: %s", conversion_output)
+    elif no_conversion:
         # Use input video directly
         conversion_output = conversion_args['input_path']
         manifest.set_artifact(conversion_output)
@@ -114,6 +118,18 @@ def main():
     if no_upload:
         manifest.set_status("completed")
         print("Upload skipped (--no-upload flag).")
+        return
+
+    completed_platforms = {
+        platform.lower()
+        for platform, result in manifest.platforms.items()
+        if result.get("success")
+    }
+    enabled_platforms = [platform for platform in enabled_platforms
+                         if platform not in completed_platforms]
+    if not enabled_platforms:
+        manifest.set_status("published")
+        print("All requested platforms are already complete for this job.")
         return
 
     # Determine enabled platforms

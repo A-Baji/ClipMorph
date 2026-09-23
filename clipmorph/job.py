@@ -62,5 +62,9 @@ class JobManifest:
     def record_platform(self, platform: str, result: dict[str, Any],
                         jobs_dir: str = ".clipmorph/jobs"):
         self.platforms[platform] = result
-        self.status = "published" if result.get("success") else "partial_failure"
+        if self.platforms and all(
+                item.get("success") for item in self.platforms.values()):
+            self.status = "published"
+        else:
+            self.status = "partial_failure"
         self.save(jobs_dir)
