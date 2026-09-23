@@ -1,0 +1,42 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Compile package
+        run: python -m compileall -q clipmorph
+
+      - name: Validate CLI help and init paths
+        run: |
+          python -m clipmorph --help
+          python -m clipmorph --init --config-path "$RUNNER_TEMP/clipmorph.yaml"
+
+      - name: Verify package install
+        run: |
+          python -m pip wheel . --no-deps --no-build-isolation --wheel-dir "$RUNNER_TEMP/wheel"
+          python -m pip install --force-reinstall --no-deps "$RUNNER_TEMP"/wheel/*.whl
+          python -m clipmorph --help

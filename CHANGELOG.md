@@ -21,3 +21,4 @@
 - Streaming TikTok uploads with bounded memory usage and retry-safe file reopening.
 - Job-scoped subtitle artifacts and collision-resistant converted output names.
 - Persistent source-hashed job manifests with artifact and per-platform state.
+- Automated unittest, compilation, CLI, and package-install checks in CI.
