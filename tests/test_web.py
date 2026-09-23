@@ -25,6 +25,20 @@ class WebApiTests(unittest.TestCase):
             self.assertEqual(response.status_code, 202)
             job_id = response.json()["job_id"]
             self.assertEqual(client.get(f"/api/v1/jobs/{job_id}").status_code, 200)
+            manifest = client.get(f"/api/v1/jobs/{job_id}").json()
+            transcript = {
+                "schema_version": 1,
+                "source_sha256": manifest["source_sha256"],
+                "media_duration": 2.0,
+                "original_segments": [{"start": 0, "end": 1, "text": "Hi"}],
+                "segments": [{"start": 0, "end": 1, "text": "Hello"}],
+            }
+            self.assertEqual(
+                client.put(f"/api/v1/jobs/{job_id}/transcript",
+                           json=transcript).status_code, 200)
+            self.assertEqual(
+                client.get(f"/api/v1/jobs/{job_id}/transcript").json()["segments"][0]["text"],
+                "Hello")
             self.assertEqual(
                 client.post(f"/api/v1/jobs/{job_id}/cancel",
                             json={"confirm": True}).status_code, 200)

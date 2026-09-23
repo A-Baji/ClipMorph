@@ -137,6 +137,7 @@ def _apply_config_defaults(args):
         'cam_height': 270,
         'output_dir': 'output/',
         'no_subs': False,
+        'reviewed_transcript_path': None,
         'no_upload': False,
         'upload_to': None,
         'skip': None,
@@ -315,6 +316,11 @@ def _create_parser():
         "--no-subs",
         action="store_true",
         help="Skip transcription and subtitle generation entirely.")
+    conversion_group.add_argument(
+        "--reviewed-transcript",
+        dest="reviewed_transcript_path",
+        type=str,
+        help="Render a saved transcript edit session without retranscribing.")
     conversion_group.add_argument(
         "--transcription-language",
         default="en",
