@@ -51,6 +51,26 @@ class WebApiTests(unittest.TestCase):
                 400)
             self.assertEqual(client.get("/api/v1/jobs/missing").status_code, 404)
 
+    def test_configuration_masks_credentials_and_artifacts_are_listed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "input.mp4"
+            source.write_bytes(b"video")
+            client = TestClient(create_app(Path(temp_dir) / "data"))
+            saved = client.put("/api/v1/configuration", json={
+                "configuration": {
+                    "title": "Clip",
+                    "youtube_client_secret": "secret-value",
+                }
+            })
+            self.assertEqual(saved.status_code, 200)
+            self.assertEqual(
+                client.get("/api/v1/configuration").json()["configuration"][
+                    "youtube_client_secret"], "••••••••")
+            job = client.post("/api/v1/jobs", json={
+                "source_path": str(source), "configuration": {}}).json()
+            self.assertEqual(
+                client.get(f"/api/v1/jobs/{job['job_id']}/artifacts").status_code, 200)
+
 
 if __name__ == "__main__":
     unittest.main()
