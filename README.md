@@ -22,7 +22,7 @@ clipmorph web
 
 ### Local dashboard
 
-Install the optional web dependencies with `python -m pip install "clipmorph[web]"`,
+Install the optional web dependencies from the tagged GitHub repository with `python -m pip install "clipmorph[web] @ git+https://github.com/A-Baji/ClipMorph.git@vX.Y.Z"`,
 then run `clipmorph web`. The service binds to `127.0.0.1:8000` and serves the
 local dashboard plus `/api/v1/` without authentication. Jobs, credentials,
 artifacts, captions, and upload state remain on the local machine. Stop the
