@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added separate CLI and UI executable variants for Windows, macOS, and Linux; the UI variant bundles the local dashboard and launches it through the default browser, while the CLI variant remains free of web assets and web-only dependencies.
+- Added the `clipmorph-ui` launcher and the `clipmorph[web]` installation path for local dashboard use, while retaining `clipmorph web` for headless service startup.
+
+### Fixed
+
+- Fixed Python wheels omitting ClipMorph conversion, FFmpeg, and upload subpackages, which caused installed web and UI entry points to fail at runtime.
+- Fixed frozen executable startup failures caused by excluding the `setuptools` runtime dependencies required by `pkg_resources`.
+
 ## [0.4.1] - 2026-09-24
 
 ### Added
