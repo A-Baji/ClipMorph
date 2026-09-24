@@ -27,7 +27,7 @@ jobs:
 
       - name: Build frontend
         working-directory: frontend
-        run: npm ci && npm run build
+        run: npm install && npm run build
 
       - name: Run tests
         run: python -m unittest discover -s tests -v
