@@ -260,7 +260,10 @@ jobs:
             'matplotlib.backends.backend_tkagg',
             'matplotlib.backends.backend_wxagg',
             'sympy', 'bokeh', 'dask', 'distributed',
-            'setuptools', 'pip', 'wheel', 'distutils',
+            # NOTE: keep 'setuptools' out of this list. Excluding it drops the
+            # vendored pkg_resources/jaraco modules some transitive deps import
+            # at runtime, which crashes frozen builds with a jaraco ImportError.
+            'pip', 'wheel', 'distutils',
         ]
 
         a = Analysis(
@@ -333,7 +336,10 @@ jobs:
             'matplotlib.backends.backend_tkagg',
             'matplotlib.backends.backend_wxagg',
             'sympy', 'bokeh', 'dask', 'distributed',
-            'setuptools', 'pip', 'wheel', 'distutils',
+            # NOTE: keep 'setuptools' out of this list. Excluding it drops the
+            # vendored pkg_resources/jaraco modules some transitive deps import
+            # at runtime, which crashes frozen builds with a jaraco ImportError.
+            'pip', 'wheel', 'distutils',
         ]
 
         a = Analysis(
