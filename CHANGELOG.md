@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.1
+
+### Added
+
+- Functional local dashboard workflows for source-picker submission, dry-run validation, layouts, artifacts, uploads, retries, lifecycle controls, and platform credential health.
+- Checked-in CLI-to-web parity matrix and differential configuration tests.
+- UI-enabled package asset build and CI validation, while preserving the CLI-only installation path.
+
+### Validation
+
+- Full unittest and compile checks passed.
+- Frontend production build and packaged-service dashboard checks passed.
+
 ## 0.4.0
 
 ### Added

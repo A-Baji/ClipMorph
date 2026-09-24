@@ -1,191 +1,33 @@
 <script>
-  let activeView = 'Queue';
-  let selectedJob = 'midnight-ranked';
-  let showAdvanced = false;
-  let theme = 'system';
-  let notice = '';
-  let liveJobs = false;
-  let configuration = { data_dir: '%LOCALAPPDATA%/ClipMorph', generate_previews: true };
-  let captionSegments = [
-    { start: 0.0, end: 1.8, text: 'Wait for the timing.', speaker: 'speaker_1', censored: false, emphasis: false },
-    { start: 1.8, end: 4.6, text: 'That was absolutely unreal.', speaker: 'speaker_2', censored: false, emphasis: true },
-    { start: 4.6, end: 7.2, text: 'Push now, push now!', speaker: 'speaker_1', censored: false, emphasis: false }
-  ];
-  let activeSegment = 1;
-  $: currentJob = jobs.find((job) => job.id === selectedJob) || jobs[0];
-
-  async function loadLiveJobs() {
-    try {
-      const response = await fetch('/api/v1/jobs');
-      if (!response.ok) return;
-      const manifests = await response.json();
-      if (!Array.isArray(manifests) || !manifests.length) return;
-      jobs = manifests.map((manifest) => ({
-        id: manifest.job_id,
-        title: manifest.configuration?.title || manifest.source_path.split(/[\\/]/).pop(),
-        source: manifest.source_path.split(/[\\/]/).pop(),
-        duration: manifest.configuration?.duration || '--:--',
-        state: manifest.status,
-        progress: manifest.status === 'completed' || manifest.status === 'published' ? 100 : 0,
-        tone: manifest.status === 'failed' ? 'amber' : manifest.status === 'completed' ? 'green' : 'blue',
-        updated: manifest.updated_at
-      }));
-      selectedJob = jobs[0].id;
-      liveJobs = true;
-    } catch (error) {
-      liveJobs = false;
-    }
-  }
-
-  async function loadConfiguration() {
-    try {
-      const response = await fetch('/api/v1/configuration');
-      if (response.ok) {
-        const result = await response.json();
-        configuration = { ...configuration, ...(result.configuration || {}) };
-      }
-    } catch (error) {
-      // Keep the visual form usable when the frontend is previewed standalone.
-    }
-  }
-
-  loadLiveJobs();
-  loadConfiguration();
-
-  const nav = [
-    { label: 'Queue', icon: '◫', count: '04' },
-    { label: 'Captions', icon: 'Aa' },
-    { label: 'Layouts', icon: '▦' },
-    { label: 'Uploads', icon: '↗' },
-    { label: 'Settings', icon: '◎' }
-  ];
-
-  let jobs = [
-    { id: 'midnight-ranked', title: 'Midnight ranked / clutch round', source: 'session_2026-09-23.mp4', duration: '18:42', state: 'Rendering', progress: 68, tone: 'amber', updated: '2 min ago' },
-    { id: 'tower-push', title: 'Tower push / no comms', source: 'stream_0918.mov', duration: '07:16', state: 'Waiting review', progress: 100, tone: 'blue', updated: '14 min ago' },
-    { id: 'clean-ace', title: 'Clean ace / final zone', source: 'ranked-night.mp4', duration: '04:03', state: 'Uploaded', progress: 100, tone: 'green', updated: 'Yesterday' },
-    { id: 'warmup', title: 'Warmup highlights', source: 'warmup.mkv', duration: '22:31', state: 'Queued', progress: 0, tone: 'muted', updated: 'Yesterday' }
-  ];
-
-  function selectJob(job) {
-    selectedJob = job.id;
-    activeView = 'Queue';
-  }
-
-  function saveSettings() {
-    fetch('/api/v1/configuration', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ configuration })
-    }).then(() => {
-      notice = 'Configuration saved locally';
-      setTimeout(() => notice = '', 2600);
-    }).catch(() => {
-      notice = 'Configuration preview updated';
-      setTimeout(() => notice = '', 2600);
-    });
-  }
-
-  async function saveCaptions() {
-    if (liveJobs) {
-      try {
-        const jobResponse = await fetch(`/api/v1/jobs/${selectedJob}`);
-        const job = await jobResponse.json();
-        const session = {
-          schema_version: 1,
-          source_sha256: job.source_sha256,
-          media_duration: null,
-          original_segments: captionSegments,
-          segments: captionSegments
-        };
-        await fetch(`/api/v1/jobs/${selectedJob}/transcript`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(session)
-        });
-      } catch (error) {
-        notice = 'Caption edits kept in this review session';
-      }
-    }
-    notice = 'Caption edits saved to the job';
-    setTimeout(() => notice = '', 2600);
-  }
+  const platforms = ['youtube', 'instagram', 'tiktok', 'twitter'];
+  const nav = ['Queue', 'New Job', 'Captions', 'Layouts', 'Uploads', 'Settings'];
+  let activeView = 'Queue'; let jobs = []; let selectedJobId = ''; let layouts = []; let artifacts = [];
+  let configuration = {}; let notice = ''; let errors = []; let sourceFile; let credentials = {};
+  let jobForm = { source_path: '', title: '', description: '', tags: '', output_dir: 'output/', layout: '', dry_run: false, no_conversion: false, no_subs: false, no_upload: false, strict: false, include_cam: true, cam_x: 1420, cam_y: 790, cam_width: 480, cam_height: 270, transcription_language: 'en', transcription_model: 'large-v3', transcription_device: 'auto', transcription_compute_type: 'float16', upload_to: [...platforms], skip: [] };
+  let layoutForm = { name: 'Vertical highlight', crop: false, region: 'top', caption: true, captionText: '' };
+  $: selectedJob = jobs.find((job) => job.job_id === selectedJobId) || jobs[0];
+  function flash(message) { notice = message; setTimeout(() => notice = '', 2800); }
+  async function api(path, options = {}) { const response = await fetch(path, options); const body = await response.json().catch(() => ({})); if (!response.ok) throw new Error(body.detail || `Request failed (${response.status})`); return body; }
+  async function loadWorkspace() { try { jobs = await api('/api/v1/jobs'); if (!selectedJobId && jobs.length) selectedJobId = jobs[0].job_id; layouts = await api('/api/v1/layouts'); const settings = await api('/api/v1/configuration'); configuration = settings.configuration || {}; credentials = settings.credentials || {}; } catch (error) { flash('Preview mode: local service is unavailable'); } }
+  loadWorkspace();
+  function setView(view) { activeView = view; errors = []; if (view === 'Uploads' && selectedJob) loadArtifacts(); }
+  async function loadArtifacts() { if (!selectedJob) return; try { artifacts = await api(`/api/v1/jobs/${selectedJob.job_id}/artifacts`); } catch (error) { flash(error.message); } }
+  function handleFile(event) { sourceFile = event.currentTarget.files[0]; }
+  async function submitJob() { errors = []; try { let sourcePath = jobForm.source_path.trim(); if (sourceFile) { const form = new FormData(); form.append('file', sourceFile); sourcePath = (await api('/api/v1/sources', { method: 'POST', body: form })).source_path; } if (!sourcePath) throw new Error('Choose a video or enter a filesystem path.'); const payload = { ...jobForm, tags: jobForm.tags ? jobForm.tags.split(',').map((tag) => tag.trim()) : [] }; delete payload.source_path; const validation = await api('/api/v1/jobs/validate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source_path: sourcePath, configuration: payload }) }); if (!validation.valid) { errors = validation.errors; return; } if (jobForm.dry_run) { flash('Dry run passed. No job was started.'); return; } const created = await api('/api/v1/jobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source_path: sourcePath, configuration: payload }) }); selectedJobId = created.job_id; await loadWorkspace(); setView('Queue'); flash('Job submitted to the local queue'); } catch (error) { errors = [error.message]; } }
+  async function jobAction(action) { if (!selectedJob) return; try { await api(`/api/v1/jobs/${selectedJob.job_id}/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(action === 'cancel' ? { confirm: true } : {}) }); await loadWorkspace(); flash(action === 'cancel' ? 'Cancellation requested' : 'Job resumed'); } catch (error) { flash(error.message); } }
+  async function saveLayout() { try { const layout = { crop: { enabled: layoutForm.crop, source: { x: 0, y: 0, width: 1280, height: 720 }, placement: { mode: 'fit', region: layoutForm.region } }, caption: { enabled: layoutForm.caption, text: layoutForm.captionText || 'ClipMorph' } }; await api('/api/v1/layouts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: layoutForm.name, layout }) }); layouts = await api('/api/v1/layouts'); flash('Layout saved'); } catch (error) { flash(error.message); } }
+  async function deleteLayout(id) { try { await api(`/api/v1/layouts/${id}?confirm=true`, { method: 'DELETE' }); layouts = await api('/api/v1/layouts'); flash('Layout removed'); } catch (error) { flash(error.message); } }
+  async function renameArtifact(name) { const nextName = window.prompt('New artifact filename'); if (!nextName || !selectedJob) return; try { await api(`/api/v1/jobs/${selectedJob.job_id}/artifacts/${encodeURIComponent(name)}/rename`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: nextName }) }); await loadArtifacts(); flash('Artifact renamed'); } catch (error) { flash(error.message); } }
+  async function deleteArtifact(name) { if (!window.confirm('Move this artifact to the system trash?')) return; try { await api(`/api/v1/jobs/${selectedJob.job_id}/artifacts/${encodeURIComponent(name)}?confirm=true`, { method: 'DELETE' }); await loadArtifacts(); flash('Artifact moved to trash'); } catch (error) { flash(error.message); } }
+  async function upload(selectedPlatforms = jobForm.upload_to) { if (!selectedJob) return; try { await api(`/api/v1/jobs/${selectedJob.job_id}/upload`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: selectedJob.configuration?.title || 'ClipMorph clip', platforms: selectedPlatforms }) }); flash('Upload queued'); await loadWorkspace(); } catch (error) { flash(error.message); } }
+  async function saveSettings() { try { await api('/api/v1/configuration', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ configuration }) }); flash('Workspace configuration saved locally'); } catch (error) { flash(error.message); } }
 </script>
-
-<svelte:head>
-  <title>ClipMorph / Studio</title>
-</svelte:head>
-
-<div class="shell">
-  <aside class="rail">
-    <div class="brand-mark" aria-label="ClipMorph home"><span>CM</span><i></i></div>
-    <div class="rail-label">Workspace</div>
-    <nav aria-label="Primary navigation">
-      {#each nav as item}
-        <button class:active={activeView === item.label} class="nav-item" onclick={() => activeView = item.label}>
-          <span class="nav-icon">{item.icon}</span>
-          <span>{item.label}</span>
-          {#if item.count}<em>{item.count}</em>{/if}
-        </button>
-      {/each}
-    </nav>
-    <div class="rail-bottom">
-      <div class="health-dot"><span></span> Local service <b>online</b></div>
-      <button class="avatar" aria-label="Open profile">AB</button>
-    </div>
-  </aside>
-
-  <main class="content">
-    <header class="topbar">
-      <div>
-        <p class="eyebrow">Wednesday, 23 September 2026 <span>•</span> local workspace</p>
-        <h1>{activeView === 'Queue' ? 'Your edit queue' : activeView}</h1>
-      </div>
-      <div class="top-actions">
-        <button class="icon-button" aria-label="Toggle theme" title="Theme" onclick={() => theme = theme === 'system' ? 'dark' : 'system'}>◐</button>
-        <button class="service-pill" onclick={() => activeView = 'Settings'}><span></span> {liveJobs ? 'Service connected' : 'Preview data'} <b>⌄</b></button>
-      </div>
-    </header>
-
-    {#if notice}<div class="toast" role="status">✓ {notice}</div>{/if}
-
-    {#if activeView === 'Queue'}
-      <section class="command-row">
-        <div class="stat-block"><strong>04</strong><span>active jobs</span></div>
-        <div class="stat-block"><strong>02</strong><span>need your review</span></div>
-        <div class="stat-block"><strong>07</strong><span>published this week</span></div>
-        <button class="primary-action" onclick={() => notice = 'Choose a video to start a new job'}><span>＋</span> New job</button>
-      </section>
-
-      <section class="queue-layout">
-        <div class="job-list">
-          <div class="section-heading"><div><span class="section-kicker">Pipeline</span><h2>Recent jobs</h2></div><button class="text-button">Filter <span>⌄</span></button></div>
-          {#each jobs as job}
-            <button class:selected={selectedJob === job.id} class="job-row" onclick={() => selectJob(job)}>
-              <div class="thumb thumb-{job.tone}"><span>{job.state === 'Rendering' ? '68%' : job.state === 'Uploaded' ? '✓' : '▶'}</span></div>
-              <div class="job-copy"><div class="job-title">{job.title}</div><div class="job-meta">{job.source} <span>·</span> {job.duration}</div></div>
-              <div class="job-state"><span class="state-dot {job.tone}"></span>{job.state}<small>{job.updated}</small></div>
-              <span class="row-arrow">→</span>
-            </button>
-          {/each}
-          <button class="load-more">View all jobs <span>→</span></button>
-        </div>
-
-        <div class="detail-panel">
-          <div class="detail-head"><div><span class="section-kicker">Selected job</span><h2>{currentJob.title}</h2></div><button class="more-button" aria-label="More job actions">•••</button></div>
-          <div class="preview-frame"><div class="preview-scan"></div><div class="preview-title">{currentJob.title}</div><div class="preview-badge">{currentJob.duration}</div><div class="play-button">▶</div><div class="preview-caption">You can’t teach this timing.</div></div>
-          <div class="progress-line"><div style={`width: ${currentJob.progress}%`}></div></div>
-          <div class="detail-status"><div><strong>{currentJob.state}</strong><span>{currentJob.progress}% complete</span></div><span class="mono">{currentJob.state === 'Rendering' ? '00:11:42 / 00:18:42' : 'ready'}</span></div>
-          <div class="platforms"><div class="platform-head"><span>Destinations</span><span>Upload status</span></div><div class="platform-row"><span class="platform-icon youtube">Y</span><b>YouTube Shorts</b><span class="upload-ok">{currentJob.state === 'Uploaded' ? 'Published' : 'Ready'}</span></div><div class="platform-row"><span class="platform-icon instagram">◎</span><b>Instagram Reels</b><span class="upload-pending">{currentJob.state === 'Uploaded' ? 'Published' : 'Waiting'}</span></div><div class="platform-row"><span class="platform-icon tiktok">♪</span><b>TikTok</b><span class="upload-pending">{currentJob.state === 'Uploaded' ? 'Published' : 'Waiting'}</span></div></div>
-          <div class="detail-actions"><button class="secondary-action" onclick={() => notice = 'Opening caption review'}>Review captions</button><button class="quiet-action" aria-label="Download artifact">↓</button><button class="quiet-action" aria-label="More actions">•••</button></div>
-        </div>
-      </section>
-    {:else if activeView === 'Captions'}
-      <section class="caption-page"><div class="section-heading"><div><span class="section-kicker">Review before render</span><h2>Caption studio</h2></div><button class="primary-action" onclick={saveCaptions}>Save caption edits</button></div><div class="caption-layout"><div class="caption-preview"><div class="caption-video"><span class="preview-badge">00:02.80</span><div class="caption-frame-text">That was absolutely unreal.</div><div class="timeline-play">▶</div></div><div class="timeline"><div class="timeline-track"><span class="timeline-progress"></span><i style="left: 34%"></i></div><div class="timeline-labels"><span>00:00</span><span>00:09.42</span></div></div></div><div class="segment-panel"><div class="segment-panel-head"><div><span class="section-kicker">Transcript</span><h3>{captionSegments.length} segments</h3></div><button class="text-button">Original ↔ Edited</button></div>{#each captionSegments as segment, index}<button class:active-segment={activeSegment === index} class="segment-row" onclick={() => activeSegment = index}><span class="segment-time">{segment.start.toFixed(1)}<br /><b>{segment.end.toFixed(1)}</b></span><span class="segment-text">{segment.text}</span><span class="speaker-swatch {segment.speaker === 'speaker_2' ? 'lime' : ''}"></span></button>{/each}<button class="add-segment" onclick={() => captionSegments = [...captionSegments, { start: 7.2, end: 8.5, text: 'New caption', speaker: 'speaker_1', censored: false, emphasis: false }]}>＋ Add segment</button></div></div><div class="caption-controls"><div class="control-heading"><span class="section-kicker">Selected segment</span><span class="mono">{captionSegments[activeSegment].start.toFixed(1)}s — {captionSegments[activeSegment].end.toFixed(1)}s</span></div><label class="edit-field">Caption text<textarea bind:value={captionSegments[activeSegment].text} rows="2"></textarea></label><div class="timing-fields"><label class="edit-field">Start<input type="number" step="0.1" bind:value={captionSegments[activeSegment].start} /></label><label class="edit-field">End<input type="number" step="0.1" bind:value={captionSegments[activeSegment].end} /></label></div><div class="timing-fields"><label class="edit-field">Speaker<input bind:value={captionSegments[activeSegment].speaker} /></label><label class="edit-field">Replacement<input placeholder="Optional" /></label></div><div class="toggle-row"><label><input type="checkbox" bind:checked={captionSegments[activeSegment].censored} /> Censor word</label><label><input type="checkbox" bind:checked={captionSegments[activeSegment].emphasis} /> Emphasis</label></div></div></section>
-    {:else if activeView === 'Settings'}
-      <section class="settings-page"><div class="section-heading"><div><span class="section-kicker">Workspace</span><h2>Configuration</h2></div><button class="primary-action" onclick={saveSettings}>Save changes</button></div><div class="settings-grid"><div class="setting-card"><span class="card-index">01</span><h3>Default destinations</h3><p>Choose where finished clips go when a job completes.</p><label><input type="checkbox" checked /> YouTube Shorts</label><label><input type="checkbox" checked /> Instagram Reels</label><label><input type="checkbox" /> TikTok</label></div><div class="setting-card"><span class="card-index">02</span><h3>Local storage</h3><p>Jobs and artifacts stay on this machine.</p><label class="field-label">Data directory<input bind:value={configuration.data_dir} /></label><label><input type="checkbox" checked={configuration.generate_previews} onchange={(event) => configuration.generate_previews = event.currentTarget.checked} /> Generate previews automatically</label></div><div class="setting-card advanced"><button class="advanced-toggle" onclick={() => showAdvanced = !showAdvanced}><span>Advanced controls</span><span>{showAdvanced ? '−' : '+'}</span></button>{#if showAdvanced}<label class="field-label">Transcription model<select><option>large-v3</option><option>medium</option><option>small</option></select></label><label class="field-label">Worker limit<input type="number" value="2" /></label>{/if}</div></div></section>
-    {:else}
-      <section class="empty-view"><div class="empty-icon">{nav.find((item) => item.label === activeView)?.icon}</div><h2>{activeView} is ready for the next slice</h2><p>The local service foundation is connected. This view will share the same job and artifact model as the queue.</p><button class="primary-action" onclick={() => activeView = 'Queue'}>Back to queue</button></section>
-    {/if}
-  </main>
-</div>
+<svelte:head><title>ClipMorph / Studio</title></svelte:head>
+<div class="shell"><aside class="rail"><div class="brand-mark"><span>CM</span><i></i></div><div class="rail-label">Workspace</div><nav aria-label="Primary navigation">{#each nav as item}<button class:active={activeView === item} class="nav-item" onclick={() => setView(item)}><span class="nav-icon">{item === 'New Job' ? '+' : item[0]}</span><span>{item}</span>{#if item === 'Queue'}<em>{jobs.length.toString().padStart(2, '0')}</em>{/if}</button>{/each}</nav><div class="rail-bottom"><div class="health-dot"><span></span> Local service <b>online</b></div><div class="avatar">AB</div></div></aside>
+<main class="content"><header class="topbar"><div><p class="eyebrow">ClipMorph <span>•</span> local workspace</p><h1>{activeView === 'Queue' ? 'Your edit queue' : activeView}</h1></div><button class="service-pill" onclick={() => setView('Settings')}><span></span> Service connected <b>⌄</b></button></header>{#if notice}<div class="toast" role="status">✓ {notice}</div>{/if}{#if errors.length}<div class="error-box" role="alert">{#each errors as error}<div>{error}</div>{/each}</div>{/if}
+{#if activeView === 'Queue'}<section class="command-row"><div class="stat-block"><strong>{jobs.length.toString().padStart(2, '0')}</strong><span>active jobs</span></div><div class="stat-block"><strong>{jobs.filter((job) => job.status === 'waiting_review').length.toString().padStart(2, '0')}</strong><span>need your review</span></div><div class="stat-block"><strong>{jobs.filter((job) => job.status === 'published').length.toString().padStart(2, '0')}</strong><span>published here</span></div><button class="primary-action" onclick={() => setView('New Job')}>＋ New job</button></section><section class="queue-layout"><div class="job-list"><div class="section-heading"><div><span class="section-kicker">Pipeline</span><h2>Recent jobs</h2></div><button class="text-button" onclick={loadWorkspace}>Refresh ↻</button></div>{#if !jobs.length}<div class="empty-inline">No jobs yet. Start with a source video.</div>{/if}{#each jobs as job}<button class:selected={selectedJobId === job.job_id} class="job-row" onclick={() => { selectedJobId = job.job_id; loadArtifacts(); }}><div class="thumb"><span>{job.status === 'published' ? '✓' : '▶'}</span></div><div class="job-copy"><div class="job-title">{job.configuration?.title || job.source_path.split(/[\\/]/).pop()}</div><div class="job-meta">{job.source_path} <span>·</span> {job.status}</div></div><div class="job-state"><span class="state-dot"></span>{job.status}<small>{job.updated_at}</small></div><span class="row-arrow">→</span></button>{/each}</div>{#if selectedJob}<div class="detail-panel"><div class="detail-head"><div><span class="section-kicker">Selected job</span><h2>{selectedJob.configuration?.title || selectedJob.job_id}</h2></div><span class="mono">{selectedJob.status}</span></div><div class="preview-frame"><div class="preview-scan"></div><div class="preview-title">{selectedJob.configuration?.title || 'ClipMorph preview'}</div><div class="play-button">▶</div><div class="preview-caption">{selectedJob.source_path}</div></div><div class="platforms"><div class="platform-head"><span>Lifecycle</span><span>{selectedJob.updated_at}</span></div>{#each Object.entries(selectedJob.steps || {}) as step}<div class="platform-row"><b>{step[0]}</b><span>{step[1].status}</span></div>{/each}</div><div class="detail-actions"><button class="secondary-action" onclick={() => setView('Uploads')}>Artifacts</button>{#if ['queued', 'running', 'uploading'].includes(selectedJob.status)}<button class="quiet-action" onclick={() => jobAction('cancel')} aria-label="Cancel job">■</button>{/if}{#if ['failed', 'cancelled', 'partial_failure'].includes(selectedJob.status)}<button class="secondary-action" onclick={() => jobAction('resume')}>Resume</button>{/if}</div></div>{/if}</section>
+{:else if activeView === 'New Job'}<section class="form-page"><div class="section-heading"><div><span class="section-kicker">Source-bound workflow</span><h2>Start a new job</h2></div><button class="primary-action" onclick={submitJob}>Submit job</button></div><div class="form-grid"><div class="form-card wide"><label class="field-label">Video file<input type="file" accept="video/*" onchange={handleFile} /></label><label class="field-label">Or filesystem path<input bind:value={jobForm.source_path} placeholder="C:\\media\\session.mp4" /></label><label class="field-label">Title<input bind:value={jobForm.title} placeholder="Required for upload" /></label><label class="field-label">Description<textarea bind:value={jobForm.description} rows="3"></textarea></label><label class="field-label">Tags<input bind:value={jobForm.tags} placeholder="clutch, ranked, highlights" /></label></div><div class="form-card"><span class="card-index">RUN MODE</span>{#each [['dry_run','Dry run only'], ['no_conversion','Skip conversion'], ['no_subs','Skip captions'], ['no_upload','Do not upload'], ['strict','Strict validation']] as option}<label><input type="checkbox" bind:checked={jobForm[option[0]]} /> {option[1]}</label>{/each}<span class="card-index">DESTINATIONS</span>{#each platforms as platform}<label><input type="checkbox" checked={jobForm.upload_to.includes(platform)} onchange={(event) => jobForm.upload_to = event.currentTarget.checked ? [...jobForm.upload_to, platform] : jobForm.upload_to.filter((item) => item !== platform)} /> {platform}</label>{/each}</div><div class="form-card wide"><span class="card-index">CONVERSION</span><div class="field-row"><label class="field-label">Output directory<input bind:value={jobForm.output_dir} /></label><label class="field-label">Layout<select bind:value={jobForm.layout}><option value="">Default</option>{#each layouts as layout}<option value={layout.id}>{layout.name}</option>{/each}</select></label></div><div class="field-row">{#each [['cam_x','Camera X'], ['cam_y','Camera Y'], ['cam_width','Camera width'], ['cam_height','Camera height']] as field}<label class="field-label">{field[1]}<input type="number" bind:value={jobForm[field[0]]} /></label>{/each}</div></div><div class="form-card"><span class="card-index">TRANSCRIPTION</span><label class="field-label">Language<input bind:value={jobForm.transcription_language} /></label><label class="field-label">Model<select bind:value={jobForm.transcription_model}><option>large-v3</option><option>medium</option><option>small</option><option>base</option></select></label><label class="field-label">Device<select bind:value={jobForm.transcription_device}><option>auto</option><option>cpu</option><option>cuda</option><option>mps</option></select></label><label class="field-label">Compute type<select bind:value={jobForm.transcription_compute_type}><option>float16</option><option>float32</option><option>int8</option></select></label></div></div></section>
+{:else if activeView === 'Layouts'}<section class="form-page"><div class="section-heading"><div><span class="section-kicker">Reusable geometry</span><h2>Layouts</h2></div><button class="primary-action" onclick={saveLayout}>Save layout</button></div><div class="layout-grid"><div class="form-card"><label class="field-label">Preset name<input bind:value={layoutForm.name} /></label><label><input type="checkbox" bind:checked={layoutForm.crop} /> Crop camera/source region</label><label class="field-label">Placement region<select bind:value={layoutForm.region}><option>top</option><option>center</option><option>bottom</option></select></label><label><input type="checkbox" bind:checked={layoutForm.caption} /> Add caption panel</label><label class="field-label">Caption text<input bind:value={layoutForm.captionText} /></label></div><div class="saved-list"><span class="section-kicker">Saved presets</span>{#if !layouts.length}<div class="empty-inline">No layouts saved yet.</div>{/if}{#each layouts as layout}<div class="saved-row"><div><b>{layout.name}</b><small>{layout.id}</small></div><button class="quiet-action" onclick={() => deleteLayout(layout.id)} aria-label="Delete layout">×</button></div>{/each}</div></div></section>
+{:else if activeView === 'Uploads'}<section class="form-page"><div class="section-heading"><div><span class="section-kicker">Artifacts and destinations</span><h2>Uploads</h2></div><button class="primary-action" onclick={() => upload()}>Upload selected job</button></div>{#if !selectedJob}<div class="empty-view"><h2>Select a job first</h2><button class="secondary-action" onclick={() => setView('Queue')}>Back to queue</button></div>{:else}<div class="upload-layout"><div class="form-card"><span class="card-index">ARTIFACTS</span>{#if !artifacts.length}<div class="empty-inline">No artifacts have been recorded yet.</div>{/if}{#each Object.entries(artifacts) as artifact}<div class="saved-row"><div><b>{artifact[0]}</b><small>{artifact[1].path}</small></div><button class="quiet-action" onclick={() => renameArtifact(artifact[0])} aria-label="Rename artifact">✎</button><button class="quiet-action" onclick={() => deleteArtifact(artifact[0])} aria-label="Delete artifact">×</button></div>{/each}</div><div class="form-card"><span class="card-index">PLATFORM STATUS</span>{#each platforms as platform}<div class="saved-row"><b>{platform}</b><span>{selectedJob.platforms?.[platform]?.success ? 'Published' : 'Pending'}</span><button class="text-button" onclick={() => upload([platform])}>Retry</button></div>{/each}</div></div>{/if}</section>
+{:else if activeView === 'Settings'}<section class="form-page"><div class="section-heading"><div><span class="section-kicker">Local credentials and policy</span><h2>Settings</h2></div><button class="primary-action" onclick={saveSettings}>Save changes</button></div><div class="settings-grid"><div class="form-card"><span class="card-index">STORAGE</span><label class="field-label">Data directory<input bind:value={configuration.data_dir} /></label><label class="field-label">Output directory<input bind:value={configuration.output_dir} /></label><label><input type="checkbox" checked={configuration.generate_previews !== false} onchange={(event) => configuration.generate_previews = event.currentTarget.checked} /> Generate previews automatically</label></div><div class="form-card"><span class="card-index">PLATFORM HEALTH</span>{#each platforms as platform}<div class="health-row"><span class:healthy={credentials[platform]}></span><b>{platform}</b><small>{credentials[platform] ? 'credentials configured' : 'needs credentials'}</small></div>{/each}</div><div class="form-card wide"><span class="card-index">PLATFORM POLICY</span><p class="form-note">Capability warnings, blocked states, and platform overrides remain in each job manifest. Secrets are masked and can come from the local environment or an OS secret provider.</p></div></div></section>
+{:else}<section class="empty-view"><div class="empty-icon">Aa</div><h2>Caption review</h2><p>Transcript edits remain source-bound to the selected job.</p><button class="primary-action" onclick={() => setView('Queue')}>Back to queue</button></section>{/if}</main></div>
