@@ -4,7 +4,8 @@ This document explains the project's release flow and how to run it locally or f
 
 ## Overview
 
-- `.github/workflows/release.yml` is the single release pipeline. Run it manually with a version `X.Y.Z`; it updates `main`, builds and smoke-tests platform artifacts from one commit, then creates the annotated tag `vX.Y.Z` and GitHub Release only after the builds succeed.
+- `.github/workflows/release.yml` is the single release pipeline. Run it manually with a version `X.Y.Z`; it updates `main`, builds and smoke-tests two executable variants (CLI and UI) for Windows, macOS, and Linux from one commit, creates the annotated tag `vX.Y.Z` and GitHub Release only after the builds succeed, and then publishes the Python package to PyPI.
+- See [docs/PACKAGE_MATRIX.md](PACKAGE_MATRIX.md) for the full artifact/package matrix (audience, contents, entry point, dependencies, platform, verification command).
 
 ## Secrets and permissions
 
@@ -12,6 +13,7 @@ This document explains the project's release flow and how to run it locally or f
   - Classic PAT: include `repo` and `workflow` scopes; or
   - Fine-grained PAT: granted to this repository with **Actions/Workflows** (Read & write) and **Repository contents** (Read & write) as needed.
 - `GITHUB_TOKEN` (provided by Actions): `release.yml` requires `contents: write` permission (set at top-level `permissions`) so the `create_release` job can create releases and attach files.
+- A `pypi` GitHub Environment must exist, configured for [PyPI Trusted Publishing](https://docs.pypi.org/trusted-publishers/) against this repository's `publish_pypi` job. No PyPI API token secret is required or used.
 
 Ensure any organization SSO or repo policy authorizes the PAT account.
 
@@ -55,8 +57,9 @@ Note: the PAT used to dispatch must have Actions/Workflows dispatch permission (
 
 ## Implementation notes
 
-- The pipeline produces three artifacts: `clipmorph-windows.zip`, `clipmorph-macos.zip`, and `clipmorph-linux` (self-extracting). The Windows and macOS archives contain onedir builds so the large ML runtime is not extracted on every launch. The `create_release` job checks out the build commit, creates the tag after the matrix succeeds, downloads each artifact, and uses `gh release` once to create or update the Release.
-- The `pyproject.toml` uses dynamic version from `clipmorph.__version__`, so updating that file keeps package version metadata consistent with the tag.
+- The pipeline produces six executable artifacts: `clipmorph-cli-{windows.zip,macos.zip,linux}` (CLI variant, no web dependencies or assets) and `clipmorph-ui-{windows.zip,macos.zip,linux}` (UI variant: bundles FastAPI/Uvicorn, the built Svelte dashboard, and a desktop launcher that selects a loopback port, waits for `/api/v1/health`, opens the default browser, and shuts down cleanly). Windows and macOS archives contain onedir builds so the large ML runtime is not extracted on every launch; Linux artifacts are self-extracting archives. A CI gate rejects a `cli` artifact that contains web assets and a `ui` artifact that is missing them.
+- After the release is created, the `publish_pypi` job builds the base `clipmorph` sdist/wheel and publishes it to PyPI via trusted publishing. Only the Python package is published; there are no npm publish steps anywhere in this pipeline. Installing with `pip install clipmorph` gives the CLI; `pip install "clipmorph[web]"` additionally installs FastAPI/Uvicorn and enables `clipmorph web` (headless) and the `clipmorph-ui` desktop launcher console script.
+- The `pyproject.toml` uses dynamic version from `clipmorph.__version__`, so updating that file keeps package version metadata consistent with the tag. The release workflow also verifies that version matches the tag before creating the Release.
 
 ## If your org forbids PATs
 

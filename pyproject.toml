@@ -44,3 +44,4 @@ clipmorph = [
 
 [project.scripts]
 clipmorph = "clipmorph.__main__:main"
+clipmorph-ui = "clipmorph.ui_launcher:main"

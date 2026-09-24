@@ -40,8 +40,68 @@ jobs:
           python -m clipmorph --help
           python -m clipmorph --init --config-path "$RUNNER_TEMP/clipmorph.yaml"
 
+      - name: Set execute permissions for bundled FFmpeg
+        run: chmod +x clipmorph/ffmpeg/linux/ffmpeg clipmorph/ffmpeg/linux/ffprobe
+
+      - name: CLI smoke tests (dry-run, resume, data-dir, ordinary startup)
+        run: |
+          set -euo pipefail
+          SAMPLE="$RUNNER_TEMP/sample.mp4"
+          DATA_DIR="$RUNNER_TEMP/cli-smoke-data"
+          # Sized to satisfy the default camera crop preflight check (1420,790,480,270).
+          clipmorph/ffmpeg/linux/ffmpeg -y -f lavfi -i testsrc=duration=1:size=1920x1080:rate=10 "$SAMPLE"
+
+          # Ordinary startup + dry-run: validates the input and prints the effective
+          # configuration without converting or uploading anything.
+          python -m clipmorph "$SAMPLE" --no-upload --dry-run --title "Smoke Test" --data-dir "$DATA_DIR"
+
+          # data-dir + resume: create a resumable job, then resume it by job id.
+          python -m clipmorph "$SAMPLE" --no-conversion --no-upload --title "Smoke Test" --data-dir "$DATA_DIR"
+          JOB_ID=$(ls "$DATA_DIR/jobs")
+          python -m clipmorph "$SAMPLE" --resume "$JOB_ID" --no-conversion --no-upload --title "Smoke Test" --data-dir "$DATA_DIR"
+        shell: bash
+
       - name: Verify package install
         run: |
           python -m pip wheel . --no-deps --no-build-isolation --wheel-dir "$RUNNER_TEMP/wheel"
           python -m pip install --force-reinstall --no-deps "$RUNNER_TEMP"/wheel/*.whl
           python -m clipmorph --help
+
+      - name: Reject accidental npm distribution steps
+        run: |
+          if grep -RIn --include='*.yml' -E 'npm publish|npm-publish' .github/workflows; then
+            echo "npm must never be used as an end-user distribution channel" >&2
+            exit 1
+          fi
+        shell: bash
+
+  e2e:
+    name: Packaged browser E2E (desktop + mobile)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install web dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install -e ".[web]"
+          python -m pip install playwright
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm install --no-audit --no-fund && npm run build
+
+      - name: Install Playwright browser
+        run: python -m playwright install --with-deps chromium
+
+      - name: Run packaged browser E2E tests
+        run: python -m unittest tests.test_e2e_dashboard -v
