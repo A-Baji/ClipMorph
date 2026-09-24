@@ -317,6 +317,14 @@ class EditingPipeline:
         caption = layout.get("caption") or {}
         filters = ["[0:v]null[base]"]
         current = "base"
+
+        def region_y(region: str, height: int) -> str:
+            if region == "bottom":
+                return f"1920-{height}"
+            if region == "center":
+                return f"(1920-{height})/2"
+            return "0"
+
         if crop.get("enabled"):
             source = crop["source"]
             placement = crop.get("placement", {})
@@ -328,13 +336,16 @@ class EditingPipeline:
                 crop_size = f"{dimensions['width']}:{dimensions['height']}"
             else:
                 crop_size = "1080:-2"
+            crop_height = source["height"] if mode == "none" else (
+                placement.get("dimensions", {}).get("height", 608))
+            crop_y = region_y(placement.get("region", "top"), crop_height)
             filters.append(
                 f"[0:v]crop={source['width']}:{source['height']}:{source['x']}:{source['y']},"
                 f"scale={crop_size}[crop]")
             if placement.get("mode", "fit") == "none":
-                filters.append("[base][crop]overlay=(W-w)/2:0[withcrop]")
+                filters.append(f"[base][crop]overlay=(W-w)/2:{crop_y}[withcrop]")
             else:
-                filters.append("[base][crop]overlay=(W-w)/2:0[withcrop]")
+                filters.append(f"[base][crop]overlay=(W-w)/2:{crop_y}[withcrop]")
             current = "withcrop"
 
         if caption.get("enabled"):
@@ -348,14 +359,37 @@ class EditingPipeline:
                 if end is not None:
                     enable = f":enable='between(t,{start},{end})'"
                 if caption.get("mode", "overlay") == "background":
+                    dimensions = caption.get("dimensions", {})
+                    panel_width = dimensions.get("width", 1080)
+                    panel_height = dimensions.get("height", 608)
+                    panel = caption.get("panel", {})
+                    panel_color = panel.get("color", "black")
+                    panel_opacity = panel.get("opacity", 0.65)
+                    padding = caption.get("padding", {})
+                    padding_x = padding.get("left", 64)
+                    padding_y = padding.get("top", 48)
+                    text_style = caption.get("typography", {})
+                    font_size = text_style.get("size", 64)
+                    font_color = text_style.get("color", "white")
+                    font_file = text_style.get("font_file")
+                    font_option = f":fontfile='{font_file}'" if font_file else ""
+                    panel_y = region_y(caption.get("region", "top"), panel_height)
                     filters.append(
-                        f"[{current}]drawbox=x=0:y=0:w=iw:h=608:color=black@0.65:t=fill[panel{index}];"
-                        f"[panel{index}]drawtext=text='{text}':x=(w-text_w)/2:y=(608-text_h)/2:"
-                        f"fontsize=64:fontcolor=white{enable}[caption{index}]")
+                        f"[{current}]drawbox=x=(iw-{panel_width})/2:y={panel_y}:w={panel_width}:h={panel_height}:"
+                        f"color={panel_color}@{panel_opacity}:t=fill[panel{index}];"
+                        f"[panel{index}]drawtext=text='{text}':x=(w-text_w)/2:y={panel_y}+{padding_y}:"
+                        f"fontsize={font_size}:fontcolor={font_color}{font_option}{enable}[caption{index}]")
                 else:
+                    text_style = caption.get("typography", {})
+                    font_size = text_style.get("size", 64)
+                    font_color = text_style.get("color", "white")
+                    font_file = text_style.get("font_file")
+                    font_option = f":fontfile='{font_file}'" if font_file else ""
+                    overlay_height = caption.get("dimensions", {}).get("height", 120)
+                    caption_y = region_y(caption.get("region", "top"), overlay_height)
                     filters.append(
-                        f"[{current}]drawtext=text='{text}':x=(w-text_w)/2:y=80:"
-                        f"fontsize=64:fontcolor=white:borderw=3:bordercolor=black{enable}[caption{index}]")
+                        f"[{current}]drawtext=text='{text}':x=(w-text_w)/2:y={caption_y}:"
+                        f"fontsize={font_size}:fontcolor={font_color}{font_option}:borderw=3:bordercolor=black{enable}[caption{index}]")
                 current = f"caption{index}"
         filters[-1] += f"[{current}]" if not filters[-1].endswith(f"[{current}]") else ""
         cmd = [

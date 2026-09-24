@@ -44,7 +44,29 @@ class LayoutRenderingTests(unittest.TestCase):
         self.assertIn("scale=1080:608", filter_graph)
         self.assertIn("drawbox", filter_graph)
         self.assertIn("drawtext", filter_graph)
+        self.assertIn("y=0", filter_graph)
         self.assertIn("-map", command)
+
+    def test_layout_renderer_uses_named_bottom_caption_region_and_styles(self):
+        runner = FakeRunner()
+        pipeline = EditingPipeline.__new__(EditingPipeline)
+        pipeline.layout = {
+            "caption": {
+                "enabled": True,
+                "mode": "overlay",
+                "region": "bottom",
+                "dimensions": {"width": 900, "height": 180},
+                "typography": {"size": 42, "color": "yellow"},
+                "text": "Bottom line",
+            }
+        }
+        pipeline.ffmpeg_runner = runner
+        pipeline._apply_layout("input.mp4", "output.mp4")
+        filter_graph = runner.commands[0][runner.commands[0].index(
+            "-filter_complex") + 1]
+        self.assertIn("y=1920-180", filter_graph)
+        self.assertIn("fontsize=42", filter_graph)
+        self.assertIn("fontcolor=yellow", filter_graph)
 
 
 if __name__ == "__main__":
