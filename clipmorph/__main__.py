@@ -123,7 +123,7 @@ def main():
             raise ValueError("Resume job source content does not match the manifest")
     else:
         manifest = JobManifest.create(args.input_path, configuration, jobs_dir)
-    manifest.set_status("preflighted")
+    manifest.set_status("preflighted", jobs_dir)
 
     # Automatically separate conversion and upload args based on argument groups
     conversion_args, upload_args = separate_args_by_category(args, parser)
@@ -137,7 +137,7 @@ def main():
     elif no_conversion:
         # Use input video directly
         conversion_output = conversion_args['input_path']
-        manifest.set_artifact(conversion_output)
+        manifest.set_artifact(conversion_output, jobs_dir)
         print(
             f"Skipping conversion, using input video directly: {conversion_output}"
         )
@@ -148,16 +148,16 @@ def main():
         # Add no_confirm to conversion_args so the pipeline can access it
         conversion_args['no_confirm'] = no_confirm
 
-        manifest.set_status("converting")
+        manifest.set_status("converting", jobs_dir)
         conversion_pipeline = ConversionPipeline(**conversion_args)
         conversion_output = conversion_pipeline.run()
-        manifest.set_artifact(conversion_output)
+        manifest.set_artifact(conversion_output, jobs_dir)
         for warning in conversion_pipeline.warnings:
             logging.warning("Conversion warning: %s", warning)
 
     # Check if upload should be skipped
     if no_upload:
-        manifest.set_status("completed")
+        manifest.set_status("completed", jobs_dir)
         print("Upload skipped (--no-upload flag).")
         return
 
@@ -169,7 +169,7 @@ def main():
     enabled_platforms = [platform for platform in enabled_platforms
                          if platform not in completed_platforms]
     if not enabled_platforms:
-        manifest.set_status("published")
+        manifest.set_status("published", jobs_dir)
         print("All requested platforms are already complete for this job.")
         return
 
