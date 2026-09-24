@@ -448,6 +448,7 @@ def separate_args_by_category(args, parser):
         'upload_to', 'skip'
     }
     conversion_args.add('input_path')  # input_path goes to conversion
+    conversion_args.add('layout')
 
     # Separate the actual argument values
     args_dict = vars(args)

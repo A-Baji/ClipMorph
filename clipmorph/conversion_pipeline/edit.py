@@ -20,6 +20,7 @@ class EditingPipeline:
                  cam_width=480,
                  cam_height=270,
                  clip_height=1312,
+                 layout=None,
                  ffmpeg_runner=None):
         self.input_path = input_path
         self.output_dir = output_dir if output_dir.endswith(
@@ -32,6 +33,7 @@ class EditingPipeline:
         self.cam_width = cam_width
         self.cam_height = cam_height
         self.clip_height = clip_height
+        self.layout = layout
         self.ffmpeg_runner = ffmpeg_runner or FFmpegRunner()
 
     def _get_video_info(self, video_path: str) -> Dict[str, Any]:
@@ -308,6 +310,61 @@ class EditingPipeline:
 
         self.ffmpeg_runner.run_ffmpeg(cmd)
 
+    def _apply_layout(self, input_path: str, output_path: str) -> None:
+        """Apply composable crop and caption layers to the vertical canvas."""
+        layout = self.layout or {}
+        crop = layout.get("crop") or {}
+        caption = layout.get("caption") or {}
+        filters = ["[0:v]null[base]"]
+        current = "base"
+        if crop.get("enabled"):
+            source = crop["source"]
+            placement = crop.get("placement", {})
+            mode = placement.get("mode", "fit")
+            if mode == "none":
+                crop_size = f"{source['width']}:{source['height']}"
+            elif mode == "stretch":
+                dimensions = placement["dimensions"]
+                crop_size = f"{dimensions['width']}:{dimensions['height']}"
+            else:
+                crop_size = "1080:-2"
+            filters.append(
+                f"[0:v]crop={source['width']}:{source['height']}:{source['x']}:{source['y']},"
+                f"scale={crop_size}[crop]")
+            if placement.get("mode", "fit") == "none":
+                filters.append("[base][crop]overlay=(W-w)/2:0[withcrop]")
+            else:
+                filters.append("[base][crop]overlay=(W-w)/2:0[withcrop]")
+            current = "withcrop"
+
+        if caption.get("enabled"):
+            text_items = caption.get("items")
+            if text_items is None:
+                text_items = [{"text": caption.get("text", ""), "range": [0, None]}]
+            for index, item in enumerate(text_items):
+                text = str(item.get("text", "")).replace("'", "\\'").replace(":", "\\:")
+                start, end = item["range"]
+                enable = f":enable='gte(t,{start})'"
+                if end is not None:
+                    enable = f":enable='between(t,{start},{end})'"
+                if caption.get("mode", "overlay") == "background":
+                    filters.append(
+                        f"[{current}]drawbox=x=0:y=0:w=iw:h=608:color=black@0.65:t=fill[panel{index}];"
+                        f"[panel{index}]drawtext=text='{text}':x=(w-text_w)/2:y=(608-text_h)/2:"
+                        f"fontsize=64:fontcolor=white{enable}[caption{index}]")
+                else:
+                    filters.append(
+                        f"[{current}]drawtext=text='{text}':x=(w-text_w)/2:y=80:"
+                        f"fontsize=64:fontcolor=white:borderw=3:bordercolor=black{enable}[caption{index}]")
+                current = f"caption{index}"
+        filters[-1] += f"[{current}]" if not filters[-1].endswith(f"[{current}]") else ""
+        cmd = [
+            self.ffmpeg_runner.config.ffmpeg_path, "-i", input_path,
+            "-filter_complex", ";".join(filters), "-map", f"[{current}]",
+            "-map", "0:a?", "-c:v", "libx264", "-c:a", "copy", "-y", output_path,
+        ]
+        self.ffmpeg_runner.run_ffmpeg(cmd)
+
     def run(self):
         try:
             logging.info("Starting video processing...")
@@ -356,6 +413,12 @@ class EditingPipeline:
                 composited_temp = self.ffmpeg_runner.create_temp_file()
                 self._combine_clips_vertical(cam_temp, main_temp,
                                              composited_temp)
+
+            if self.layout:
+                logging.info("Applying composable layout...")
+                layout_temp = self.ffmpeg_runner.create_temp_file()
+                self._apply_layout(composited_temp, layout_temp)
+                composited_temp = layout_temp
 
             # Add subtitles
             if self.segments:
