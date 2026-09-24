@@ -87,5 +87,15 @@ class JobService:
             manifest.set_status("cancelled", self.jobs_dir)
         return self.get_job(job_id)
 
+    def resume_job(self, job_id: str, runner: Callable) -> JobManifest:
+        manifest = self.get_job(job_id)
+        token = CancellationToken()
+        manifest.set_status("queued", self.jobs_dir)
+        with self._lock:
+            self._tokens[job_id] = token
+            self._futures[job_id] = self.executor.submit(
+                self._run, job_id, runner, token)
+        return manifest
+
     def close(self) -> None:
         self.executor.shutdown(wait=True, cancel_futures=False)

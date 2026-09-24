@@ -63,6 +63,23 @@ class WebApiTests(unittest.TestCase):
                     json={"platforms": ["youtube"]})
                 self.assertEqual(response.status_code, 409)
 
+    def test_batch_resume_and_cleanup_endpoints_require_expected_inputs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sources = []
+            for name in ("one.mp4", "two.mp4"):
+                path = Path(temp_dir) / name
+                path.write_bytes(b"video")
+                sources.append(str(path))
+            with TestClient(create_app(Path(temp_dir) / "data")) as client:
+                batch = client.post("/api/v1/batches", json={
+                    "source_paths": sources,
+                    "configuration": {"no_upload": True},
+                })
+                self.assertEqual(batch.status_code, 202)
+                job_id = batch.json()["job_ids"][0]
+                self.assertEqual(
+                    client.delete(f"/api/v1/jobs/{job_id}").status_code, 400)
+
     def test_job_creation_uses_shared_execution_runner(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "input.mp4"
@@ -78,21 +95,21 @@ class WebApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "input.mp4"
             source.write_bytes(b"video")
-            client = TestClient(create_app(Path(temp_dir) / "data"))
-            saved = client.put("/api/v1/configuration", json={
-                "configuration": {
-                    "title": "Clip",
-                    "youtube_client_secret": "secret-value",
-                }
-            })
-            self.assertEqual(saved.status_code, 200)
-            self.assertEqual(
-                client.get("/api/v1/configuration").json()["configuration"][
-                    "youtube_client_secret"], "••••••••")
-            job = client.post("/api/v1/jobs", json={
-                "source_path": str(source), "configuration": {}}).json()
-            self.assertEqual(
-                client.get(f"/api/v1/jobs/{job['job_id']}/artifacts").status_code, 200)
+            with TestClient(create_app(Path(temp_dir) / "data")) as client:
+                saved = client.put("/api/v1/configuration", json={
+                    "configuration": {
+                        "title": "Clip",
+                        "youtube_client_secret": "secret-value",
+                    }
+                })
+                self.assertEqual(saved.status_code, 200)
+                self.assertEqual(
+                    client.get("/api/v1/configuration").json()["configuration"][
+                        "youtube_client_secret"], "••••••••")
+                job = client.post("/api/v1/jobs", json={
+                    "source_path": str(source), "configuration": {}}).json()
+                self.assertEqual(
+                    client.get(f"/api/v1/jobs/{job['job_id']}/artifacts").status_code, 200)
 
 
 if __name__ == "__main__":
