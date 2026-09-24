@@ -550,7 +550,9 @@ jobs:
             echo "clipmorph/__version__.py ($VERSION) does not match release tag (${{ needs.release.outputs.tag }})" >&2
             exit 1
           fi
-          if grep -RIn --include='*.yml' -E 'npm publish|npm-publish' .github/workflows; then
+          PACKAGE_TOOL='npm'
+          PUBLISH_ACTION='publish'
+          if grep -RIn --include='*.yml' -E "${PACKAGE_TOOL}[[:space:]]+${PUBLISH_ACTION}|${PACKAGE_TOOL}-${PUBLISH_ACTION}" .github/workflows; then
             echo "npm must never be an end-user distribution channel" >&2
             exit 1
           fi
