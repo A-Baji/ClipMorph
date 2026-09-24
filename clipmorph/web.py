@@ -6,6 +6,7 @@ import argparse
 from dataclasses import asdict
 import json
 import time
+import uuid
 from pathlib import Path
 
 from clipmorph.job import default_data_dir
@@ -108,6 +109,25 @@ def create_app(data_dir: str | Path | None = None):
                                 detail=f"source file was not found: {source_path}") from error
         return {"job_id": manifest.job_id, "status_url": f"/api/v1/jobs/{manifest.job_id}"}
 
+    @app.post("/api/v1/batches", status_code=202)
+    def create_batch(payload: dict):
+        sources = payload.get("source_paths")
+        configuration = payload.get("configuration", {})
+        if not isinstance(sources, list) or not sources:
+            raise HTTPException(status_code=422, detail="source_paths are required")
+        batch_id = uuid.uuid4().hex
+        jobs = []
+        for source_path in sources:
+            if not isinstance(source_path, str):
+                raise HTTPException(status_code=422, detail="source_paths must be strings")
+            job_configuration = dict(configuration)
+            job_configuration["batch_id"] = batch_id
+            manifest = service.create_job(
+                source_path, job_configuration,
+                lambda job, token: execute_job(job, token, service.jobs_dir))
+            jobs.append(manifest.job_id)
+        return {"batch_id": batch_id, "job_ids": jobs}
+
     @app.get("/api/v1/jobs/{job_id}")
     def get_job(job_id: str):
         try:
@@ -195,6 +215,32 @@ def create_app(data_dir: str | Path | None = None):
             return asdict(service.cancel_job(job_id))
         except FileNotFoundError as error:
             raise HTTPException(status_code=404, detail="job not found") from error
+
+    @app.post("/api/v1/jobs/{job_id}/resume", status_code=202)
+    def resume_job(job_id: str):
+        try:
+            manifest = service.get_job(job_id)
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail="job not found") from error
+        if manifest.status not in {"failed", "cancelled", "partial_failure"}:
+            raise HTTPException(status_code=409, detail="job is not resumable")
+        service.resume_job(job_id, lambda job, token: execute_job(
+            job, token, service.jobs_dir))
+        return {"job_id": job_id, "status_url": f"/api/v1/jobs/{job_id}"}
+
+    @app.delete("/api/v1/jobs/{job_id}")
+    def cleanup_job(job_id: str, confirm: bool = False):
+        if not confirm:
+            raise HTTPException(status_code=400, detail="confirm=true is required")
+        try:
+            manifest = service.get_job(job_id)
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail="job not found") from error
+        from send2trash import send2trash
+        job_directory = service.jobs_dir / job_id
+        if job_directory.exists():
+            send2trash(str(job_directory))
+        return {"deleted": True, "job_id": manifest.job_id}
 
     def submit_upload(job_id: str, payload: dict, platforms: list[str] | None = None):
         try:
