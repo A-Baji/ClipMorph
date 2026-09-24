@@ -26,8 +26,7 @@ ALLOWED_ROOT_DIRS = {
     "uploads",
 }
 
-ALLOWED_ROOT_FILES = {
-    ".env",
+REQUIRED_ROOT_FILES = {
     ".gitattributes",
     ".gitignore",
     "AGENTS.md",
@@ -37,9 +36,15 @@ ALLOWED_ROOT_FILES = {
     "requirements.txt",
     "pyproject.toml",
     "template.env",
+}
+
+OPTIONAL_ROOT_FILES = {
+    ".env",
     "subtitles.srt",
     "clipmorph-version-manager.2025-10-15.private-key.pem",
 }
+
+ALLOWED_ROOT_FILES = REQUIRED_ROOT_FILES | OPTIONAL_ROOT_FILES
 
 REQUIRED_CLIPMORPH_ITEMS = {
     "__init__.py",
@@ -90,7 +95,7 @@ def check_root_layout() -> list[str]:
             + ", ".join(unexpected)
         )
 
-    missing_files = sorted(name for name in ALLOWED_ROOT_FILES if not (REPO_ROOT / name).exists())
+    missing_files = sorted(name for name in REQUIRED_ROOT_FILES if not (REPO_ROOT / name).exists())
     if missing_files:
         problems.append("Missing required repository files: " + ", ".join(missing_files))
 
