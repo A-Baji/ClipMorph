@@ -263,7 +263,7 @@ jobs:
             # NOTE: keep 'setuptools' out of this list. Excluding it drops the
             # vendored pkg_resources/jaraco modules some transitive deps import
             # at runtime, which crashes frozen builds with a jaraco ImportError.
-            'pip', 'wheel', 'distutils',
+            'pip', 'distutils',
         ]
 
         a = Analysis(
@@ -339,7 +339,7 @@ jobs:
             # NOTE: keep 'setuptools' out of this list. Excluding it drops the
             # vendored pkg_resources/jaraco modules some transitive deps import
             # at runtime, which crashes frozen builds with a jaraco ImportError.
-            'pip', 'wheel', 'distutils',
+            'pip', 'distutils',
         ]
 
         a = Analysis(
