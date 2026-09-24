@@ -191,6 +191,17 @@ def main():
         platform_overrides = upload_args.pop('platform_overrides')
         upload_args.update(platform_overrides)
 
+    artifact_info = ffmpeg_runner.get_video_info(conversion_output)
+    video_stream = next((stream for stream in artifact_info.get("streams", [])
+                         if stream.get("codec_type") == "video"), {})
+    upload_args["artifact_metadata"] = {
+        "duration": float(artifact_info.get("format", {}).get("duration", 0) or 0),
+        "width": video_stream.get("width"),
+        "height": video_stream.get("height"),
+        "video_codec": video_stream.get("codec_name"),
+        "file_size": os.path.getsize(conversion_output),
+    }
+
     upload_results = upload_pipeline.run(video_path=conversion_output,
                                          **upload_args)
 

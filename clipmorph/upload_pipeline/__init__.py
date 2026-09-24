@@ -4,6 +4,7 @@ import logging
 from typing import Dict
 
 from clipmorph.cli import build_platform_default_config
+from clipmorph.policy import validate_artifact
 
 from .platforms import InstagramUploadPipeline
 from .platforms import TikTokUploadPipeline
@@ -223,6 +224,23 @@ class UploadPipeline:
             Dictionary with platform name, success status, and result/error
         """
         try:
+            artifact_metadata = kwargs.pop("artifact_metadata", None)
+            account_capabilities = kwargs.pop("account_capabilities", None)
+            if artifact_metadata is not None:
+                decision = validate_artifact(
+                    platform_name, artifact_metadata, {"title": title},
+                    account_capabilities)
+                if decision.blockers:
+                    return {
+                        'platform': platform_name,
+                        'success': False,
+                        'result': None,
+                        'error': "; ".join(decision.blockers),
+                        'status': 'blocked',
+                        'policy_version': decision.policy_version,
+                        'warnings': decision.warnings,
+                        'transformations': decision.transformations,
+                    }
             # Map common parameters to platform-specific ones
             platform_params = self._map_common_parameters(
                 platform_name, title, **kwargs)

@@ -16,6 +16,7 @@ from clipmorph.job import JobManifest
 from clipmorph.service import JobService
 from clipmorph.upload_pipeline import UploadPipeline
 from clipmorph.upload_pipeline.platforms.tiktok import TikTokUploadPipeline
+from clipmorph.policy import validate_artifact
 
 
 class FakeFFmpegRunner:
@@ -122,6 +123,22 @@ class UploadPipelineTests(unittest.TestCase):
         self.assertIn("YouTube", results)
         self.assertFalse(results["YouTube"]["success"])
         self.assertIn("missing credentials", results["YouTube"]["error"])
+
+    def test_platform_policy_blocks_known_incompatible_artifact(self):
+        decision = validate_artifact("instagram", {
+            "duration": 2,
+            "width": 1080,
+            "height": 1920,
+            "video_codec": "h264",
+            "file_size": 1000,
+        }, {"title": "caption"})
+        self.assertFalse(decision.allowed)
+        self.assertIn("duration", decision.blockers[0])
+
+    def test_platform_policy_warns_on_unknown_rules_without_blocking(self):
+        decision = validate_artifact("tiktok", {"duration": 10}, {"title": "caption"})
+        self.assertTrue(decision.allowed)
+        self.assertTrue(decision.warnings)
 
 
 class OAuthTests(unittest.TestCase):
