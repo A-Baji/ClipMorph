@@ -9,7 +9,8 @@ import time
 import uuid
 from pathlib import Path
 
-from clipmorph.job import default_data_dir
+from clipmorph.auth import credential_status, load_auth_config
+from clipmorph.job import default_data_dir, resolve_output_dir
 from clipmorph.service import JobService
 from clipmorph.transcript import load_edit_session, save_edit_session
 from clipmorph.transcript import validate_edit_session
@@ -32,6 +33,7 @@ def create_app(data_dir: str | Path | None = None):
 
     app = FastAPI(title="ClipMorph", version="0.4.1")
     root = Path(data_dir or default_data_dir())
+    load_auth_config(root)
     service = JobService(root)
 
     frontend_dist = Path(__file__).resolve().parent / "web_assets"
@@ -110,7 +112,8 @@ def create_app(data_dir: str | Path | None = None):
         if not isinstance(platforms, list):
             errors.append("upload_to must be a list")
         effective = dict(configuration)
-        effective.setdefault("output_dir", "output/")
+        effective["output_dir"] = str(resolve_output_dir(
+            effective.get("output_dir"), root))
         effective.setdefault("include_cam", True)
         effective.setdefault("cam_x", 1420)
         effective.setdefault("cam_y", 790)
@@ -163,15 +166,10 @@ def create_app(data_dir: str | Path | None = None):
     @app.get("/api/v1/configuration")
     def get_configuration():
         if not config_path().exists():
-            return {"configuration": {}, "credentials": {}}
+            return {"configuration": {}, "credentials": credential_status()}
         configuration = json.loads(config_path().read_text(encoding="utf-8"))
         return {"configuration": mask_configuration(configuration),
-                "credentials": {
-                    key: bool(value)
-                    for key, value in configuration.items()
-                    if any(secret in key.lower()
-                           for secret in ("secret", "token", "password", "api_key"))
-                }}
+                "credentials": credential_status()}
 
     @app.put("/api/v1/configuration")
     def save_configuration(payload: dict):

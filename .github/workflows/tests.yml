@@ -43,7 +43,7 @@ jobs:
       - name: Validate CLI help and init paths
         run: |
           python -m clipmorph --help
-          python -m clipmorph --init --config-path "$RUNNER_TEMP/clipmorph.yaml"
+          python -m clipmorph init --config-path "$RUNNER_TEMP/clipmorph.yaml"
 
       - name: Set execute permissions for bundled FFmpeg
         run: chmod +x clipmorph/ffmpeg/linux/ffmpeg clipmorph/ffmpeg/linux/ffprobe

@@ -1,3 +1,4 @@
+import argparse
 import logging
 import os
 import sys
@@ -5,11 +6,13 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from clipmorph.cli import parse_args_with_parser
+from clipmorph.auth import create_auth_template, load_auth_config
+from clipmorph.cli import create_config_template, parse_args_with_parser
 from clipmorph.cli import separate_args_by_category
 from clipmorph.cli import summarize_runtime_configuration
 from clipmorph.ffmpeg import configure_ffmpeg  # Add this import
 from clipmorph.job import JobManifest
+from clipmorph.job import default_data_dir
 from clipmorph.job import source_sha256
 from clipmorph.layout import validate_layout
 
@@ -60,12 +63,24 @@ def main():
         web_main()
         return
 
+    if len(sys.argv) > 1 and sys.argv[1] == "init":
+        parser = argparse.ArgumentParser(prog="clipmorph init")
+        parser.add_argument("--config-path", type=str,
+                            help="Path for the generated config template.")
+        namespace = parser.parse_args(sys.argv[2:])
+        config_path = Path(namespace.config_path) if namespace.config_path else default_data_dir() / "clipmorph.yaml"
+        create_config_template(config_path)
+        create_auth_template(config_path.parent)
+        return
+
     # Parse arguments and get both args and parser for automatic separation
     args, parser = parse_args_with_parser()
 
-    # --help and --init do not need media-processing dependencies.
+    # --help and the init subcommand do not need media-processing dependencies.
     if args is None:
         return
+
+    load_auth_config(Path(args.data_dir) if args.data_dir else None)
 
     # Configure FFmpeg only when a conversion or upload workflow is requested.
     configure_ffmpeg()

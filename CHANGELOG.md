@@ -65,7 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Kept `--init` and `--help` startup paths dependency-free.
+- Kept the `init` subcommand and `--help` startup paths dependency-free.
 - Used job-isolated Instagram staging objects with signed URLs and safe cleanup.
 - Streamed TikTok uploads with bounded memory use and retry-safe file reopening.
 - Isolated subtitle artifacts and converted output names by job.

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from clipmorph.ffmpeg import FFmpegRunner, configure_ffmpeg
-from clipmorph.job import JobManifest
+from clipmorph.job import JobManifest, resolve_output_dir
 from clipmorph.preflight import PreflightValidator
 from clipmorph.service import CancellationToken
 
@@ -35,7 +35,8 @@ def execute_job(manifest: JobManifest, token: CancellationToken,
                  if stream.get("codec_type") == "video")
     PreflightValidator(ffmpeg_runner).validate(
         input_path=input_path,
-        output_dir=configuration.get("output_dir", "output/"),
+        output_dir=str(resolve_output_dir(
+            configuration.get("output_dir"), Path(jobs_dir).parent)),
         no_conversion=bool(configuration.get("no_conversion", False)),
         no_upload=no_upload,
         enabled_platforms=enabled_platforms,
