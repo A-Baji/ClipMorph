@@ -4,9 +4,12 @@ import argparse
 import json
 from pathlib import Path
 import shutil
+import sys
 
 import yaml
 
+from clipmorph.auth import create_auth_template
+from clipmorph.job import default_data_dir, resolve_output_dir
 
 SUPPORTED_PLATFORMS = {'youtube', 'instagram', 'tiktok', 'twitter'}
 CONFIG_SECTIONS = {'general', 'conversion', 'layout', 'upload', 'content', 'platforms'}
@@ -138,7 +141,7 @@ def _apply_config_defaults(args):
         'cam_y': 790,
         'cam_width': 480,
         'cam_height': 270,
-        'output_dir': 'output/',
+        'output_dir': None,
         'no_subs': False,
         'reviewed_transcript_path': None,
         'no_upload': False,
@@ -152,6 +155,8 @@ def _apply_config_defaults(args):
     for key, value in defaults.items():
         if not hasattr(args, key):
             setattr(args, key, value)
+
+    args.output_dir = str(resolve_output_dir(args.output_dir, args.data_dir))
 
     return args
 
@@ -196,11 +201,13 @@ def create_config_template(output_path=None):
         "platforms": platform_defaults,
     }
 
-    # If no output path specified, use default
+    # If no output path specified, use the app data directory.
     if not output_path:
-        output_path = Path.cwd() / "clipmorph.yaml"
+        output_path = default_data_dir() / "clipmorph.yaml"
     else:
         output_path = Path(output_path)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Check if file already exists
     if output_path.exists():
@@ -216,19 +223,24 @@ def create_config_template(output_path=None):
 
 def parse_args_with_parser():
     """Parse arguments and return both args and parser for automatic categorization."""
-    parser = _create_parser()
-    args = parser.parse_args()
-
-    # Handle init command
-    if getattr(args, 'init', False):
-        create_config_template(args.config_path)
+    argv = sys.argv[1:]
+    if argv and argv[0] == 'init':
+        parser = _create_parser(init_mode=True)
+        args = parser.parse_args(argv[1:])
+        output_path = getattr(args, 'config_path', None)
+        config_path = Path(output_path) if output_path else default_data_dir() / "clipmorph.yaml"
+        create_config_template(config_path)
+        create_auth_template(config_path.parent)
         return None, parser
+
+    parser = _create_parser()
+    args = parser.parse_args(argv)
 
     # Validate required args for normal operation
     args = _apply_config_defaults(args)
 
     if not getattr(args, 'input_path', None):
-        parser.error("input_path is required unless --init is specified")
+        parser.error("input_path is required unless the 'init' subcommand is used")
 
     # Title is only required if uploading
     if not args.no_upload and not args.title:
@@ -244,24 +256,23 @@ def parse_args_with_parser():
     return args, parser
 
 
-def _create_parser():
+def _create_parser(init_mode: bool = False):
     """Create and configure the argument parser."""
     parser = argparse.ArgumentParser(
         description="Convert and upload a video to short-form platforms.",
         argument_default=argparse.SUPPRESS)
 
+    if init_mode:
+        parser.add_argument(
+            "--config-path",
+            type=str,
+            help="Custom path for the generated config file when using init.")
+        return parser
+
     # Input and basic options (neither conversion nor upload specific)
     parser.add_argument("input_path",
                         nargs='?',
                         help="Path to the input video file.")
-    parser.add_argument(
-        "--init",
-        action="store_true",
-        help="Create a template configuration file in the current directory.")
-    parser.add_argument(
-        "--config-path",
-        type=str,
-        help="Custom path for the generated config file when using --init.")
     parser.add_argument(
         "--no-confirm",
         "-y",
@@ -388,19 +399,24 @@ def _create_parser():
 
 def parse_args():
     """Parse command line arguments."""
-    parser = _create_parser()
-    args = parser.parse_args()
-
-    # Handle init command
-    if getattr(args, 'init', False):
-        create_config_template(args.config_path)
+    argv = sys.argv[1:]
+    if argv and argv[0] == 'init':
+        parser = _create_parser(init_mode=True)
+        args = parser.parse_args(argv[1:])
+        output_path = getattr(args, 'config_path', None)
+        config_path = Path(output_path) if output_path else default_data_dir() / "clipmorph.yaml"
+        create_config_template(config_path)
+        create_auth_template(config_path.parent)
         return None
+
+    parser = _create_parser()
+    args = parser.parse_args(argv)
 
     # Validate required args for normal operation
     args = _apply_config_defaults(args)
 
     if not getattr(args, 'input_path', None):
-        parser.error("input_path is required unless --init is specified")
+        parser.error("input_path is required unless the 'init' subcommand is used")
 
     # Title is only required if uploading
     if not args.no_upload and not args.title:

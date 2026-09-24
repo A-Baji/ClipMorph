@@ -27,7 +27,7 @@ Run these from the repository root with Python 3.11 or newer:
 python -m unittest discover -s tests -v
 python -m compileall -q clipmorph
 python -m clipmorph --help
-python -m clipmorph --init --config-path <temporary-path>/clipmorph.yaml
+python -m clipmorph init --config-path <temporary-path>/clipmorph.yaml
 python -m pip wheel . --no-deps --no-build-isolation --wheel-dir <temporary-path>/wheel
 ```
 
@@ -47,7 +47,7 @@ The dependency set includes large media and ML packages. Prefer focused unit tes
 - Keep media processing behind the conversion pipeline and keep platform API behavior inside the relevant upload platform module. Do not duplicate orchestration in platform implementations.
 - Treat preflight as the boundary before conversion or upload. New input, geometry, output, or credential requirements should be validated there when possible.
 - Preserve resumability: job manifests must retain source identity, artifact state, status, and per-platform results. A successful platform must remain distinguishable from a partial failure.
-- Keep heavy imports lazy where the `--help` and `--init` paths do not need them.
+- Keep heavy imports lazy where the `--help` and `init` subcommand paths do not need them.
 - Do not perform live uploads or require real credentials in tests. Mock network clients and platform initialization, and use temporary directories for files and manifests.
 - Do not hand-edit generated or local runtime output. Video, audio, subtitle, conversion, upload, build, and package artifacts are local state unless a release workflow explicitly packages them.
 - Keep bundled FFmpeg paths and executable permissions platform-specific. Changes to packaging data must be checked against the wheel and release workflows.

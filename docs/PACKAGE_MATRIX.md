@@ -20,7 +20,7 @@ building the Svelte dashboard assets that get baked into the UI artifacts.
 
 - `.github/workflows/tests.yml`: builds the frontend, installs `.[web]`, runs the full
   unit test suite (including `tests/test_ui_launcher.py`), runs CLI smoke tests
-  (`--help`, `--init`, dry-run, resume, `--data-dir`, ordinary startup), runs the
+  (`--help`, `init`, dry-run, resume, `--data-dir`, ordinary startup), runs the
   packaged browser E2E suite (`tests/test_e2e_dashboard.py`) at desktop and mobile
   viewport sizes, and greps workflow files to reject `npm publish` steps.
 - `.github/workflows/release.yml`: builds six PyInstaller artifacts (`cli`/`ui` ×

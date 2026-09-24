@@ -5,13 +5,14 @@ from typing import Any, Dict, List
 
 from clipmorph.ffmpeg import FFmpegError
 from clipmorph.ffmpeg import FFmpegRunner
+from clipmorph.job import default_output_dir, resolve_output_dir
 
 
 class EditingPipeline:
 
     def __init__(self,
                  input_path,
-                 output_dir="output/",
+                 output_dir=None,
                  muted_audio=None,
                  segments=None,
                  include_cam=True,
@@ -23,8 +24,8 @@ class EditingPipeline:
                  layout=None,
                  ffmpeg_runner=None):
         self.input_path = input_path
-        self.output_dir = output_dir if output_dir.endswith(
-            "/") else output_dir + "/"
+        self.output_dir = str(resolve_output_dir(
+            output_dir, default_output_dir().parent)) + "/"
         self.muted_audio = muted_audio
         self.segments = segments
         self.include_cam = include_cam

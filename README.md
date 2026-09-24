@@ -14,9 +14,9 @@ python -m pip install -e .
 ## First run
 
 ```bash
-clipmorph --init --config-path clipmorph.yaml
-clipmorph --config clipmorph.yaml input/video.mp4 --title "My clip" --dry-run
-clipmorph --config clipmorph.yaml input/video.mp4 --title "My clip" --no-upload
+clipmorph init
+clipmorph input/video.mp4 --title "My clip" --dry-run
+clipmorph input/video.mp4 --title "My clip" --no-upload
 clipmorph web
 ```
 
@@ -28,16 +28,38 @@ local dashboard plus `/api/v1/` without authentication. Jobs, credentials,
 artifacts, captions, and upload state remain on the local machine. Stop the
 service with `Ctrl+C`.
 
-## Environment variables and secrets
+## Authentication and secrets
 
-ClipMorph reads environment variables for platform and model credentials. Keep them in a local `.env` file or shell environment, and do not commit secrets to source control.
+Running `clipmorph init` creates both `clipmorph.yaml` and an adjacent
+`auth.yaml` in the same directory. Use `--data-dir <path>` to choose a custom
+local data directory for the same pattern. See
+[Authentication Setup](docs/AUTHENTICATION.md) for instructions on obtaining
+every value and filling in the provider sections. For example:
+
+```yaml
+youtube:
+  client_id: "..."
+  client_secret: "..."
+  refresh_token: "..."
+tiktok:
+  client_key: "..."
+  client_secret: "..."
+  refresh_token: "..."
+```
+
+ClipMorph loads credentials from `auth.yaml` for both the CLI and web service.
+Existing environment variables, including values from `.env`, take precedence.
+Keep both files private and do not commit secrets to source control.
+
+Environment variables remain supported for platform and model credentials.
 
 Common variables include:
 
 - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`
 - `FACEBOOK_APP_ID`, `FACEBOOK_APP_SECRET`, `FACEBOOK_PAGE_ID`, `FACEBOOK_ACCESS_TOKEN`
-- `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, `TIKTOK_REFRESH_TOKEN`
-- `TWITTER_API_KEY`, `TWITTER_API_KEY_SECRET`, `TWITTER_ACCESS_TOKEN`, `TWITTER_ACCESS_TOKEN_SECRET`, `TWITTER_BEARER_TOKEN`
+- `GCS_BUCKET_NAME`, `GCP_PRIVATE_KEY_ID`, `GCP_PRIVATE_KEY`, `GCP_CLIENT_EMAIL`, `GCP_CLIENT_ID`, `GCP_PROJECT_ID`
+- `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, `TIKTOK_ACCESS_TOKEN`, `TIKTOK_REFRESH_TOKEN`, `TIKTOK_OPEN_ID`
+- `TWITTER_CLIENT_ID`, `TWITTER_CLIENT_SECRET`, `TWITTER_API_KEY`, `TWITTER_API_KEY_SECRET`, `TWITTER_ACCESS_TOKEN`, `TWITTER_ACCESS_TOKEN_SECRET`, `TWITTER_BEARER_TOKEN`
 - `HUGGING_FACE_ACCESS_TOKEN`
 
 ## Configuration precedence

@@ -8,7 +8,7 @@ destination, and focused test. The CLI and API both create the same
 | CLI item | Visual control | API field/route | Validation | Runtime destination | Test |
 | --- | --- | --- | --- | --- | --- |
 | `--help` | service startup help | `clipmorph --help` | argparse | `cli.py` | `test_cli.py` |
-| `--init`, `--config-path` | Settings template action | `PUT /configuration` | config schema | `create_config_template` | `test_cli.py` |
+| `init --config-path` | Settings template action | `PUT /configuration` | config schema | `create_config_template` | `test_cli.py` |
 | input path / picker | New Job source controls | `POST /sources`, `POST /jobs` | source exists/uploaded | `JobManifest.source_path` | `test_web.py` |
 | `--data-dir` | Settings data directory | service constructor | writable path | `JobService` | `test_cli.py` |
 | `--dry-run` | New Job run mode | `POST /jobs/validate` | effective config/errors | validation response | `test_web.py` |

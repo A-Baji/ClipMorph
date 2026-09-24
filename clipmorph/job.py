@@ -24,6 +24,21 @@ def default_jobs_dir() -> Path:
     return default_data_dir() / "jobs"
 
 
+def default_output_dir(data_dir: str | Path | None = None) -> Path:
+    """Return the default directory for generated media artifacts."""
+    root = Path(data_dir) if data_dir else default_data_dir()
+    return root / "output"
+
+
+def resolve_output_dir(output_dir: str | Path | None = None,
+                       data_dir: str | Path | None = None) -> Path:
+    """Resolve relative output paths inside the selected ClipMorph data directory."""
+    path = Path(output_dir) if output_dir else Path("output")
+    if path.is_absolute():
+        return path
+    return (Path(data_dir) if data_dir else default_data_dir()) / path
+
+
 def source_sha256(source_path: str | Path) -> str:
     digest = hashlib.sha256()
     with Path(source_path).open("rb") as source:

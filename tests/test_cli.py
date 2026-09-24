@@ -9,6 +9,7 @@ from unittest.mock import patch
 from clipmorph.__main__ import main
 from clipmorph.batch import BatchProcessor
 from clipmorph.cli import build_platform_default_config, summarize_runtime_configuration
+from clipmorph.job import default_data_dir
 from clipmorph.preflight import PreflightError, PreflightValidator
 from clipmorph.conversion_pipeline.transcribe import TranscriptionPipeline, resolve_transcription_device, write_srt_file
 from clipmorph.conversion_pipeline.convert import ConversionPipeline
@@ -32,16 +33,44 @@ class FakeFFmpegRunner:
 
 
 class CliInitializationTests(unittest.TestCase):
+    def test_init_uses_data_dir_by_default(self):
+        expected_dir = default_data_dir()
+        expected_config = expected_dir / "clipmorph.yaml"
+        expected_auth = expected_dir / "auth.yaml"
+
+        if expected_config.exists():
+            expected_config.unlink()
+        if expected_auth.exists():
+            expected_auth.unlink()
+
+        with patch.object(sys, "argv", ["clipmorph", "init"]):
+            main()
+
+        self.assertTrue(expected_config.exists())
+        self.assertTrue(expected_auth.exists())
+
+    def test_init_subcommand_creates_auth_template_next_to_config(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "clipmorph.yaml"
+            with patch.object(sys, "argv", [
+                    "clipmorph", "init", "--config-path", str(config_path)
+            ]):
+                main()
+
+            self.assertTrue(config_path.exists())
+            self.assertTrue((Path(temp_dir) / "auth.yaml").exists())
+
     def test_init_creates_template_without_configuring_ffmpeg(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "clipmorph.yaml"
             with patch.object(sys, "argv", [
-                    "clipmorph", "--init", "--config-path", str(config_path)
+                    "clipmorph", "init", "--config-path", str(config_path)
             ]), patch("clipmorph.__main__.configure_ffmpeg") as configure:
                 main()
 
             self.assertTrue(config_path.exists())
             self.assertIn("general:", config_path.read_text(encoding="utf-8"))
+            self.assertTrue((Path(temp_dir) / "auth.yaml").exists())
             configure.assert_not_called()
 
     def test_data_dir_is_available_as_a_runtime_override(self):
@@ -61,7 +90,7 @@ class CliInitializationTests(unittest.TestCase):
             config_path.write_text("old: true\n", encoding="utf-8")
 
             with patch.object(sys, "argv", [
-                    "clipmorph", "--init", "--config-path", str(config_path)
+                    "clipmorph", "init", "--config-path", str(config_path)
             ]):
                 main()
 

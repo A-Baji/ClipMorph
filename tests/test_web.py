@@ -1,6 +1,8 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 try:
     from fastapi.testclient import TestClient
@@ -12,6 +14,20 @@ except ImportError:  # CLI-only installations do not include the web extra.
 
 @unittest.skipUnless(TestClient and create_app, "web extra is not installed")
 class WebApiTests(unittest.TestCase):
+    def test_configuration_reports_auth_file_status_without_values(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            data_dir.mkdir()
+            (data_dir / "auth.yaml").write_text(
+                "youtube:\n  client_id: youtube-id\n", encoding="utf-8")
+            with patch.dict(os.environ, {}, clear=True):
+                with TestClient(create_app(data_dir)) as client:
+                    credentials = client.get(
+                        "/api/v1/configuration").json()["credentials"]
+
+            self.assertEqual(credentials["youtube"], True)
+            self.assertEqual(credentials["tiktok"], False)
+
     def test_source_upload_validation_and_layout_endpoints(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             with TestClient(create_app(Path(temp_dir) / "data")) as client:
@@ -53,7 +69,7 @@ class WebApiTests(unittest.TestCase):
                 })
             effective = response.json()["effective_configuration"]
             self.assertEqual(response.status_code, 200)
-            self.assertEqual(effective["output_dir"], "output/")
+            self.assertEqual(effective["output_dir"], str(Path(temp_dir) / "data" / "output"))
             self.assertEqual(effective["cam_width"], 480)
             self.assertTrue(effective["include_cam"])
 
