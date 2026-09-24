@@ -51,6 +51,18 @@ class WebApiTests(unittest.TestCase):
                 400)
             self.assertEqual(client.get("/api/v1/jobs/missing").status_code, 404)
 
+    def test_upload_requires_a_rendered_artifact_and_title(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "input.mp4"
+            source.write_bytes(b"video")
+            client = TestClient(create_app(Path(temp_dir) / "data"))
+            job = client.post("/api/v1/jobs", json={
+                "source_path": str(source), "configuration": {}}).json()
+            response = client.post(
+                f"/api/v1/jobs/{job['job_id']}/upload",
+                json={"platforms": ["youtube"]})
+            self.assertEqual(response.status_code, 409)
+
     def test_configuration_masks_credentials_and_artifacts_are_listed(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "input.mp4"
