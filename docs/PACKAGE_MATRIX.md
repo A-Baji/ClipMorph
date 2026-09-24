@@ -1,7 +1,7 @@
 # Artifact and Package Matrix
 
 ClipMorph ships exactly two native executable variants per supported OS, plus the
-Python package on PyPI in two install shapes. There is no npm-based end-user
+Python package from the tagged GitHub repository in two install shapes. There is no npm-based end-user
 distribution channel; npm is used only inside `frontend/` for development and
 building the Svelte dashboard assets that get baked into the UI artifacts.
 
@@ -13,8 +13,8 @@ building the Svelte dashboard assets that get baked into the UI artifacts.
 | `clipmorph-ui-windows.zip` | Desktop users who want the dashboard | CLI + FastAPI/Uvicorn service, built Svelte assets (`clipmorph/web_assets`), desktop launcher | `clipmorph/ui_launcher.py` | Base + `web` extra (`fastapi`, `uvicorn[standard]`, `python-multipart`) | Windows | `clipmorph-ui.exe --help` (launches, selects a loopback port, waits for `/api/v1/health`, opens the default browser) |
 | `clipmorph-ui-macos.zip` | Desktop users who want the dashboard | Same as above (macOS FFmpeg/FFprobe) | `clipmorph/ui_launcher.py` | Base + `web` extra | macOS | `./clipmorph-ui --help` |
 | `clipmorph-ui-linux` (self-extracting) | Desktop users who want the dashboard | Same as above (Linux FFmpeg/FFprobe) | `clipmorph/ui_launcher.py` | Base + `web` extra | Linux | `./clipmorph-ui-linux --help` |
-| PyPI `clipmorph` (base) | CLI use via `pip install clipmorph` | Python package: CLI, conversion/upload pipelines. Does **not** install FastAPI/Uvicorn or the built dashboard by default. | `clipmorph` console script → `clipmorph.__main__:main` | `requirements.txt` | Any (`python -m pip install clipmorph`) | `python -m pip install clipmorph && clipmorph --help` |
-| PyPI `clipmorph[web]` (extra) | Local web/dashboard use via `pip install "clipmorph[web]"` | Adds FastAPI/Uvicorn, `python-multipart`, and enables `clipmorph web` / `clipmorph-ui` console scripts. Built dashboard assets ship inside the wheel's `web_assets/` package data. | `clipmorph` (`clipmorph web`, headless) or `clipmorph-ui` console script → `clipmorph.ui_launcher:main` (desktop launcher) | `requirements.txt` + `web` extra | Any (`python -m pip install "clipmorph[web]"`) | `python -m pip install "clipmorph[web]" && clipmorph web --help && clipmorph-ui --help` |
+| GitHub source `clipmorph` (base) | CLI use via `pip install "clipmorph @ git+https://github.com/A-Baji/ClipMorph.git@vX.Y.Z"` | Python package: CLI, conversion/upload pipelines. Does **not** install FastAPI/Uvicorn or the built dashboard by default. | `clipmorph` console script → `clipmorph.__main__:main` | `requirements.txt` | Any | `python -m pip install "clipmorph @ git+https://github.com/A-Baji/ClipMorph.git@vX.Y.Z" && clipmorph --help` |
+| GitHub source `clipmorph[web]` (extra) | Local web/dashboard use via the tagged repository URL | Adds FastAPI/Uvicorn, `python-multipart`, and enables `clipmorph web` / `clipmorph-ui` console scripts. Built dashboard assets ship inside the package data. | `clipmorph` (`clipmorph web`, headless) or `clipmorph-ui` console script → `clipmorph.ui_launcher:main` (desktop launcher) | `requirements.txt` + `web` extra | Any | `python -m pip install "clipmorph[web] @ git+https://github.com/A-Baji/ClipMorph.git@vX.Y.Z" && clipmorph web --help && clipmorph-ui --help` |
 
 ## CI/release gates that enforce this matrix
 
@@ -29,9 +29,8 @@ building the Svelte dashboard assets that get baked into the UI artifacts.
   `web_assets/index.html` or a `ui` artifact is missing it. Before creating the
   GitHub Release it verifies all six expected asset names exist, that
   `clipmorph/__version__.py` matches the release tag, and that no workflow
-  contains an `npm publish` step. `publish_pypi` builds the sdist/wheel for the
-  base package and publishes to PyPI via trusted publishing after the release is
-  created.
+  contains an npm distribution step. Python users install the base package or
+  its `web` extra directly from the tagged GitHub repository URL.
 
 ## Notes
 
