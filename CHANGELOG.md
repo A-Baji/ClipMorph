@@ -18,7 +18,7 @@
 
 ### Scope note
 
-- Issues #34, #98, #99, and #104 remain open for their remaining full-acceptance work; this release contains the completed implementation increments merged during the 0.3.1 cycle.
+- Issues #34, #98, #99, and #104 were completed and closed before this release. This release contains the full clarified P1 implementation scope and its validated follow-up increments.
 
 ## 0.3.0
 
