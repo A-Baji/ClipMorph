@@ -459,10 +459,12 @@ jobs:
             git push origin "$TAG"
           fi
 
+          python -m clipmorph.release_notes "$TAG" CHANGELOG.md release-notes.md
+
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --title "$TAG" --notes-file CHANGELOG.md --verify-tag
-           else
-            gh release edit "$TAG" --notes-file CHANGELOG.md
+            gh release create "$TAG" --title "$TAG" --notes-file release-notes.md --verify-tag
+          else
+            gh release edit "$TAG" --notes-file release-notes.md
           fi
           gh release upload "$TAG" \
             clipmorph-windows.zip \
