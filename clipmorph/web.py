@@ -12,6 +12,7 @@ from clipmorph.job import default_data_dir
 from clipmorph.service import JobService
 from clipmorph.transcript import load_edit_session, save_edit_session
 from clipmorph.transcript import validate_edit_session
+from clipmorph.workflow import execute_job
 
 
 def create_app(data_dir: str | Path | None = None):
@@ -27,6 +28,10 @@ def create_app(data_dir: str | Path | None = None):
     app = FastAPI(title="ClipMorph", version="0.3.0")
     root = Path(data_dir or default_data_dir())
     service = JobService(root)
+
+    @app.on_event("shutdown")
+    def shutdown_service():
+        service.close()
 
     def config_path() -> Path:
         return root / "config.json"
@@ -95,7 +100,9 @@ def create_app(data_dir: str | Path | None = None):
             raise HTTPException(status_code=400,
                                 detail="configuration must be an object")
         try:
-            manifest = service.create_job(source_path, configuration)
+            manifest = service.create_job(
+                source_path, configuration,
+                lambda job, token: execute_job(job, token, service.jobs_dir))
         except FileNotFoundError as error:
             raise HTTPException(status_code=400,
                                 detail=f"source file was not found: {source_path}") from error
