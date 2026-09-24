@@ -189,6 +189,44 @@ def create_app(data_dir: str | Path | None = None):
         except FileNotFoundError as error:
             raise HTTPException(status_code=404, detail="job not found") from error
 
+    def submit_upload(job_id: str, payload: dict, platforms: list[str] | None = None):
+        try:
+            manifest = service.get_job(job_id)
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail="job not found") from error
+        if not manifest.artifact_path or not Path(manifest.artifact_path).exists():
+            raise HTTPException(status_code=409, detail="job has no available artifact")
+        title = payload.get("title")
+        if not isinstance(title, str) or not title:
+            raise HTTPException(status_code=422, detail="title is required")
+        selected = platforms or payload.get("platforms")
+        if not isinstance(selected, list) or not selected:
+            raise HTTPException(status_code=422, detail="platforms are required")
+        supported = {"youtube", "instagram", "tiktok", "twitter"}
+        if any(platform not in supported for platform in selected):
+            raise HTTPException(status_code=422, detail="unsupported platform")
+
+        def run_upload():
+            from clipmorph.upload_pipeline import UploadPipeline
+            pipeline = UploadPipeline(**{platform: True for platform in selected})
+            results = pipeline.run(manifest.artifact_path, title, **payload.get("options", {}))
+            current = service.get_job(job_id)
+            for platform, result in results.items():
+                current.record_platform(platform, result, service.jobs_dir)
+
+        manifest.set_status("uploading", service.jobs_dir)
+        service.executor.submit(run_upload)
+        return {"job_id": job_id, "status_url": f"/api/v1/jobs/{job_id}",
+                "platforms": selected}
+
+    @app.post("/api/v1/jobs/{job_id}/upload", status_code=202)
+    def start_upload(job_id: str, payload: dict):
+        return submit_upload(job_id, payload)
+
+    @app.post("/api/v1/jobs/{job_id}/uploads/{platform}/retry", status_code=202)
+    def retry_upload(job_id: str, platform: str, payload: dict):
+        return submit_upload(job_id, payload, [platform])
+
     @app.get("/api/v1/jobs/{job_id}/events")
     def job_events(job_id: str):
         from fastapi.responses import StreamingResponse
