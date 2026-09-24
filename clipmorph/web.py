@@ -30,6 +30,16 @@ def create_app(data_dir: str | Path | None = None):
     root = Path(data_dir or default_data_dir())
     service = JobService(root)
 
+    frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+    if frontend_dist.exists():
+        from fastapi.staticfiles import StaticFiles
+        from fastapi.responses import FileResponse
+        app.mount("/assets", StaticFiles(directory=frontend_dist / "assets"), name="assets")
+
+        @app.get("/", include_in_schema=False)
+        def dashboard():
+            return FileResponse(frontend_dist / "index.html")
+
     @app.on_event("shutdown")
     def shutdown_service():
         service.close()

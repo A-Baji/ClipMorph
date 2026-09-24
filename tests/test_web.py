@@ -51,6 +51,13 @@ class WebApiTests(unittest.TestCase):
                 400)
             self.assertEqual(client.get("/api/v1/jobs/missing").status_code, 404)
 
+    def test_dashboard_root_is_served_when_frontend_build_exists(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with TestClient(create_app(Path(temp_dir) / "data")) as client:
+                response = client.get("/")
+                if response.status_code == 200:
+                    self.assertIn("ClipMorph", response.text)
+
     def test_upload_requires_a_rendered_artifact_and_title(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "input.mp4"

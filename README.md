@@ -17,7 +17,16 @@ python -m pip install -e .
 clipmorph --init --config-path clipmorph.yaml
 clipmorph --config clipmorph.yaml input/video.mp4 --title "My clip" --dry-run
 clipmorph --config clipmorph.yaml input/video.mp4 --title "My clip" --no-upload
+clipmorph web
 ```
+
+### Local dashboard
+
+Install the optional web dependencies with `python -m pip install "clipmorph[web]"`,
+then run `clipmorph web`. The service binds to `127.0.0.1:8000` and serves the
+local dashboard plus `/api/v1/` without authentication. Jobs, credentials,
+artifacts, captions, and upload state remain on the local machine. Stop the
+service with `Ctrl+C`.
 
 ## Environment variables and secrets
 
