@@ -18,14 +18,15 @@ def execute_job(manifest: JobManifest, token: CancellationToken,
     configuration = dict(manifest.configuration)
     input_path = manifest.source_path
     no_upload = bool(configuration.get("no_upload", False))
-    enabled_platforms = configuration.get(
-        "upload_to", ["youtube", "instagram", "tiktok", "twitter"])
-    enabled_platforms = [platform.lower() for platform in enabled_platforms]
-    if configuration.get("skip"):
-        enabled_platforms = [
-            platform for platform in enabled_platforms
-            if platform not in configuration["skip"]
-        ]
+    default_platforms = ["youtube", "instagram", "tiktok", "twitter"]
+    enabled_platforms = configuration.get("upload_to")
+    if not enabled_platforms:
+        enabled_platforms = default_platforms
+    enabled_platforms = [str(platform).lower() for platform in enabled_platforms]
+    skip = {str(platform).lower() for platform in (configuration.get("skip") or [])}
+    enabled_platforms = [
+        platform for platform in enabled_platforms if platform not in skip
+    ]
 
     configure_ffmpeg()
     ffmpeg_runner = FFmpegRunner()
