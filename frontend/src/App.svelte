@@ -86,7 +86,27 @@
     });
   }
 
-  function saveCaptions() {
+  async function saveCaptions() {
+    if (liveJobs) {
+      try {
+        const jobResponse = await fetch(`/api/v1/jobs/${selectedJob}`);
+        const job = await jobResponse.json();
+        const session = {
+          schema_version: 1,
+          source_sha256: job.source_sha256,
+          media_duration: null,
+          original_segments: captionSegments,
+          segments: captionSegments
+        };
+        await fetch(`/api/v1/jobs/${selectedJob}/transcript`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(session)
+        });
+      } catch (error) {
+        notice = 'Caption edits kept in this review session';
+      }
+    }
     notice = 'Caption edits saved to the job';
     setTimeout(() => notice = '', 2600);
   }
@@ -161,7 +181,7 @@
         </div>
       </section>
     {:else if activeView === 'Captions'}
-      <section class="caption-page"><div class="section-heading"><div><span class="section-kicker">Review before render</span><h2>Caption studio</h2></div><button class="primary-action" onclick={saveCaptions}>Save caption edits</button></div><div class="caption-layout"><div class="caption-preview"><div class="caption-video"><span class="preview-badge">00:02.80</span><div class="caption-frame-text">That was absolutely unreal.</div><div class="timeline-play">▶</div></div><div class="timeline"><div class="timeline-track"><span class="timeline-progress"></span><i style="left: 34%"></i></div><div class="timeline-labels"><span>00:00</span><span>00:09.42</span></div></div></div><div class="segment-panel"><div class="segment-panel-head"><div><span class="section-kicker">Transcript</span><h3>{captionSegments.length} segments</h3></div><button class="text-button">Original ↔ Edited</button></div>{#each captionSegments as segment, index}<button class:active-segment={activeSegment === index} class="segment-row" onclick={() => activeSegment = index}><span class="segment-time">{segment.start.toFixed(1)}<br /><b>{segment.end.toFixed(1)}</b></span><span class="segment-text">{segment.text}</span><span class="speaker-swatch {segment.speaker === 'speaker_2' ? 'lime' : ''}"></span></button>{/each}<button class="add-segment" onclick={() => captionSegments = [...captionSegments, { start: 7.2, end: 8.5, text: 'New caption', speaker: 'speaker_1', censored: false, emphasis: false }]}>＋ Add segment</button></div></div><div class="caption-controls"><div class="control-heading"><span class="section-kicker">Selected segment</span><span class="mono">{captionSegments[activeSegment].start.toFixed(1)}s — {captionSegments[activeSegment].end.toFixed(1)}s</span></div><label class="edit-field">Caption text<textarea bind:value={captionSegments[activeSegment].text} rows="2"></textarea></label><div class="timing-fields"><label class="edit-field">Start<input type="number" step="0.1" bind:value={captionSegments[activeSegment].start} /></label><label class="edit-field">End<input type="number" step="0.1" bind:value={captionSegments[activeSegment].end} /></label></div><div class="toggle-row"><label><input type="checkbox" bind:checked={captionSegments[activeSegment].censored} /> Censor word</label><label><input type="checkbox" bind:checked={captionSegments[activeSegment].emphasis} /> Emphasis</label></div></div></section>
+      <section class="caption-page"><div class="section-heading"><div><span class="section-kicker">Review before render</span><h2>Caption studio</h2></div><button class="primary-action" onclick={saveCaptions}>Save caption edits</button></div><div class="caption-layout"><div class="caption-preview"><div class="caption-video"><span class="preview-badge">00:02.80</span><div class="caption-frame-text">That was absolutely unreal.</div><div class="timeline-play">▶</div></div><div class="timeline"><div class="timeline-track"><span class="timeline-progress"></span><i style="left: 34%"></i></div><div class="timeline-labels"><span>00:00</span><span>00:09.42</span></div></div></div><div class="segment-panel"><div class="segment-panel-head"><div><span class="section-kicker">Transcript</span><h3>{captionSegments.length} segments</h3></div><button class="text-button">Original ↔ Edited</button></div>{#each captionSegments as segment, index}<button class:active-segment={activeSegment === index} class="segment-row" onclick={() => activeSegment = index}><span class="segment-time">{segment.start.toFixed(1)}<br /><b>{segment.end.toFixed(1)}</b></span><span class="segment-text">{segment.text}</span><span class="speaker-swatch {segment.speaker === 'speaker_2' ? 'lime' : ''}"></span></button>{/each}<button class="add-segment" onclick={() => captionSegments = [...captionSegments, { start: 7.2, end: 8.5, text: 'New caption', speaker: 'speaker_1', censored: false, emphasis: false }]}>＋ Add segment</button></div></div><div class="caption-controls"><div class="control-heading"><span class="section-kicker">Selected segment</span><span class="mono">{captionSegments[activeSegment].start.toFixed(1)}s — {captionSegments[activeSegment].end.toFixed(1)}s</span></div><label class="edit-field">Caption text<textarea bind:value={captionSegments[activeSegment].text} rows="2"></textarea></label><div class="timing-fields"><label class="edit-field">Start<input type="number" step="0.1" bind:value={captionSegments[activeSegment].start} /></label><label class="edit-field">End<input type="number" step="0.1" bind:value={captionSegments[activeSegment].end} /></label></div><div class="timing-fields"><label class="edit-field">Speaker<input bind:value={captionSegments[activeSegment].speaker} /></label><label class="edit-field">Replacement<input placeholder="Optional" /></label></div><div class="toggle-row"><label><input type="checkbox" bind:checked={captionSegments[activeSegment].censored} /> Censor word</label><label><input type="checkbox" bind:checked={captionSegments[activeSegment].emphasis} /> Emphasis</label></div></div></section>
     {:else if activeView === 'Settings'}
       <section class="settings-page"><div class="section-heading"><div><span class="section-kicker">Workspace</span><h2>Configuration</h2></div><button class="primary-action" onclick={saveSettings}>Save changes</button></div><div class="settings-grid"><div class="setting-card"><span class="card-index">01</span><h3>Default destinations</h3><p>Choose where finished clips go when a job completes.</p><label><input type="checkbox" checked /> YouTube Shorts</label><label><input type="checkbox" checked /> Instagram Reels</label><label><input type="checkbox" /> TikTok</label></div><div class="setting-card"><span class="card-index">02</span><h3>Local storage</h3><p>Jobs and artifacts stay on this machine.</p><label class="field-label">Data directory<input bind:value={configuration.data_dir} /></label><label><input type="checkbox" checked={configuration.generate_previews} onchange={(event) => configuration.generate_previews = event.currentTarget.checked} /> Generate previews automatically</label></div><div class="setting-card advanced"><button class="advanced-toggle" onclick={() => showAdvanced = !showAdvanced}><span>Advanced controls</span><span>{showAdvanced ? '−' : '+'}</span></button>{#if showAdvanced}<label class="field-label">Transcription model<select><option>large-v3</option><option>medium</option><option>small</option></select></label><label class="field-label">Worker limit<input type="number" value="2" /></label>{/if}</div></div></section>
     {:else}
