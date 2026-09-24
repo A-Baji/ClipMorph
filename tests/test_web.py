@@ -55,13 +55,24 @@ class WebApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "input.mp4"
             source.write_bytes(b"video")
-            client = TestClient(create_app(Path(temp_dir) / "data"))
-            job = client.post("/api/v1/jobs", json={
-                "source_path": str(source), "configuration": {}}).json()
-            response = client.post(
-                f"/api/v1/jobs/{job['job_id']}/upload",
-                json={"platforms": ["youtube"]})
-            self.assertEqual(response.status_code, 409)
+            with TestClient(create_app(Path(temp_dir) / "data")) as client:
+                job = client.post("/api/v1/jobs", json={
+                    "source_path": str(source), "configuration": {}}).json()
+                response = client.post(
+                    f"/api/v1/jobs/{job['job_id']}/upload",
+                    json={"platforms": ["youtube"]})
+                self.assertEqual(response.status_code, 409)
+
+    def test_job_creation_uses_shared_execution_runner(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "input.mp4"
+            source.write_bytes(b"video")
+            with TestClient(create_app(Path(temp_dir) / "data")) as client:
+                response = client.post("/api/v1/jobs", json={
+                    "source_path": str(source),
+                    "configuration": {"no_upload": True},
+                })
+                self.assertEqual(response.status_code, 202)
 
     def test_configuration_masks_credentials_and_artifacts_are_listed(self):
         with tempfile.TemporaryDirectory() as temp_dir:
