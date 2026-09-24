@@ -26,8 +26,10 @@ web = [
 ]
 
 [tool.setuptools]
-packages = ["clipmorph"]
 include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["clipmorph*"]
 
 [tool.setuptools.dynamic]
 version = {attr = "clipmorph.__version__"}
@@ -44,3 +46,4 @@ clipmorph = [
 
 [project.scripts]
 clipmorph = "clipmorph.__main__:main"
+clipmorph-ui = "clipmorph.ui_launcher:main"

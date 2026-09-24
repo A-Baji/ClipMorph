@@ -73,20 +73,53 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
+        variant: [cli, ui]
         os: [windows-latest, macos-latest, ubuntu-24.04]
         include:
+          # CLI variant: no web dependencies, no frontend assets, no browser launch code.
           - os: windows-latest
+            variant: cli
             output_name: clipmorph.exe
-            asset_name: clipmorph-windows.zip
+            asset_name: clipmorph-cli-windows.zip
             ffmpeg_dir: windows
+            entry_script: clipmorph/__main__.py
+            pip_extra: ""
           - os: macos-latest
+            variant: cli
             output_name: clipmorph
-            asset_name: clipmorph-macos.zip
+            asset_name: clipmorph-cli-macos.zip
             ffmpeg_dir: mac
+            entry_script: clipmorph/__main__.py
+            pip_extra: ""
           - os: ubuntu-24.04
+            variant: cli
             output_name: clipmorph
-            asset_name: clipmorph-linux
+            asset_name: clipmorph-cli-linux
             ffmpeg_dir: linux
+            entry_script: clipmorph/__main__.py
+            pip_extra: ""
+          # UI variant: bundles FastAPI/Uvicorn, built Svelte assets, and the desktop launcher.
+          - os: windows-latest
+            variant: ui
+            output_name: clipmorph-ui.exe
+            asset_name: clipmorph-ui-windows.zip
+            ffmpeg_dir: windows
+            entry_script: clipmorph/ui_launcher.py
+            pip_extra: "[web]"
+          - os: macos-latest
+            variant: ui
+            output_name: clipmorph-ui
+            asset_name: clipmorph-ui-macos.zip
+            ffmpeg_dir: mac
+            entry_script: clipmorph/ui_launcher.py
+            pip_extra: "[web]"
+          - os: ubuntu-24.04
+            variant: ui
+            output_name: clipmorph-ui
+            asset_name: clipmorph-ui-linux
+            ffmpeg_dir: linux
+            entry_script: clipmorph/ui_launcher.py
+            pip_extra: "[web]"
 
     steps:
     - uses: actions/checkout@v5
@@ -171,15 +204,31 @@ jobs:
         fi
       shell: bash
         
+    - name: Set up Node.js (UI variant only, build tooling not part of the distributed artifact)
+      if: matrix.variant == 'ui'
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Build frontend assets (UI variant only)
+      if: matrix.variant == 'ui'
+      working-directory: frontend
+      run: npm install --no-audit --no-fund && npm run build
+
+    - name: Verify built frontend assets exist (UI variant only)
+      if: matrix.variant == 'ui'
+      run: test -f clipmorph/web_assets/index.html
+      shell: bash
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip --no-cache-dir
         pip install pyinstaller --no-cache-dir
         if [ "$RUNNER_OS" == "Linux" ]; then
-          pip install . --no-cache-dir --constraint torch-constraints.txt
+          pip install ".${{ matrix.pip_extra }}" --no-cache-dir --constraint torch-constraints.txt
           rm torch-constraints.txt
         else
-          pip install . --no-cache-dir
+          pip install ".${{ matrix.pip_extra }}" --no-cache-dir
         fi
       shell: bash
 
@@ -190,9 +239,13 @@ jobs:
 
     - name: Create PyInstaller Spec
       run: |
+        EXTRA_DATA=""
+        if [ "${{ matrix.variant }}" == "ui" ]; then
+          EXTRA_DATA="('clipmorph/web_assets', 'clipmorph/web_assets'),"
+        fi
         if [ "$RUNNER_OS" == "Windows" ] || [ "$RUNNER_OS" == "macOS" ]; then
           # Directory-based build avoids extracting the full ML runtime on every launch.
-          cat > clipmorph.spec << 'EOF'
+          cat > clipmorph.spec << EOF
         # -*- mode: python ; coding: utf-8 -*-
 
         import sys
@@ -207,16 +260,20 @@ jobs:
             'matplotlib.backends.backend_tkagg',
             'matplotlib.backends.backend_wxagg',
             'sympy', 'bokeh', 'dask', 'distributed',
-            'setuptools', 'pip', 'wheel', 'distutils',
+            # NOTE: keep 'setuptools' out of this list. Excluding it drops the
+            # vendored pkg_resources/jaraco modules some transitive deps import
+            # at runtime, which crashes frozen builds with a jaraco ImportError.
+            'pip', 'wheel', 'distutils',
         ]
 
         a = Analysis(
-            ['clipmorph/__main__.py'],
+            ['${{ matrix.entry_script }}'],
             pathex=[],
             binaries=[],
             datas=[
                 ('clipmorph/ffmpeg/${{ matrix.ffmpeg_dir }}', 'clipmorph/ffmpeg/${{ matrix.ffmpeg_dir }}'),
                 ('clipmorph/resources', 'clipmorph/resources'),
+                $EXTRA_DATA
             ],
             hiddenimports=['dotenv', 'whisper', 'whisperx', 'torch', 'torchaudio'],
             hookspath=[],
@@ -264,7 +321,7 @@ jobs:
         EOF
         else
           # Directory-based build for Linux
-          cat > clipmorph.spec << 'EOF'
+          cat > clipmorph.spec << EOF
         # -*- mode: python ; coding: utf-8 -*-
 
         import sys
@@ -279,16 +336,20 @@ jobs:
             'matplotlib.backends.backend_tkagg',
             'matplotlib.backends.backend_wxagg',
             'sympy', 'bokeh', 'dask', 'distributed',
-            'setuptools', 'pip', 'wheel', 'distutils',
+            # NOTE: keep 'setuptools' out of this list. Excluding it drops the
+            # vendored pkg_resources/jaraco modules some transitive deps import
+            # at runtime, which crashes frozen builds with a jaraco ImportError.
+            'pip', 'wheel', 'distutils',
         ]
 
         a = Analysis(
-            ['clipmorph/__main__.py'],
+            ['${{ matrix.entry_script }}'],
             pathex=[],
             binaries=[],
             datas=[
                 ('clipmorph/ffmpeg/${{ matrix.ffmpeg_dir }}', 'clipmorph/ffmpeg/${{ matrix.ffmpeg_dir }}'),
                 ('clipmorph/resources', 'clipmorph/resources'),
+                $EXTRA_DATA
             ],
             hiddenimports=['dotenv', 'whisper', 'whisperx', 'torch', 'torchaudio'],
             hookspath=[],
@@ -340,15 +401,23 @@ jobs:
     - name: Build with PyInstaller
       run: pyinstaller clipmorph.spec
 
-    - name: Smoke test packaged executable
+    - name: Verify artifact contents match variant (reject misplaced web assets)
       run: |
-        if [ "$RUNNER_OS" == "Windows" ]; then
-          dist/clipmorph/${{ matrix.output_name }} --help
-        elif [ "$RUNNER_OS" == "macOS" ]; then
-          dist/clipmorph/${{ matrix.output_name }} --help
+        if [ "${{ matrix.variant }}" == "cli" ]; then
+          if find dist -iname "index.html" -path "*web_assets*" | grep -q .; then
+            echo "CLI artifact must not contain web assets" >&2
+            exit 1
+          fi
         else
-          dist/clipmorph/clipmorph --help
+          if ! find dist -iname "index.html" -path "*web_assets*" | grep -q .; then
+            echo "UI artifact is missing built web assets" >&2
+            exit 1
+          fi
         fi
+      shell: bash
+
+    - name: Smoke test packaged executable
+      run: dist/clipmorph/${{ matrix.output_name }} --help
       shell: bash
 
     - name: Analyze build size
@@ -375,32 +444,34 @@ jobs:
           # Linux: Create self-extracting archive
           cd dist
           tar -czf payload.tar.gz clipmorph/
-          
+          BIN_NAME="${{ matrix.output_name }}"
+          ASSET_NAME="${{ matrix.asset_name }}"
+
           # Create self-extracting shell script
-          cat > ../clipmorph-linux << 'SELFEXTRACT'
+          cat > "../$ASSET_NAME" << SELFEXTRACT
         #!/bin/bash
         # Self-extracting installer for ClipMorph
         
-        EXTRACT_DIR="$HOME/.clipmorph"
-        PAYLOAD_LINE=$(awk '/^__PAYLOAD_BEGINS__/ { print NR + 1; exit 0; }' "$0")
+        EXTRACT_DIR="\$HOME/.clipmorph-${{ matrix.variant }}"
+        PAYLOAD_LINE=\$(awk '/^__PAYLOAD_BEGINS__/ { print NR + 1; exit 0; }' "\$0")
         
         # Extract on first run or if extraction directory doesn't exist
-        if [ ! -d "$EXTRACT_DIR" ] || [ ! -f "$EXTRACT_DIR/clipmorph/clipmorph" ]; then
+        if [ ! -d "\$EXTRACT_DIR" ] || [ ! -f "\$EXTRACT_DIR/clipmorph/$BIN_NAME" ]; then
             echo "Extracting ClipMorph (first run only)..."
-            mkdir -p "$EXTRACT_DIR"
-            tail -n +$PAYLOAD_LINE "$0" | tar -xzf - -C "$EXTRACT_DIR"
+            mkdir -p "\$EXTRACT_DIR"
+            tail -n +\$PAYLOAD_LINE "\$0" | tar -xzf - -C "\$EXTRACT_DIR"
             echo "Extraction complete!"
         fi
         
         # Run the actual executable with all passed arguments
-        exec "$EXTRACT_DIR/clipmorph/clipmorph" "$@"
+        exec "\$EXTRACT_DIR/clipmorph/$BIN_NAME" "\$@"
         
         __PAYLOAD_BEGINS__
         SELFEXTRACT
           
           # Append the compressed payload
-          cat payload.tar.gz >> ../clipmorph-linux
-          chmod +x ../clipmorph-linux
+          cat payload.tar.gz >> "../$ASSET_NAME"
+          chmod +x "../$ASSET_NAME"
         fi
       shell: bash
 
@@ -421,23 +492,71 @@ jobs:
           ref: ${{ needs.release.outputs.commit_sha }}
           fetch-depth: 0
 
-      - name: Download Windows artifact
+      - name: Download Windows CLI artifact
         uses: actions/download-artifact@v5
         with:
-          name: clipmorph-windows.zip
+          name: clipmorph-cli-windows.zip
         continue-on-error: false
 
-      - name: Download macOS artifact
+      - name: Download macOS CLI artifact
         uses: actions/download-artifact@v5
         with:
-          name: clipmorph-macos.zip
+          name: clipmorph-cli-macos.zip
         continue-on-error: false
 
-      - name: Download Linux artifact
+      - name: Download Linux CLI artifact
         uses: actions/download-artifact@v5
         with:
-          name: clipmorph-linux
+          name: clipmorph-cli-linux
         continue-on-error: false
+
+      - name: Download Windows UI artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: clipmorph-ui-windows.zip
+        continue-on-error: false
+
+      - name: Download macOS UI artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: clipmorph-ui-macos.zip
+        continue-on-error: false
+
+      - name: Download Linux UI artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: clipmorph-ui-linux
+        continue-on-error: false
+
+      - name: Verify release artifact matrix
+        run: |
+          set -euo pipefail
+          EXPECTED=(
+            clipmorph-cli-windows.zip
+            clipmorph-cli-macos.zip
+            clipmorph-cli-linux
+            clipmorph-ui-windows.zip
+            clipmorph-ui-macos.zip
+            clipmorph-ui-linux
+          )
+          for asset in "${EXPECTED[@]}"; do
+            if [ ! -e "$asset" ]; then
+              echo "Missing expected release artifact: $asset" >&2
+              exit 1
+            fi
+          done
+          VERSION=$(python -c "import re; print(re.search(r'\"(.+)\"', open('clipmorph/__version__.py').read()).group(1))")
+          if [ "v$VERSION" != "${{ needs.release.outputs.tag }}" ]; then
+            echo "clipmorph/__version__.py ($VERSION) does not match release tag (${{ needs.release.outputs.tag }})" >&2
+            exit 1
+          fi
+          PACKAGE_TOOL='npm'
+          PUBLISH_ACTION='publish'
+          if grep -RIn --include='*.yml' -E "${PACKAGE_TOOL}[[:space:]]+${PUBLISH_ACTION}|${PACKAGE_TOOL}-${PUBLISH_ACTION}" .github/workflows; then
+            echo "npm must never be an end-user distribution channel" >&2
+            exit 1
+          fi
+        shell: bash
 
       - name: Create or update GitHub Release
         env:
@@ -459,14 +578,45 @@ jobs:
             git push origin "$TAG"
           fi
 
+          python -m clipmorph.release_notes "$TAG" CHANGELOG.md release-notes.md
+
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --title "$TAG" --notes-file CHANGELOG.md --verify-tag
-           else
-            gh release edit "$TAG" --notes-file CHANGELOG.md
+            gh release create "$TAG" --title "$TAG" --notes-file release-notes.md --verify-tag
+          else
+            gh release edit "$TAG" --notes-file release-notes.md
           fi
           gh release upload "$TAG" \
-            clipmorph-windows.zip \
-            clipmorph-macos.zip \
-            clipmorph-linux \
+            clipmorph-cli-windows.zip \
+            clipmorph-cli-macos.zip \
+            clipmorph-cli-linux \
+            clipmorph-ui-windows.zip \
+            clipmorph-ui-macos.zip \
+            clipmorph-ui-linux \
             CHANGELOG.md \
             --clobber
+
+  publish_pypi:
+    name: Publish Python package to PyPI
+    needs: [release, create_release]
+    runs-on: ubuntu-24.04
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.release.outputs.commit_sha }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Build sdist and wheel (base clipmorph package only)
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
