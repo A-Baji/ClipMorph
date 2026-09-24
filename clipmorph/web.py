@@ -25,11 +25,61 @@ def create_app(data_dir: str | Path | None = None):
         ) from error
 
     app = FastAPI(title="ClipMorph", version="0.3.0")
-    service = JobService(data_dir or default_data_dir())
+    root = Path(data_dir or default_data_dir())
+    service = JobService(root)
+
+    def config_path() -> Path:
+        return root / "config.json"
+
+    def mask_configuration(configuration: dict) -> dict:
+        masked = {}
+        for key, value in configuration.items():
+            if any(secret in key.lower() for secret in ("secret", "token", "password", "api_key")):
+                masked[key] = "••••••••" if value else ""
+            else:
+                masked[key] = value
+        return masked
 
     @app.get("/api/v1/health")
     def health():
         return {"status": "ok"}
+
+    @app.get("/api/v1/configuration")
+    def get_configuration():
+        if not config_path().exists():
+            return {"configuration": {}, "credentials": {}}
+        configuration = json.loads(config_path().read_text(encoding="utf-8"))
+        return {"configuration": mask_configuration(configuration),
+                "credentials": {
+                    key: bool(value)
+                    for key, value in configuration.items()
+                    if any(secret in key.lower()
+                           for secret in ("secret", "token", "password", "api_key"))
+                }}
+
+    @app.put("/api/v1/configuration")
+    def save_configuration(payload: dict):
+        configuration = payload.get("configuration")
+        if not isinstance(configuration, dict):
+            raise HTTPException(status_code=422,
+                                detail="configuration must be an object")
+        existing = {}
+        if config_path().exists():
+            existing = json.loads(config_path().read_text(encoding="utf-8"))
+        for key, value in configuration.items():
+            if value != "••••••••":
+                existing[key] = value
+        root.mkdir(parents=True, exist_ok=True)
+        temporary = config_path().with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        temporary.replace(config_path())
+        return {"saved": True, "configuration": mask_configuration(existing)}
+
+    @app.get("/api/v1/configuration/export")
+    def export_configuration():
+        if not config_path().exists():
+            return {}
+        return json.loads(config_path().read_text(encoding="utf-8"))
 
     @app.get("/api/v1/jobs")
     def list_jobs():
@@ -57,6 +107,50 @@ def create_app(data_dir: str | Path | None = None):
             return asdict(service.get_job(job_id))
         except FileNotFoundError as error:
             raise HTTPException(status_code=404, detail="job not found") from error
+
+    @app.get("/api/v1/jobs/{job_id}/artifacts")
+    def list_artifacts(job_id: str):
+        try:
+            return service.get_job(job_id).artifacts
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail="job not found") from error
+
+    @app.post("/api/v1/jobs/{job_id}/artifacts/{name}/rename")
+    def rename_artifact(job_id: str, name: str, payload: dict):
+        if not isinstance(payload.get("name"), str) or not payload["name"]:
+            raise HTTPException(status_code=422, detail="name is required")
+        try:
+            manifest = service.get_job(job_id)
+            artifact = manifest.artifacts[name]
+            old_path = Path(artifact["path"])
+            new_path = old_path.with_name(payload["name"])
+            old_path.rename(new_path)
+            artifact["path"] = str(new_path)
+            manifest.artifact_path = (str(new_path)
+                                      if manifest.artifact_path == str(old_path)
+                                      else manifest.artifact_path)
+            manifest.save(service.jobs_dir)
+            return artifact
+        except (FileNotFoundError, KeyError) as error:
+            raise HTTPException(status_code=404, detail="artifact not found") from error
+
+    @app.delete("/api/v1/jobs/{job_id}/artifacts/{name}")
+    def delete_artifact(job_id: str, name: str, confirm: bool = False):
+        if not confirm:
+            raise HTTPException(status_code=400, detail="confirm=true is required")
+        try:
+            manifest = service.get_job(job_id)
+            artifact = manifest.artifacts.pop(name)
+            path = Path(artifact["path"])
+            if path.exists():
+                from send2trash import send2trash
+                send2trash(str(path))
+            if manifest.artifact_path == str(path):
+                manifest.artifact_path = None
+            manifest.save(service.jobs_dir)
+            return {"deleted": True, "artifact": name}
+        except (FileNotFoundError, KeyError) as error:
+            raise HTTPException(status_code=404, detail="artifact not found") from error
 
     @app.get("/api/v1/jobs/{job_id}/transcript")
     def get_transcript(job_id: str):
