@@ -20,6 +20,7 @@ ALLOWED_ROOT_DIRS = {
     "frontend",
     "input",
     "output",
+    "quality",
     "scripts",
     "tests",
     "uploads",

@@ -3,6 +3,7 @@
 *.srt
 .claude/
 frontend/node_modules/
+docs/audit/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

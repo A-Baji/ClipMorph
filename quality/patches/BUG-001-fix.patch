@@ -1,0 +1,9 @@
+--- a/clipmorph/workflow.py
++++ b/clipmorph/workflow.py
+@@ -16,6 +16,8 @@ def execute_job(manifest: JobManifest, token: CancellationToken,
+     no_upload = bool(configuration.get("no_upload", False))
+     enabled_platforms = configuration.get(
+         "upload_to", ["youtube", "instagram", "tiktok", "twitter"])
++    if not enabled_platforms:
++        enabled_platforms = ["youtube", "instagram", "tiktok", "twitter"]
+     enabled_platforms = [platform.lower() for platform in enabled_platforms]
