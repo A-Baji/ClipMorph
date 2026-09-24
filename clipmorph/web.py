@@ -15,22 +15,28 @@ from clipmorph.transcript import load_edit_session, save_edit_session
 from clipmorph.transcript import validate_edit_session
 from clipmorph.workflow import execute_job
 
+try:
+    from fastapi import FastAPI, File, HTTPException, UploadFile
+except ImportError:  # CLI-only installations can still import the package.
+    FastAPI = File = HTTPException = UploadFile = None
+
 
 def create_app(data_dir: str | Path | None = None):
     """Create the local API application without importing web dependencies at CLI startup."""
-    try:
-        from fastapi import FastAPI, HTTPException
-    except ImportError as error:
+    if FastAPI is None:
+        error = ImportError("FastAPI is not installed")
         raise RuntimeError(
             "The web interface requires the optional 'web' dependencies. "
             "Install them with: python -m pip install 'clipmorph[web]'"
         ) from error
 
-    app = FastAPI(title="ClipMorph", version="0.3.0")
+    app = FastAPI(title="ClipMorph", version="0.4.1")
     root = Path(data_dir or default_data_dir())
     service = JobService(root)
 
-    frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+    frontend_dist = Path(__file__).resolve().parent / "web_assets"
+    if not frontend_dist.exists():
+        frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
     if frontend_dist.exists():
         from fastapi.staticfiles import StaticFiles
         from fastapi.responses import FileResponse
@@ -47,6 +53,20 @@ def create_app(data_dir: str | Path | None = None):
     def config_path() -> Path:
         return root / "config.json"
 
+    def layouts_path() -> Path:
+        return root / "layouts.json"
+
+    def load_layouts() -> list[dict]:
+        if not layouts_path().exists():
+            return []
+        return json.loads(layouts_path().read_text(encoding="utf-8"))
+
+    def save_layouts(layouts: list[dict]) -> None:
+        root.mkdir(parents=True, exist_ok=True)
+        temporary = layouts_path().with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(layouts, indent=2), encoding="utf-8")
+        temporary.replace(layouts_path())
+
     def mask_configuration(configuration: dict) -> dict:
         masked = {}
         for key, value in configuration.items():
@@ -59,6 +79,86 @@ def create_app(data_dir: str | Path | None = None):
     @app.get("/api/v1/health")
     def health():
         return {"status": "ok"}
+
+    @app.post("/api/v1/sources", status_code=201)
+    async def upload_source(file: UploadFile = File(...)):
+        if not file.filename:
+            raise HTTPException(status_code=422, detail="file name is required")
+        sources_dir = root / "sources"
+        sources_dir.mkdir(parents=True, exist_ok=True)
+        destination = sources_dir / Path(file.filename).name
+        if destination.exists():
+            destination = destination.with_name(
+                f"{destination.stem}-{uuid.uuid4().hex[:8]}{destination.suffix}")
+        destination.write_bytes(await file.read())
+        return {"source_path": str(destination), "name": destination.name}
+
+    @app.post("/api/v1/jobs/validate")
+    def validate_job(payload: dict):
+        source_path = payload.get("source_path")
+        configuration = payload.get("configuration", {})
+        if not isinstance(source_path, str) or not source_path:
+            raise HTTPException(status_code=422, detail="source_path is required")
+        if not isinstance(configuration, dict):
+            raise HTTPException(status_code=422,
+                                detail="configuration must be an object")
+        errors = []
+        if not Path(source_path).exists():
+            errors.append(f"source file was not found: {source_path}")
+        platforms = configuration.get("upload_to") or [
+            "youtube", "instagram", "tiktok", "twitter"]
+        if not isinstance(platforms, list):
+            errors.append("upload_to must be a list")
+        effective = dict(configuration)
+        effective.setdefault("output_dir", "output/")
+        effective.setdefault("include_cam", True)
+        effective.setdefault("cam_x", 1420)
+        effective.setdefault("cam_y", 790)
+        effective.setdefault("cam_width", 480)
+        effective.setdefault("cam_height", 270)
+        effective.setdefault("no_upload", False)
+        return {"valid": not errors, "errors": errors,
+                "effective_configuration": effective,
+                "warnings": []}
+
+    @app.get("/api/v1/layouts")
+    def list_layouts():
+        return load_layouts()
+
+    @app.post("/api/v1/layouts", status_code=201)
+    def create_layout(payload: dict):
+        name = payload.get("name")
+        layout = payload.get("layout")
+        if not isinstance(name, str) or not name.strip():
+            raise HTTPException(status_code=422, detail="name is required")
+        if not isinstance(layout, dict):
+            raise HTTPException(status_code=422, detail="layout must be an object")
+        from clipmorph.layout import validate_layout
+        try:
+            validate_layout(layout, 1920, 1080)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        record = {"id": uuid.uuid4().hex, "name": name.strip(), "layout": layout}
+        save_layouts([*load_layouts(), record])
+        return record
+
+    @app.get("/api/v1/layouts/{layout_id}")
+    def get_layout(layout_id: str):
+        for layout in load_layouts():
+            if layout["id"] == layout_id:
+                return layout
+        raise HTTPException(status_code=404, detail="layout not found")
+
+    @app.delete("/api/v1/layouts/{layout_id}")
+    def delete_layout(layout_id: str, confirm: bool = False):
+        if not confirm:
+            raise HTTPException(status_code=400, detail="confirm=true is required")
+        layouts = load_layouts()
+        remaining = [layout for layout in layouts if layout["id"] != layout_id]
+        if len(remaining) == len(layouts):
+            raise HTTPException(status_code=404, detail="layout not found")
+        save_layouts(remaining)
+        return {"deleted": True, "id": layout_id}
 
     @app.get("/api/v1/configuration")
     def get_configuration():

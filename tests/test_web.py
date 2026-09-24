@@ -12,6 +12,51 @@ except ImportError:  # CLI-only installations do not include the web extra.
 
 @unittest.skipUnless(TestClient and create_app, "web extra is not installed")
 class WebApiTests(unittest.TestCase):
+    def test_source_upload_validation_and_layout_endpoints(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with TestClient(create_app(Path(temp_dir) / "data")) as client:
+                source = client.post(
+                    "/api/v1/sources",
+                    files={"file": ("clip.mp4", b"video", "video/mp4")})
+                self.assertEqual(source.status_code, 201)
+                source_path = source.json()["source_path"]
+                self.assertTrue(Path(source_path).exists())
+
+                validation = client.post("/api/v1/jobs/validate", json={
+                    "source_path": source_path,
+                    "configuration": {"no_upload": True, "dry_run": True},
+                })
+                self.assertEqual(validation.status_code, 200)
+                self.assertTrue(validation.json()["valid"])
+                self.assertIn("effective_configuration", validation.json())
+
+                layout = client.post("/api/v1/layouts", json={
+                    "name": "Vertical highlight",
+                    "layout": {"crop": {"enabled": False}},
+                })
+                self.assertEqual(layout.status_code, 201)
+                layout_id = layout.json()["id"]
+                self.assertEqual(
+                    client.get(f"/api/v1/layouts/{layout_id}").status_code, 200)
+                self.assertEqual(
+                    client.delete(f"/api/v1/layouts/{layout_id}?confirm=true").status_code,
+                    200)
+
+    def test_web_validation_matches_cli_runtime_defaults(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "input.mp4"
+            source.write_bytes(b"video")
+            with TestClient(create_app(Path(temp_dir) / "data")) as client:
+                response = client.post("/api/v1/jobs/validate", json={
+                    "source_path": str(source),
+                    "configuration": {"no_upload": True},
+                })
+            effective = response.json()["effective_configuration"]
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(effective["output_dir"], "output/")
+            self.assertEqual(effective["cam_width"], 480)
+            self.assertTrue(effective["include_cam"])
+
     def test_job_lifecycle_endpoints(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "input.mp4"
