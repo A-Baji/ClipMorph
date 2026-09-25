@@ -95,12 +95,30 @@ def auth_file_path(data_dir: str | Path | None = None) -> Path:
     return directory / AUTH_FILE_NAME
 
 
+def _rotate_backup_files(path: Path) -> Path:
+    """Shift older backups to numbered names and leave the newest slot free."""
+    backup_path = path.with_suffix(path.suffix + ".backup")
+    highest_index = 0
+    while backup_path.parent.joinpath(f"{backup_path.name}{highest_index + 1}").exists():
+        highest_index += 1
+
+    for index in range(highest_index, 0, -1):
+        source = backup_path.with_name(f"{backup_path.name}{index}")
+        target = backup_path.with_name(f"{backup_path.name}{index + 1}")
+        if source.exists():
+            source.rename(target)
+
+    if backup_path.exists():
+        backup_path.rename(backup_path.with_name(f"{backup_path.name}1"))
+    return backup_path
+
+
 def create_auth_template(data_dir: str | Path | None = None) -> Path:
     """Create a blank auth template, backing up an existing auth file first."""
     path = auth_file_path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
-        backup_path = path.with_suffix(path.suffix + ".backup")
+        backup_path = _rotate_backup_files(path)
         shutil.copy2(path, backup_path)
         print(f"Existing auth file backed up to: {backup_path}")
     path.write_text(AUTH_TEMPLATE, encoding="utf-8")

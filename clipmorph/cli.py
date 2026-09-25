@@ -161,6 +161,24 @@ def _apply_config_defaults(args):
     return args
 
 
+def _rotate_backup_files(path: Path) -> Path:
+    """Shift older backups to numbered names and leave the newest slot free."""
+    backup_path = path.with_suffix(path.suffix + ".backup")
+    highest_index = 0
+    while backup_path.parent.joinpath(f"{backup_path.name}{highest_index + 1}").exists():
+        highest_index += 1
+
+    for index in range(highest_index, 0, -1):
+        source = backup_path.with_name(f"{backup_path.name}{index}")
+        target = backup_path.with_name(f"{backup_path.name}{index + 1}")
+        if source.exists():
+            source.rename(target)
+
+    if backup_path.exists():
+        backup_path.rename(backup_path.with_name(f"{backup_path.name}1"))
+    return backup_path
+
+
 def create_config_template(output_path=None):
     """Create a template YAML configuration file."""
     platform_defaults = build_platform_default_config()
@@ -211,7 +229,7 @@ def create_config_template(output_path=None):
 
     # Check if file already exists
     if output_path.exists():
-        backup_path = output_path.with_suffix(output_path.suffix + ".backup")
+        backup_path = _rotate_backup_files(output_path)
         shutil.copy2(output_path, backup_path)
         print(f"Existing config file backed up to: {backup_path}")
 

@@ -36,6 +36,28 @@ class AuthConfigTests(unittest.TestCase):
                 original)
             self.assertIn("instagram:", auth_path.read_text(encoding="utf-8"))
 
+    def test_existing_auth_file_generates_numbered_backup_when_needed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            auth_path = Path(temp_dir) / "auth.yaml"
+            auth_path.write_text("first: value\n", encoding="utf-8")
+            backup_path = Path(temp_dir) / "auth.yaml.backup"
+            backup_path.write_text("previous: backup\n", encoding="utf-8")
+            (Path(temp_dir) / "auth.yaml.backup1").write_text(
+                "older: backup\n", encoding="utf-8")
+
+            create_auth_template(temp_dir)
+
+            self.assertEqual(
+                backup_path.read_text(encoding="utf-8"),
+                "first: value\n")
+            self.assertEqual(
+                (Path(temp_dir) / "auth.yaml.backup1").read_text(encoding="utf-8"),
+                "previous: backup\n")
+            self.assertEqual(
+                (Path(temp_dir) / "auth.yaml.backup2").read_text(encoding="utf-8"),
+                "older: backup\n")
+            self.assertIn("instagram:", auth_path.read_text(encoding="utf-8"))
+
     def test_loads_nested_platform_credentials_from_data_directory(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)

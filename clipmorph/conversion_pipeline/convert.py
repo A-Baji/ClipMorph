@@ -317,13 +317,28 @@ class ConversionPipeline:
 
             logging.info("Editing video...")
 
-            # Pass FFmpeg runner to editing pipeline
+            editing_option_names = {
+                "output_dir",
+                "include_cam",
+                "cam_x",
+                "cam_y",
+                "cam_width",
+                "cam_height",
+                "clip_height",
+                "layout",
+            }
+            editing_options = {
+                key: value
+                for key, value in self.kwargs.items()
+                if key in editing_option_names
+            }
+
             final_output = EditingPipeline(
                 input_path=self.input_path,
                 muted_audio=muted_audio_path,
                 segments=self.segments if use_subtitles else [],
                 ffmpeg_runner=self.ffmpeg_runner,
-                **self.kwargs).run()
+                **editing_options).run()
 
             # Validate output
             file_size = self._validate_output(final_output)

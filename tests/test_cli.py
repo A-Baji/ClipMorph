@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from clipmorph.__main__ import main
 from clipmorph.batch import BatchProcessor
@@ -99,6 +99,30 @@ class CliInitializationTests(unittest.TestCase):
             backup_path = Path(f"{config_path}.backup")
             self.assertEqual(backup_path.read_text(encoding="utf-8"),
                              "old: true\n")
+            self.assertIn("general:", config_path.read_text(encoding="utf-8"))
+
+    def test_init_numbers_existing_backup_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "clipmorph.yaml"
+            config_path.write_text("old: true\n", encoding="utf-8")
+            backup_path = Path(f"{config_path}.backup")
+            backup_path.write_text("previous: backup\n", encoding="utf-8")
+            Path(f"{config_path}.backup1").write_text("older: backup\n",
+                                                      encoding="utf-8")
+
+            with patch.object(sys, "argv", [
+                    "clipmorph", "init", "--config-path", str(config_path)
+            ]):
+                main()
+
+            self.assertEqual(backup_path.read_text(encoding="utf-8"),
+                             "old: true\n")
+            self.assertEqual(
+                Path(f"{config_path}.backup1").read_text(encoding="utf-8"),
+                "previous: backup\n")
+            self.assertEqual(
+                Path(f"{config_path}.backup2").read_text(encoding="utf-8"),
+                "older: backup\n")
             self.assertIn("general:", config_path.read_text(encoding="utf-8"))
 
 
@@ -359,6 +383,32 @@ class ConfigDefaultsTests(unittest.TestCase):
 
 
 class TranscriptionConfigTests(unittest.TestCase):
+    def test_conversion_does_not_forward_transcription_options_to_editor(self):
+        runner = SimpleNamespace(
+            validate_input_file=lambda _path: None,
+            extract_audio=lambda _path: "audio.wav",
+            cleanup_temp_files=lambda: None,
+        )
+        editor = MagicMock()
+        editor.return_value.run.return_value = "output.mp4"
+        pipeline = ConversionPipeline(
+            "input.mp4",
+            no_subs=True,
+            transcription_language="fr",
+        )
+        pipeline.ffmpeg_runner = runner
+
+        with patch("clipmorph.conversion_pipeline.convert.EditingPipeline",
+                       editor), patch.object(
+                           ConversionPipeline,
+                           "_validate_output",
+                           return_value=1024,
+                       ):
+            self.assertEqual(pipeline.run(), "output.mp4")
+
+        self.assertNotIn("transcription_language",
+                         editor.call_args.kwargs)
+
     def test_requested_device_falls_back_to_cpu(self):
         with patch("clipmorph.conversion_pipeline.transcribe.torch.cuda.is_available",
                    return_value=False):
