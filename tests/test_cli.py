@@ -197,6 +197,60 @@ class SharedWorkflowRegressionTests(unittest.TestCase):
             self.assertEqual(loaded.artifact_path, str(source))
 
 
+class SharedWorkflowRegressionTests(unittest.TestCase):
+    def test_empty_upload_list_uses_all_platforms_in_shared_workflow(self):
+        class FakeManifest:
+            job_id = "job"
+            source_path = "input.mp4"
+            configuration = {"no_conversion": True, "no_upload": False, "upload_to": []}
+
+            def set_step(self, *_args, **_kwargs):
+                pass
+
+            def set_artifact(self, *_args, **_kwargs):
+                pass
+
+            def record_platform(self, *_args, **_kwargs):
+                pass
+
+        with patch("clipmorph.workflow.configure_ffmpeg"), \
+                patch("clipmorph.workflow.FFmpegRunner") as runner_type, \
+                patch("clipmorph.workflow.PreflightValidator") as validator_type, \
+                patch("clipmorph.upload_pipeline.UploadPipeline") as pipeline_type:
+            runner_type.return_value.get_video_info.return_value = {
+                "streams": [{"codec_type": "video", "width": 1920, "height": 1080}],
+                "format": {"duration": 10},
+            }
+            validator_type.return_value.validate.return_value = []
+            pipeline_type.return_value.run.return_value = {}
+            execute_job(FakeManifest(), CancellationToken(), "jobs")
+
+        self.assertEqual(
+            pipeline_type.call_args.kwargs,
+            {"youtube": True, "instagram": True, "tiktok": True, "twitter": True},
+        )
+
+    def test_cli_data_dir_persists_updated_manifest_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "input.mp4"
+            source.write_bytes(b"video")
+            data_dir = Path(temp_dir) / "custom-data"
+
+            with patch.object(sys, "argv", [
+                    "clipmorph", "--data-dir", str(data_dir),
+                    "--no-conversion", "--no-upload", str(source)
+            ]), patch("clipmorph.__main__._run_preflight", return_value=[]), \
+                    patch("clipmorph.__main__.configure_ffmpeg"), \
+                    patch("clipmorph.ffmpeg.FFmpegRunner"):
+                main()
+
+            manifests = list((data_dir / "jobs").glob("*/manifest.json"))
+            self.assertEqual(len(manifests), 1)
+            loaded = JobManifest.load(manifests[0].parent.name, str(data_dir / "jobs"))
+            self.assertEqual(loaded.status, "completed")
+            self.assertEqual(loaded.artifact_path, str(source))
+
+
 class PreflightTests(unittest.TestCase):
     def test_rejects_camera_crop_outside_source(self):
         with tempfile.TemporaryDirectory() as temp_dir:

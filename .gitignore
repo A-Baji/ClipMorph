@@ -2,9 +2,9 @@
 *.wav
 *.srt
 .claude/
+.vscode/
 frontend/node_modules/
 docs/audit/
-.vscode/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
