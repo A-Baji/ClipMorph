@@ -59,8 +59,14 @@ Common variables include:
 - `FACEBOOK_APP_ID`, `FACEBOOK_APP_SECRET`, `FACEBOOK_PAGE_ID`, `FACEBOOK_ACCESS_TOKEN`
 - `GCS_BUCKET_NAME`, `GCP_PRIVATE_KEY_ID`, `GCP_PRIVATE_KEY`, `GCP_CLIENT_EMAIL`, `GCP_CLIENT_ID`, `GCP_PROJECT_ID`
 - `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, `TIKTOK_ACCESS_TOKEN`, `TIKTOK_REFRESH_TOKEN`, `TIKTOK_OPEN_ID`
-- `TWITTER_CLIENT_ID`, `TWITTER_CLIENT_SECRET`, `TWITTER_API_KEY`, `TWITTER_API_KEY_SECRET`, `TWITTER_ACCESS_TOKEN`, `TWITTER_ACCESS_TOKEN_SECRET`, `TWITTER_BEARER_TOKEN`
+- `TWITTER_CLIENT_ID`, `TWITTER_CLIENT_SECRET`, `TWITTER_OAUTH2_ACCESS_TOKEN`, `TWITTER_OAUTH2_REFRESH_TOKEN`, `TWITTER_OAUTH2_EXPIRES_AT`
 - `HUGGING_FACE_ACCESS_TOKEN`
+
+For X publishing, configure the OAuth 2.0 Client ID and Client Secret in
+`auth.yaml`, then run `clipmorph auth twitter`. The command opens the X consent
+page, uses the registered callback `http://localhost:8765/callback`, and stores
+the user access and refresh tokens. The requested scopes are `tweet.read`,
+`tweet.write`, `users.read`, `media.write`, and `offline.access`.
 
 ## Configuration precedence
 

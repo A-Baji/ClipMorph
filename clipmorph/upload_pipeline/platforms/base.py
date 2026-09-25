@@ -84,6 +84,7 @@ class BaseUploadPipeline(ABC):
                         continue
                     else:
                         # Non-retriable HTTP error, fail immediately
+                        self._enhance_error_message(response)
                         response.raise_for_status()
 
                 # Handle Google API HttpError (YouTube)

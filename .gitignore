@@ -2,6 +2,7 @@
 *.wav
 *.srt
 .claude/
+.vscode/
 frontend/node_modules/
 docs/audit/
 

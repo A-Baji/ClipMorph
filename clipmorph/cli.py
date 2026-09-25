@@ -121,6 +121,11 @@ def _flatten_config_values(config):
 
 def _apply_config_defaults(args):
     """Apply config values only where the corresponding CLI option is absent."""
+    if not getattr(args, 'config', None):
+        default_config = default_data_dir() / "clipmorph.yaml"
+        if default_config.exists():
+            args.config = str(default_config)
+
     config_values = _flatten_config_values(_load_config_data(
         getattr(args, 'config', None)))
     for key, value in config_values.items():
@@ -159,6 +164,24 @@ def _apply_config_defaults(args):
     args.output_dir = str(resolve_output_dir(args.output_dir, args.data_dir))
 
     return args
+
+
+def _rotate_backup_files(path: Path) -> Path:
+    """Shift older backups to numbered names and leave the newest slot free."""
+    backup_path = path.with_suffix(path.suffix + ".backup")
+    highest_index = 0
+    while backup_path.parent.joinpath(f"{backup_path.name}{highest_index + 1}").exists():
+        highest_index += 1
+
+    for index in range(highest_index, 0, -1):
+        source = backup_path.with_name(f"{backup_path.name}{index}")
+        target = backup_path.with_name(f"{backup_path.name}{index + 1}")
+        if source.exists():
+            source.rename(target)
+
+    if backup_path.exists():
+        backup_path.rename(backup_path.with_name(f"{backup_path.name}1"))
+    return backup_path
 
 
 def create_config_template(output_path=None):
@@ -211,7 +234,7 @@ def create_config_template(output_path=None):
 
     # Check if file already exists
     if output_path.exists():
-        backup_path = output_path.with_suffix(output_path.suffix + ".backup")
+        backup_path = _rotate_backup_files(output_path)
         shutil.copy2(output_path, backup_path)
         print(f"Existing config file backed up to: {backup_path}")
 

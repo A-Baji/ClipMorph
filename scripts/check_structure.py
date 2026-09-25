@@ -13,6 +13,7 @@ ALLOWED_ROOT_DIRS = {
     ".github",
     ".git",
     ".venv",
+    ".vscode",
     "build",
     "clipmorph",
     "clipmorph.egg-info",

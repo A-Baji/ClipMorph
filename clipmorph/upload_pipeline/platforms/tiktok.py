@@ -4,9 +4,11 @@ import os
 import secrets
 import time
 import urllib.parse
+import webbrowser
 
 import requests
 
+from clipmorph.auth import persist_auth_credential
 from .base import BaseUploadPipeline
 
 
@@ -29,9 +31,9 @@ class TikTokUploadPipeline(BaseUploadPipeline):
     MIN_PROGRESS_INCREMENT = 2.0
 
     def __init__(self,
-                 tiktok_client_key=os.getenv("TIKTOK_CLIENT_KEY"),
-                 tiktok_client_secret=os.getenv("TIKTOK_CLIENT_SECRET"),
-                 tiktok_refresh_token=os.getenv("TIKTOK_REFRESH_TOKEN"),
+                 tiktok_client_key=None,
+                 tiktok_client_secret=None,
+                 tiktok_refresh_token=None,
                  redirect_uri="http://127.0.0.1:80/callback/",
                  scope="user.info.basic,video.upload,video.publish",
                  request_timeout=30,
@@ -55,9 +57,14 @@ class TikTokUploadPipeline(BaseUploadPipeline):
                 Defaults to 300 seconds.
         """
         # TikTok credentials
-        self.client_key = tiktok_client_key
-        self.client_secret = tiktok_client_secret
-        self.refresh_token = tiktok_refresh_token
+        self.client_key = (tiktok_client_key if tiktok_client_key is not None else
+                           os.getenv("TIKTOK_CLIENT_KEY"))
+        self.client_secret = (
+            tiktok_client_secret if tiktok_client_secret is not None else
+            os.getenv("TIKTOK_CLIENT_SECRET"))
+        self.refresh_token = (
+            tiktok_refresh_token if tiktok_refresh_token is not None else
+            os.getenv("TIKTOK_REFRESH_TOKEN"))
 
         # Authentication configuration
         self.redirect_uri = redirect_uri
@@ -99,9 +106,20 @@ class TikTokUploadPipeline(BaseUploadPipeline):
         """TikTok-specific error message enhancement."""
         try:
             error_data = response.json()
-            api_error = error_data.get('error', {}).get('message', '')
+            error_details = error_data.get('error', {})
+            api_error = error_details.get('message', '')
+            api_error = api_error or error_data.get('error_description', '')
             if api_error:
                 response.reason = f"{response.reason}: {api_error}"
+            error_code = error_details.get('code', '')
+            log_id = error_details.get('log_id', '')
+            details = ", ".join(
+                value for value in (
+                    f"code={error_code}" if error_code else '',
+                    f"log_id={log_id}" if log_id else '')
+            )
+            if details:
+                response.reason = f"{response.reason} ({details})"
         except:
             pass
 
@@ -145,7 +163,15 @@ class TikTokUploadPipeline(BaseUploadPipeline):
                                        data=data,
                                        headers=headers,
                                        timeout=self.request_timeout)
-        return response.json()
+        return self._normalize_token_response(response.json())
+
+    @staticmethod
+    def _normalize_token_response(response_data):
+        """Accept both TikTok's top-level and data-wrapped token responses."""
+        nested_data = response_data.get("data")
+        if isinstance(nested_data, dict):
+            return nested_data
+        return response_data
 
     def _refresh_access_token(self):
         """
@@ -169,17 +195,54 @@ class TikTokUploadPipeline(BaseUploadPipeline):
             'refresh_token': self.refresh_token
         }
         headers = {'Content-Type': 'application/x-www-form-urlencoded'}
-        response = self._retry_request(requests.post,
-                                       self.TIKTOK_TOKEN_URL,
-                                       data=data,
-                                       headers=headers,
-                                       timeout=self.request_timeout)
+        reauthorized = False
+        try:
+            response = self._retry_request(requests.post,
+                                           self.TIKTOK_TOKEN_URL,
+                                           data=data,
+                                           headers=headers,
+                                           timeout=self.request_timeout)
+        except requests.exceptions.HTTPError as error:
+            if self.progress_bar:
+                self.progress_bar.write(
+                    f"[TikTok] Refresh token rejected ({error}). Starting OAuth flow..."
+                )
+            self.refresh_token = self.generate_refresh_token()
+            reauthorized = True
+            data['refresh_token'] = self.refresh_token
+            response = self._retry_request(requests.post,
+                                           self.TIKTOK_TOKEN_URL,
+                                           data=data,
+                                           headers=headers,
+                                           timeout=self.request_timeout)
 
-        resp_json = response.json()
+        resp_json = self._normalize_token_response(response.json())
+        if not resp_json.get('access_token') and not reauthorized:
+            if self.progress_bar:
+                self.progress_bar.write(
+                    "[TikTok] Refresh token was rejected. Starting OAuth flow..."
+                )
+            self.refresh_token = self.generate_refresh_token()
+            data['refresh_token'] = self.refresh_token
+            response = self._retry_request(requests.post,
+                                           self.TIKTOK_TOKEN_URL,
+                                           data=data,
+                                           headers=headers,
+                                           timeout=self.request_timeout)
+            resp_json = self._normalize_token_response(response.json())
         self.access_token = resp_json.get('access_token')
 
         if not self.access_token:
-            raise RuntimeError("Failed to refresh access token")
+            detail = resp_json.get('error_description') or resp_json.get('error')
+            message = "Failed to refresh access token"
+            if detail:
+                message += f": {detail}"
+            raise RuntimeError(message)
+
+        rotated_refresh_token = resp_json.get('refresh_token')
+        if rotated_refresh_token:
+            self.refresh_token = rotated_refresh_token
+            persist_auth_credential("tiktok", "refresh_token", rotated_refresh_token)
 
         self._update_progress("authenticate", "Authenticated with TikTok")
         return self.access_token
@@ -225,7 +288,8 @@ class TikTokUploadPipeline(BaseUploadPipeline):
         post_data = {
             'post_info': {
                 'privacy_level': privacy_level,
-                'title': title
+                'title': title,
+                'brand_content_toggle': False,
             },
             'source_info': {
                 'source': 'FILE_UPLOAD',
@@ -306,6 +370,7 @@ class TikTokUploadPipeline(BaseUploadPipeline):
         auth_url = self._generate_auth_url(code_challenge, self.oauth_state)
         print("Open this URL in your browser and authorize the app:")
         print(auth_url)
+        webbrowser.open(auth_url, new=2)
 
         redirected_url = input(
             "\nPaste the full redirect URL here after authorization: ").strip()
@@ -321,10 +386,16 @@ class TikTokUploadPipeline(BaseUploadPipeline):
         token_response = self._exchange_code_for_token(auth_code, code_verifier)
         refresh_token = token_response.get("refresh_token")
         if not refresh_token:
-            raise RuntimeError("Failed to obtain refresh token")
+            detail = token_response.get("error_description") or token_response.get(
+                "error")
+            if isinstance(detail, dict):
+                detail = detail.get("message") or detail.get("code")
+            message = "Failed to obtain refresh token"
+            if detail:
+                message += f": {detail}"
+            raise RuntimeError(message)
 
-        print("\nTikTok refresh token generated. Store it securely in "
-              "TIKTOK_REFRESH_TOKEN; it is not displayed by ClipMorph.")
+        persist_auth_credential("tiktok", "refresh_token", refresh_token)
         return refresh_token
 
     def run(self,
