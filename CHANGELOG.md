@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-09-25
+
+### Fixed
+
+- Fixed platform auth handling and default credential setup for upload flows.
+- Fixed conversion option defaults and CLI/UI compatibility issues affecting local runs.
+- Fixed empty upload defaults and data-directory manifest persistence for resumable jobs.
+- Tightened the structure-policy validation so optional repo files no longer block valid checks.
+
 ## [0.4.2] - 2026-09-24
 
 ### Added
@@ -89,7 +98,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Updated the initial automated build and release workflow.
 
-[unreleased]: https://github.com/A-Baji/ClipMorph/compare/v0.4.2...HEAD
+[unreleased]: https://github.com/A-Baji/ClipMorph/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/A-Baji/ClipMorph/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/A-Baji/ClipMorph/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/A-Baji/ClipMorph/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/A-Baji/ClipMorph/compare/v0.3.0...v0.4.0
