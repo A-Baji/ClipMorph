@@ -14,11 +14,9 @@ PLATFORM_CREDENTIALS = {
     ),
     "tiktok": ("TIKTOK_CLIENT_KEY", "TIKTOK_CLIENT_SECRET"),
     "twitter": (
-        "TWITTER_API_KEY",
-        "TWITTER_API_KEY_SECRET",
-        "TWITTER_ACCESS_TOKEN",
-        "TWITTER_ACCESS_TOKEN_SECRET",
-        "TWITTER_BEARER_TOKEN",
+        "TWITTER_CLIENT_ID",
+        "TWITTER_CLIENT_SECRET",
+        "TWITTER_OAUTH2_ACCESS_TOKEN",
     ),
 }
 
@@ -112,8 +110,12 @@ class PreflightValidator:
     def _validate_credentials(self, platforms: list[str]) -> list[str]:
         warnings = []
         for platform in platforms:
-            missing = [name for name in PLATFORM_CREDENTIALS[platform]
-                       if not os.getenv(name)]
+            if platform == "twitter":
+                missing = [name for name in PLATFORM_CREDENTIALS[platform][:2]
+                           if not os.getenv(name)]
+            else:
+                missing = [name for name in PLATFORM_CREDENTIALS[platform]
+                           if not os.getenv(name)]
             if missing:
                 warnings.append(
                     f"{platform}: missing credentials ({', '.join(missing)})")

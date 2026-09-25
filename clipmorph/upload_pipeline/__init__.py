@@ -278,6 +278,23 @@ class UploadPipeline:
                 'error': str(e)
             }
 
+    def _prepare_interactive_authentication(self, results: Dict[str, Dict]):
+        """Complete console-based auth flows before worker threads start."""
+        for platform_name, pipeline in list(self.enabled_platforms.items()):
+            try:
+                if platform_name == 'YouTube' and not pipeline.credentials:
+                    pipeline._authenticate()
+                elif platform_name == 'TikTok' and not pipeline.access_token:
+                    pipeline._refresh_access_token()
+            except Exception as error:
+                results[platform_name] = {
+                    'platform': platform_name,
+                    'success': False,
+                    'result': None,
+                    'error': str(error),
+                }
+                del self.enabled_platforms[platform_name]
+
     def run(self, video_path: str, title: str,
             **platform_kwargs) -> Dict[str, Dict]:
         """
@@ -304,6 +321,10 @@ class UploadPipeline:
             for platform, error in self.initialization_errors.items()
         }
 
+        if not self.enabled_platforms:
+            return results
+
+        self._prepare_interactive_authentication(results)
         if not self.enabled_platforms:
             return results
 

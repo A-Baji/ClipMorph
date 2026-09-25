@@ -2,12 +2,51 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs, urlparse
 
 from clipmorph.auth import auth_file_path, create_auth_template, load_auth_config
+from clipmorph.auth import persist_auth_credential
+from clipmorph.twitter_auth import TWITTER_REDIRECT_URI, authorize_twitter
 
 
 class AuthConfigTests(unittest.TestCase):
+    def test_twitter_authorization_reuses_exact_callback_uri(self):
+        server = MagicMock()
+        server.callback = {"state": ["state"], "code": ["code"]}
+        response = type("TokenResponse", (), {
+            "ok": True,
+            "raise_for_status": lambda self: None,
+            "json": lambda self: {
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "expires_in": 7200,
+            },
+        })()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            (data_dir / "auth.yaml").write_text(
+                "twitter:\n  client_id: client\n  client_secret: secret\n",
+                encoding="utf-8")
+            with patch("clipmorph.twitter_auth._pkce_pair",
+                       return_value=("verifier", "challenge")), \
+                    patch("clipmorph.twitter_auth.secrets.token_urlsafe",
+                          return_value="state"), \
+                    patch("clipmorph.twitter_auth.HTTPServer",
+                          return_value=server), \
+                    patch("clipmorph.twitter_auth.webbrowser.open") as open_browser, \
+                    patch("clipmorph.twitter_auth.requests.post",
+                          return_value=response) as post:
+                authorize_twitter(data_dir)
+
+        auth_url = open_browser.call_args.args[0]
+        self.assertEqual(parse_qs(urlparse(auth_url).query)["redirect_uri"],
+                         [TWITTER_REDIRECT_URI])
+        self.assertEqual(post.call_args.kwargs["data"]["redirect_uri"],
+                         TWITTER_REDIRECT_URI)
+        self.assertEqual(post.call_args.kwargs["auth"].username, "client")
+        self.assertEqual(post.call_args.kwargs["auth"].password, "secret")
+
     def test_creates_auth_template_in_data_directory(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = create_auth_template(temp_dir)
@@ -114,6 +153,9 @@ class AuthConfigTests(unittest.TestCase):
                 "twitter:\n"
                 "  client_id: twitter-id\n"
                 "  client_secret: twitter-secret\n"
+                "  oauth2_access_token: twitter-access\n"
+                "  oauth2_refresh_token: twitter-refresh\n"
+                "  oauth2_expires_at: '1234567890'\n"
                 "hugging_face:\n"
                 "  access_token: hf-token\n",
                 encoding="utf-8")
@@ -127,6 +169,12 @@ class AuthConfigTests(unittest.TestCase):
                 self.assertEqual(os.environ["TWITTER_CLIENT_ID"], "twitter-id")
                 self.assertEqual(os.environ["TWITTER_CLIENT_SECRET"],
                                  "twitter-secret")
+                self.assertEqual(os.environ["TWITTER_OAUTH2_ACCESS_TOKEN"],
+                                 "twitter-access")
+                self.assertEqual(os.environ["TWITTER_OAUTH2_REFRESH_TOKEN"],
+                                 "twitter-refresh")
+                self.assertEqual(os.environ["TWITTER_OAUTH2_EXPIRES_AT"],
+                                 "1234567890")
                 self.assertEqual(os.environ["HUGGING_FACE_ACCESS_TOKEN"],
                                  "hf-token")
 
@@ -141,6 +189,36 @@ class AuthConfigTests(unittest.TestCase):
                 load_auth_config(data_dir)
 
                 self.assertEqual(os.environ["GOOGLE_CLIENT_ID"], "env-value")
+
+    def test_auth_file_refresh_token_replaces_stale_environment_value(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            (data_dir / "auth.yaml").write_text(
+                "youtube:\n  refresh_token: file-token\n",
+                encoding="utf-8")
+
+            with patch.dict(os.environ, {"GOOGLE_REFRESH_TOKEN": "stale-token"},
+                            clear=True):
+                load_auth_config(data_dir)
+
+                self.assertEqual(os.environ["GOOGLE_REFRESH_TOKEN"], "file-token")
+
+    def test_persists_rotated_credential_to_active_auth_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            (data_dir / "auth.yaml").write_text(
+                "youtube:\n  refresh_token: old-token\n",
+                encoding="utf-8")
+
+            load_auth_config(data_dir)
+            persist_auth_credential("youtube", "refresh_token", "new-token")
+
+            self.assertIn(
+                "refresh_token: new-token",
+                (data_dir / "auth.yaml").read_text(encoding="utf-8"))
+            self.assertIn(
+                "refresh_token: old-token",
+                (data_dir / "auth.yaml.backup").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
+from clipmorph.auth import persist_auth_credential
 from .base import BaseUploadPipeline
 
 # Suppress Google library verbose logging
@@ -345,13 +346,23 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
                 }
             }, scopes)
 
-        creds = flow.run_local_server(port=0, prompt='select_account')
+        creds = flow.run_local_server(
+            port=0,
+            prompt='select_account',
+            authorization_prompt_message='',
+            open_browser=True)
 
         # Show the setup message whenever a new token is generated
         if self.progress_bar:
             self.progress_bar.write(
                 "\nYouTube refresh token generated. Store it securely in "
                 "GOOGLE_REFRESH_TOKEN; it is not displayed by ClipMorph.\n")
+
+        saved_path = persist_auth_credential("youtube", "refresh_token",
+                                             creds.refresh_token)
+        if self.progress_bar:
+            self.progress_bar.write(
+                f"YouTube refresh token saved to {saved_path}")
 
         return creds.refresh_token
 

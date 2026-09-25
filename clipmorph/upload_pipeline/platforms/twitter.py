@@ -1,10 +1,11 @@
 import logging
+import mimetypes
 import os
 import time
 
-from requests_oauthlib import OAuth1Session
-import tweepy
+import requests
 
+from clipmorph.twitter_auth import authorize_twitter, refresh_twitter_access_token
 from .base import BaseUploadPipeline
 
 
@@ -15,8 +16,9 @@ class TwitterUploadPipeline(BaseUploadPipeline):
     """
 
     # Constants
-    TWITTER_API_BASE_URL = "https://api.twitter.com"
-    TWITTER_UPLOAD_BASE_URL = "https://upload.twitter.com"
+    TWITTER_API_BASE_URL = "https://api.x.com"
+    TWITTER_UPLOAD_BASE_URL = "https://api.x.com/2/media/upload"
+    MEDIA_CHUNK_SIZE = 5 * 1024 * 1024
 
     # Video processing constants
     DEFAULT_PROCESSING_TIME_PER_MB = 8  # seconds
@@ -26,28 +28,23 @@ class TwitterUploadPipeline(BaseUploadPipeline):
     MIN_PROGRESS_INCREMENT = 2.0
 
     def __init__(self,
-                 twitter_api_key=os.getenv("TWITTER_API_KEY"),
-                 twitter_api_key_secret=os.getenv("TWITTER_API_KEY_SECRET"),
-                 twitter_access_token=os.getenv("TWITTER_ACCESS_TOKEN"),
-                 twitter_access_token_secret=os.getenv(
-                     "TWITTER_ACCESS_TOKEN_SECRET"),
-                 twitter_bearer_token=os.getenv("TWITTER_BEARER_TOKEN"),
+                 twitter_client_id=None,
+                 twitter_client_secret=None,
+                 twitter_oauth2_access_token=None,
+                 twitter_oauth2_refresh_token=None,
+                 twitter_oauth2_expires_at=None,
+                 data_dir=None,
                  request_timeout=30,
                  processing_timeout=300,
                  max_processing_retries=30):
         """Initialize the Twitter upload pipeline.
         
         Args:
-            twitter_api_key (str, optional): Twitter API Key for authentication.
-                Defaults to TWITTER_API_KEY environment variable.
-            twitter_api_key_secret (str, optional): Twitter API Key Secret for authentication.
-                Defaults to TWITTER_API_KEY_SECRET environment variable.
-            twitter_access_token (str, optional): Twitter Access Token for API access.
-                Defaults to TWITTER_ACCESS_TOKEN environment variable.
-            twitter_access_token_secret (str, optional): Twitter Access Token Secret for API access.
-                Defaults to TWITTER_ACCESS_TOKEN_SECRET environment variable.
-            twitter_bearer_token (str, optional): Twitter Bearer Token for API access.
-                Defaults to TWITTER_BEARER_TOKEN environment variable.
+            twitter_client_id (str, optional): X OAuth2 client ID.
+            twitter_client_secret (str, optional): X OAuth2 client secret.
+            twitter_oauth2_access_token (str, optional): X OAuth2 user token.
+            twitter_oauth2_refresh_token (str, optional): X OAuth2 refresh token.
+            twitter_oauth2_expires_at (str, optional): OAuth2 access-token expiry epoch.
             request_timeout (int, optional): Timeout for HTTP requests in seconds.
                 Defaults to 30 seconds.
             processing_timeout (int, optional): Timeout for video processing in seconds.
@@ -56,11 +53,15 @@ class TwitterUploadPipeline(BaseUploadPipeline):
                 Defaults to 30 retries.
         """
         # Twitter credentials
-        self.api_key = twitter_api_key
-        self.api_key_secret = twitter_api_key_secret
-        self.access_token = twitter_access_token
-        self.access_token_secret = twitter_access_token_secret
-        self.bearer_token = twitter_bearer_token
+        self.client_id = twitter_client_id or os.getenv("TWITTER_CLIENT_ID")
+        self.client_secret = twitter_client_secret or os.getenv("TWITTER_CLIENT_SECRET")
+        self.access_token = (twitter_oauth2_access_token or
+                     os.getenv("TWITTER_OAUTH2_ACCESS_TOKEN"))
+        self.refresh_token = (twitter_oauth2_refresh_token or
+                      os.getenv("TWITTER_OAUTH2_REFRESH_TOKEN"))
+        expiry = twitter_oauth2_expires_at or os.getenv("TWITTER_OAUTH2_EXPIRES_AT")
+        self.expires_at = int(expiry) if expiry and str(expiry).isdigit() else 0
+        self.data_dir = data_dir
 
         # Configuration
         self.request_timeout = request_timeout
@@ -68,7 +69,6 @@ class TwitterUploadPipeline(BaseUploadPipeline):
         self.max_processing_retries = max_processing_retries
 
         # Runtime state
-        self.api = None
         self.client = None
         self.oauth_session = None
 
@@ -89,15 +89,10 @@ class TwitterUploadPipeline(BaseUploadPipeline):
         super().__init__()
 
         # Validate required credentials
-        if not all([
-                self.api_key, self.api_key_secret, self.access_token,
-                self.access_token_secret, self.bearer_token
-        ]):
+        if not all([self.client_id, self.client_secret]):
             raise ValueError(
-                "Missing required Twitter credentials. Provide them as parameters "
-                "or set them as environment variables: TWITTER_API_KEY, "
-                "TWITTER_API_KEY_SECRET, TWITTER_ACCESS_TOKEN, "
-                "TWITTER_ACCESS_TOKEN_SECRET, TWITTER_BEARER_TOKEN")
+            "Missing X OAuth2 client credentials. Provide TWITTER_CLIENT_ID "
+            "and TWITTER_CLIENT_SECRET or run `clipmorph auth twitter`.")
 
         # Validate base class requirements
         self._validate_required_attributes()
@@ -108,37 +103,59 @@ class TwitterUploadPipeline(BaseUploadPipeline):
             error_data = response.json()
             # Twitter uses 'errors' array format
             api_error = error_data.get('errors', [{}])[0].get('message', '')
+            if not api_error and isinstance(error_data.get('error'), dict):
+                api_error = error_data['error'].get('detail', '')
+                reason = error_data['error'].get('reason', '')
+                if reason:
+                    api_error = f"{api_error} ({reason})"
+            if not api_error:
+                api_error = error_data.get('detail', '')
             if api_error:
                 response.reason = f"{response.reason}: {api_error}"
         except:
             pass
 
     def _authenticate(self):
-        """
-        Authenticates with Twitter API using provided credentials.
-        Returns authenticated API and client objects.
-        """
-        auth = tweepy.OAuth1UserHandler(self.api_key, self.api_key_secret,
-                                        self.access_token,
-                                        self.access_token_secret)
-        self.api = tweepy.API(auth)
+        """Authenticate the X API v2 session with an OAuth2 user token."""
+        if not self.access_token and not self.refresh_token:
+            if self.progress_bar:
+                self.progress_bar.write(
+                    "[Twitter] No OAuth2 user token found. Starting authorization flow..."
+                )
+            authorize_twitter(self.data_dir)
+            self.access_token = os.getenv("TWITTER_OAUTH2_ACCESS_TOKEN")
+            self.refresh_token = os.getenv("TWITTER_OAUTH2_REFRESH_TOKEN")
+            expiry = os.getenv("TWITTER_OAUTH2_EXPIRES_AT")
+            self.expires_at = int(expiry) if expiry and expiry.isdigit() else 0
 
-        self.client = tweepy.Client(
-            bearer_token=self.bearer_token,
-            consumer_key=self.api_key,
-            consumer_secret=self.api_key_secret,
-            access_token=self.access_token,
-            access_token_secret=self.access_token_secret)
+        if self.expires_at and self.expires_at <= int(time.time()) + 60:
+            try:
+                values = refresh_twitter_access_token(self.data_dir)
+            except requests.exceptions.HTTPError:
+                if self.progress_bar:
+                    self.progress_bar.write(
+                        "[Twitter] Refresh token rejected. Starting authorization flow..."
+                    )
+                authorize_twitter(self.data_dir)
+                values = {
+                    "oauth2_access_token": os.getenv("TWITTER_OAUTH2_ACCESS_TOKEN"),
+                    "oauth2_refresh_token": os.getenv("TWITTER_OAUTH2_REFRESH_TOKEN"),
+                    "oauth2_expires_at": os.getenv("TWITTER_OAUTH2_EXPIRES_AT"),
+                }
+            self.access_token = values["oauth2_access_token"]
+            self.refresh_token = values.get("oauth2_refresh_token", self.refresh_token)
+            self.expires_at = int(values["oauth2_expires_at"])
+        if not self.access_token:
+            raise ValueError("X OAuth2 user access token is unavailable")
 
-        # Create OAuth session for status checking
-        self.oauth_session = OAuth1Session(
-            self.api_key,
-            client_secret=self.api_key_secret,
-            resource_owner_key=self.access_token,
-            resource_owner_secret=self.access_token_secret)
+        self.oauth_session = requests.Session()
+        self.oauth_session.headers.update({
+            "Authorization": f"Bearer {self.access_token}",
+        })
+        self.client = self.oauth_session
 
         self._update_progress("authenticate", "Authenticated with Twitter")
-        return self.api, self.client
+        return self.oauth_session, self.client
 
     def _validate_video_file(self, video_path: str):
         """
@@ -171,12 +188,48 @@ class TwitterUploadPipeline(BaseUploadPipeline):
         Upload video media to Twitter and return media ID.
         """
 
-        def upload_with_retry():
-            return self.api.media_upload(video_path,
-                                         media_category="tweet_video")
+        total_bytes = os.path.getsize(video_path)
+        media_type = mimetypes.guess_type(video_path)[0] or "video/mp4"
 
-        media = self._retry_request(upload_with_retry)
-        media_id = media.media_id_string
+        def initialize_upload():
+                return self.oauth_session.post(
+                f"{self.TWITTER_UPLOAD_BASE_URL}/initialize",
+                json={
+                    "media_type": media_type,
+                    "total_bytes": total_bytes,
+                    "media_category": "tweet_video",
+                },
+                timeout=self.request_timeout)
+
+        initialize_response = self._retry_request(initialize_upload)
+        media_id = initialize_response.json()["data"]["id"]
+
+        with open(video_path, "rb") as video_file:
+            segment_index = 0
+            while True:
+                chunk = video_file.read(self.MEDIA_CHUNK_SIZE)
+                if not chunk:
+                    break
+
+                def append_upload(chunk=chunk, segment_index=segment_index):
+                    return self.oauth_session.post(
+                        f"{self.TWITTER_UPLOAD_BASE_URL}/{media_id}/append",
+                        data={"segment_index": str(segment_index)},
+                        files={
+                            "media": (os.path.basename(video_path), chunk,
+                                       media_type)
+                        },
+                        timeout=self.request_timeout)
+
+                self._retry_request(append_upload)
+                segment_index += 1
+
+        def finalize_upload():
+            return self.oauth_session.post(
+                f"{self.TWITTER_UPLOAD_BASE_URL}/{media_id}/finalize",
+                timeout=self.request_timeout)
+
+        self._retry_request(finalize_upload)
 
         self._update_progress("media_upload",
                               f"Media uploaded (ID: {media_id})")
@@ -211,15 +264,18 @@ class TwitterUploadPipeline(BaseUploadPipeline):
                 self.progress_bar.set_description(
                     f"[Twitter Processing video... ({elapsed:.0f}s)")
 
-            status_url = f"{self.TWITTER_UPLOAD_BASE_URL}/1.1/media/upload.json?command=STATUS&media_id={media_id}"
+            status_url = (
+                f"{self.TWITTER_UPLOAD_BASE_URL}?command=STATUS&media_id={media_id}"
+            )
 
             def get_status():
-                return self.oauth_session.get(status_url)
+                return self.oauth_session.get(status_url, timeout=self.request_timeout)
 
             try:
                 response = self._retry_request(get_status)
                 media_status = response.json()
-                processing_info = media_status.get("processing_info")
+                media_data = media_status.get("data", media_status)
+                processing_info = media_data.get("processing_info")
 
                 if processing_info and processing_info.get("state"):
                     processing_state = processing_info["state"]
@@ -281,10 +337,13 @@ class TwitterUploadPipeline(BaseUploadPipeline):
         """
 
         def create_with_retry():
-            return self.client.create_tweet(text=text, media_ids=[media_id])
+            return self.oauth_session.post(
+                f"{self.TWITTER_API_BASE_URL}/2/tweets",
+                json={"text": text, "media": {"media_ids": [media_id]}},
+                timeout=self.request_timeout)
 
         response = self._retry_request(create_with_retry)
-        tweet_id = response.data['id']
+        tweet_id = response.json()["data"]["id"]
 
         self._update_progress("create_tweet", "Tweet created successfully")
         return tweet_id
@@ -306,7 +365,7 @@ class TwitterUploadPipeline(BaseUploadPipeline):
         with self._progress_context(total_progress, "Starting upload"):
             try:
                 # Authenticate with Twitter
-                if not self.api or not self.client:
+                if not self.oauth_session:
                     self._authenticate()
 
                 # Validate video file

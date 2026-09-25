@@ -8,6 +8,7 @@ from typing import Any, Dict, List
 import torch
 import whisper
 import whisperx
+import whisperx.diarize as whisperx_diarize
 
 GAMING_PROMPT = ("Yo what the hell was that?\n"
                  "No way bro did you see that?\n"
@@ -89,8 +90,12 @@ class TranscriptionPipeline:
             return None
 
         logging.info("Loading diarization model...")
-        return whisperx.diarize.DiarizationPipeline(use_auth_token=hf_token,
-                                                    device=DEVICE)
+        try:
+            return whisperx_diarize.DiarizationPipeline(token=hf_token,
+                                                        device=DEVICE)
+        except TypeError:
+            return whisperx_diarize.DiarizationPipeline(
+                use_auth_token=hf_token, device=DEVICE)
 
     def _filter_empty_segments(
             self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -207,8 +212,8 @@ class TranscriptionPipeline:
             return segments
 
         diarize_segs = diarizer(self._audio)
-        result = whisperx.diarize.assign_word_speakers(diarize_segs,
-                                                       {"segments": segments})
+        result = whisperx_diarize.assign_word_speakers(
+            diarize_segs, {"segments": segments})
 
         self._cleanup_model('_diarization_model')
         return result.get("segments", [])

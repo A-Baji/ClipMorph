@@ -63,6 +63,17 @@ def main():
         web_main()
         return
 
+    if len(sys.argv) > 2 and sys.argv[1] == "auth":
+        if sys.argv[2].lower() != "twitter":
+            raise ValueError("Supported auth providers: twitter")
+        auth_parser = argparse.ArgumentParser(prog="clipmorph auth twitter")
+        auth_parser.add_argument("--data-dir", type=str)
+        auth_args = auth_parser.parse_args(sys.argv[3:])
+        from clipmorph.twitter_auth import authorize_twitter
+        saved_path = authorize_twitter(auth_args.data_dir)
+        print(f"Twitter OAuth2 credentials saved to {saved_path}")
+        return
+
     if len(sys.argv) > 1 and sys.argv[1] == "init":
         parser = argparse.ArgumentParser(prog="clipmorph init")
         parser.add_argument("--config-path", type=str,

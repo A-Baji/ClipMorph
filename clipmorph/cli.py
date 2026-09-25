@@ -121,6 +121,11 @@ def _flatten_config_values(config):
 
 def _apply_config_defaults(args):
     """Apply config values only where the corresponding CLI option is absent."""
+    if not getattr(args, 'config', None):
+        default_config = default_data_dir() / "clipmorph.yaml"
+        if default_config.exists():
+            args.config = str(default_config)
+
     config_values = _flatten_config_values(_load_config_data(
         getattr(args, 'config', None)))
     for key, value in config_values.items():
