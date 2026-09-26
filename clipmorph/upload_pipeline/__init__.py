@@ -1,9 +1,10 @@
 from concurrent.futures import as_completed
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 import logging
-from typing import Dict
+from typing import Any, Dict
 
-from clipmorph.cli import build_platform_default_config
+from clipmorph.platforms import build_platform_default_config
 from clipmorph.policy import validate_artifact
 
 from .platforms import InstagramUploadPipeline
@@ -55,8 +56,8 @@ class UploadPipeline:
             max_workers: Maximum number of parallel uploads
         """
         self.max_workers = max_workers
-        self.enabled_platforms = {}
-        self.initialization_errors = {}
+        self.enabled_platforms: Dict[str, Any] = {}
+        self.initialization_errors: Dict[str, str] = {}
 
         # Initialize enabled platforms
         if youtube:
@@ -224,6 +225,7 @@ class UploadPipeline:
             Dictionary with platform name, success status, and result/error
         """
         try:
+            started_at = datetime.now(timezone.utc).isoformat()
             artifact_metadata = kwargs.pop("artifact_metadata", None)
             account_capabilities = kwargs.pop("account_capabilities", None)
             if artifact_metadata is not None:
@@ -240,6 +242,8 @@ class UploadPipeline:
                         'policy_version': decision.policy_version,
                         'warnings': decision.warnings,
                         'transformations': decision.transformations,
+                        'started_at': started_at,
+                        'completed_at': datetime.now(timezone.utc).isoformat(),
                     }
             # Map common parameters to platform-specific ones
             platform_params = self._map_common_parameters(
@@ -267,7 +271,9 @@ class UploadPipeline:
                 'platform': platform_name,
                 'success': True,
                 'result': result,
-                'error': None
+                'error': None,
+                'started_at': started_at,
+                'completed_at': datetime.now(timezone.utc).isoformat(),
             }
 
         except Exception as e:
@@ -275,7 +281,9 @@ class UploadPipeline:
                 'platform': platform_name,
                 'success': False,
                 'result': None,
-                'error': str(e)
+                'error': str(e),
+                'started_at': started_at,
+                'completed_at': datetime.now(timezone.utc).isoformat(),
             }
 
     def _prepare_interactive_authentication(self, results: Dict[str, Dict]):
@@ -284,7 +292,8 @@ class UploadPipeline:
             try:
                 if platform_name == 'YouTube' and not pipeline.credentials:
                     pipeline._authenticate()
-                elif platform_name == 'TikTok' and not pipeline.access_token:
+                elif platform_name == 'TikTok' \
+                        and getattr(pipeline, "access_token", None) is None:
                     pipeline._refresh_access_token()
             except Exception as error:
                 results[platform_name] = {

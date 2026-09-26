@@ -190,7 +190,8 @@ class JobManifest:
         return manifest
 
     @classmethod
-    def load(cls, job_id: str, jobs_dir: str | None = None) -> JobManifest:
+    def load(cls, job_id: str,
+             jobs_dir: str | Path | None = None) -> JobManifest:
         directory = Path(jobs_dir) if jobs_dir else default_jobs_dir()
         path = directory / job_id / "manifest.json"
         for attempt in range(4):
@@ -319,21 +320,24 @@ class JobManifest:
         else:
             self.status = "completed"
 
-    def set_status(self, status: str, jobs_dir: str | None = None):
+    def set_status(self, status: str,
+                   jobs_dir: str | Path | None = None):
         self.status = status
         self.save(jobs_dir)
 
-    def set_step(self, step: str, status: str, jobs_dir: str | None = None,
+    def set_step(self, step: str, status: str,
+                 jobs_dir: str | Path | None = None,
                  **details: Any):
         self.steps[step] = {"status": status, **details}
         self.save(jobs_dir)
 
-    def set_artifact(self, artifact_path: str, jobs_dir: str | None = None,
+    def set_artifact(self, artifact_path: str | Path,
+                     jobs_dir: str | Path | None = None,
                      name: str = "primary"):
         return self.record_artifact(name, artifact_path, jobs_dir)
 
-    def record_artifact(self, name: str, artifact_path: str,
-                        jobs_dir: str | None = None,
+    def record_artifact(self, name: str, artifact_path: str | Path,
+                        jobs_dir: str | Path | None = None,
                         schema_version: int = MANIFEST_SCHEMA_VERSION):
         resolved_path = Path(artifact_path).resolve()
         if self.current_artifact_id in self.artifacts:
@@ -368,7 +372,7 @@ class JobManifest:
         self.save(jobs_dir)
 
     def record_platform(self, platform: str, result: dict[str, Any],
-                        jobs_dir: str | None = None):
+                        jobs_dir: str | Path | None = None):
         self.platforms[platform] = result
         if self.platforms and all(
                 item.get("success") for item in self.platforms.values()):

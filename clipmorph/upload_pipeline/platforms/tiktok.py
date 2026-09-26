@@ -322,16 +322,6 @@ class TikTokUploadPipeline(BaseUploadPipeline):
         Upload the video file to TikTok servers with progress tracking.
         """
         start_time = time.time()
-        current_progress = self.progress_bar.n if self.progress_bar else 0
-
-        # Calculate increment per update based on file size
-        video_size_mb = video_size / (1024 * 1024)
-        estimated_time = max(
-            self.MIN_PROCESSING_TIME,
-            video_size_mb * self.DEFAULT_PROCESSING_TIME_PER_MB)
-        increment_per_update = max(
-            self.MIN_PROGRESS_INCREMENT, self.MAX_PROGRESS_DURING_PROCESSING /
-            (estimated_time / self.API_POLL_INTERVAL))
 
         headers = {
             'Content-Type': 'video/mp4',
@@ -352,7 +342,7 @@ class TikTokUploadPipeline(BaseUploadPipeline):
                     headers=headers,
                     timeout=self.upload_timeout)
 
-        response = self._retry_request(upload_stream)
+        self._retry_request(upload_stream)
 
         self._update_progress("video_upload", "Video uploaded successfully")
         return True
@@ -446,7 +436,7 @@ class TikTokUploadPipeline(BaseUploadPipeline):
                 # Complete progress bar
                 self._complete_progress_bar(True)
 
-            except Exception as e:
+            except Exception:
                 self._complete_progress_bar(False)
                 raise
 

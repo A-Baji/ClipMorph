@@ -112,8 +112,12 @@ schema, queue, timezone, states, dedup and history belong to [#100](https://gith
   stores source identity, the global-default snapshot, checkpoints, artifact
   revisions, safe errors, and append-only upload attempts.
 - Focused implementation tests live in `tests/test_configuration.py`,
-  `tests/test_layout.py`, `tests/test_layout_rendering.py`,
-  `tests/test_transcript.py`, `tests/test_cli.py`, and `tests/test_web.py`.
+  `tests/test_platforms.py`, `tests/test_layout.py`,
+  `tests/test_layout_rendering.py`, `tests/test_transcript.py`,
+  `tests/test_transcription.py`, `tests/test_preflight.py`,
+  `tests/test_upload_platforms.py`, `tests/test_oauth.py`,
+  `tests/test_service.py`, `tests/test_job_manifest.py`,
+  `tests/test_cli.py`, and `tests/test_web.py`.
 
 ## Discovery and Results
 

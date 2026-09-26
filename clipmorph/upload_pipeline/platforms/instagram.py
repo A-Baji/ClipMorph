@@ -447,7 +447,7 @@ class InstagramUploadPipeline(BaseUploadPipeline):
             video_path,
             caption: str,
             share_to_feed: bool = True,
-            thumb_offset: int = None):
+            thumb_offset: "int | None" = None):
         """
         Main method to handle the complete Instagram Reels upload process.
         
@@ -522,7 +522,7 @@ class InstagramUploadPipeline(BaseUploadPipeline):
                     error_msg = failure_reason or "Instagram upload failed during video processing or publishing"
                     raise RuntimeError(error_msg)
 
-            except Exception as e:
+            except Exception:
                 self._complete_progress_bar(False)
                 raise
 

@@ -9,6 +9,7 @@ from typing import Any
 from clipmorph.configuration import load_app_configuration
 from clipmorph.ffmpeg import FFmpegRunner, configure_ffmpeg
 from clipmorph.job import JobManifest, resolve_output_dir
+from clipmorph.platforms import enabled_platforms as resolve_enabled_platforms
 from clipmorph.preflight import PreflightValidator
 from clipmorph.service import CancellationToken, JobService
 
@@ -36,11 +37,7 @@ def _effective_no_confirm(configuration: dict[str, Any], stage: str) -> bool:
 
 
 def _enabled_platforms(upload: dict[str, Any]) -> list[str]:
-    platforms = upload.get("platforms", {})
-    included = platforms.get("include") or ["youtube", "instagram", "tiktok", "twitter"]
-    excluded = {str(value).lower() for value in platforms.get("exclude", [])}
-    return [str(value).lower() for value in included
-            if str(value).lower() not in excluded]
+    return resolve_enabled_platforms(upload.get("platforms", {}))
 
 
 def execute_job(manifest: JobManifest, token: CancellationToken,

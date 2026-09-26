@@ -15,18 +15,7 @@ import webbrowser
 import yaml
 
 from clipmorph.job import default_data_dir
-
-
-SUPPORTED_PLATFORMS = {"youtube", "instagram", "tiktok", "twitter"}
-
-
-def build_platform_default_config() -> dict[str, dict[str, Any]]:
-    return {
-        "youtube": {"category": "22", "privacy_status": "public"},
-        "instagram": {"share_to_feed": True, "thumb_offset": 0},
-        "tiktok": {"privacy_level": "PUBLIC_TO_EVERYONE"},
-        "twitter": {},
-    }
+from clipmorph.platforms import build_platform_default_config
 
 
 def summarize_runtime_configuration(runtime_values=None):
@@ -154,7 +143,6 @@ def run_cli(argv: list[str] | None = None) -> int:
     from clipmorph.configuration import load_app_configuration
     from clipmorph.configuration import load_job_records
     from clipmorph.configuration import save_app_configuration
-    from clipmorph.job import JobManifest
     from clipmorph.service import JobService
 
     args = _build_command_parser().parse_args(argv)
@@ -202,9 +190,9 @@ def run_cli(argv: list[str] | None = None) -> int:
                 _print_json(layouts)
                 return 0
             if args.layout_command == "create":
-                value = _read_structured_file(args.configuration)
+                layout_spec = _read_structured_file(args.configuration)
                 from clipmorph.layout import validate_layout
-                name, layout_value = value.get("name"), value.get("layout")
+                name, layout_value = layout_spec.get("name"), layout_spec.get("layout")
                 if not isinstance(name, str) or not name.strip() or not isinstance(layout_value, dict):
                     raise ValueError("layout config requires name and layout object")
                 validate_layout(layout_value)
@@ -215,10 +203,12 @@ def run_cli(argv: list[str] | None = None) -> int:
                 _print_json(record)
                 return 0
             if args.layout_command == "get":
-                record = next((item for item in layouts if item["id"] == args.layout_id), None)
-                if record is None:
+                matching = [item for item in layouts
+                            if item["id"] == args.layout_id]
+                layout_record = matching[0] if matching else None
+                if layout_record is None:
                     raise FileNotFoundError("layout not found")
-                _print_json(record)
+                _print_json(layout_record)
                 return 0
             if not args.yes:
                 raise ValueError("layout delete requires --yes")

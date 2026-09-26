@@ -26,9 +26,23 @@ resolved from `app.yml:job_defaults` plus one per-job override object; finalized
 jobs live in `jobs/<job_id>/job.yml` with state in `manifest.json`. A source must
 be an immediate file under `source_dir`.
 
+## Commands
+
+- `clipmorph init [--config-path PATH]` — write `app.yml` and an adjacent `auth.yaml` template.
+- `clipmorph web [--host HOST] [--port PORT]` — start the local API and dashboard.
+- `clipmorph auth status|set PLATFORM|twitter` — credential status, prompt-based updates, and the X OAuth flow.
+- `clipmorph layout list|create CONFIG|get ID|delete ID` — manage the global layout registry.
+- `clipmorph job create SOURCE [--job-configs FILE] [--config-dir DIR] [--dry-run]` — create jobs from one source file or fan out over `source_dir`; per-source records are JSONL/YAML job objects.
+- `clipmorph job list|get ID|update ID --patch FILE [--reopen]|delete ID --yes|resume ID|cancel ID --yes` — inspect and manage the job lifecycle.
+- `clipmorph job review ID {transcript|conversion|upload} [--edits FILE] [--accept]` — checkpoint review gates.
+- `clipmorph job render ID` — create a new immutable artifact revision from the accepted composition.
+- `clipmorph job upload ID [--platform NAME]`, `clipmorph job upload retry ID PLATFORM [--attempt-id ID]` — submit the accepted draft or retry a failed attempt.
+- `clipmorph job artifacts list|preview|download|rename|delete ...` — manage registered artifact revisions.
+
+A directory `job create` scans the root of `app.yml:source_dir` only; unsupported or missing sources are skipped and reported per source, while valid jobs still proceed (no group manifest is persisted). The web API exposes the same lifecycle at `/api/v1/`; see `docs/CLI_WEB_PARITY.md` for the contract.
 ### Local dashboard
 
-Install the optional web dependencies from the tagged GitHub repository with `python -m pip install "clipmorph[web] @ git+https://github.com/A-Baji/ClipMorph.git@vX.Y.Z"`,
+Install the optional web dependencies from the tagged GitHub repository with `python -m pip install "clipmorph[web] @ git+https://github.com/A-Baji/ClipMorph.git@vX.Y.Z"` (the base package and its `web` extra are currently distributed from tagged GitHub releases; PyPI publication is planned but not yet available),
 then run `clipmorph web`. The service binds to `127.0.0.1:8000` and serves the
 local dashboard plus `/api/v1/` without authentication. Jobs, credentials,
 artifacts, captions, and upload state remain on the local machine. Stop the
@@ -89,7 +103,7 @@ rules.
 - Input formats: commonly MP4/MOV/MKV/AVI/WebM files
 - Preferred output target: vertical 9:16 content with validated crop geometry
 - Uploads: support partial failures without dropping platform state in the job manifest
-- Dry runs: validate source selection, config, layout, and media without creating jobs
+- Dry runs: validate source selection and configuration without creating jobs
 - Retry handling: pipeline retries and partial-failure reporting are available for uploads
 - Cleanup: use `--clean` to remove generated artifacts after a successful run
 
@@ -114,24 +128,37 @@ rules.
 
 ## Features
 
-- **Intelligent Video Processing**
+- **Layered job configuration**
+  - `app.yml` global defaults with per-job override objects deep-merged on top
+  - Finalized effective `job.yml` persisted per job, with resumable manifest state
+  - Sidecar `general.source` matching with arbitrary YAML filenames; no batch tier
+
+- **Review checkpoints**
+  - Transcript review: edit generated segment text, timing, and per-segment typography before render
+  - Composition review: crop, captions, and layout materialization with immutable artifact revisions
+  - Upload review: pending draft with append-only per-platform attempt history and targeted retries
+
+- **Intelligent video processing**
   - Automatic audio transcription with speaker diarization
   - Profanity detection and censoring (audio muting + subtitle filtering)
   - Multi-speaker subtitle overlays with color coding
-  - Camera feed extraction and placement
-  - Vertical format optimization (9:16 aspect ratio)
+  - Vertical format optimization (9:16) with composable crop/caption layouts
   - Blurred background support
 
-- **Multi-Platform Upload**
+- **Multi-platform upload**
   - Parallel uploads to YouTube, Instagram, TikTok, and Twitter
-  - Platform-specific parameter mapping
-  - Progress tracking with detailed status updates
-  - Automatic retry logic with exponential backoff
+  - Centralized platform capability policy with blockers, warnings, and metadata transforms
+  - Platform-specific parameter mapping and duration/size guards
+  - Automatic retry with backoff plus per-platform retries bound to the failed attempt
 
-- **Flexible Configuration**
-  - Command-line arguments
-  - YAML/JSON config files
-  - Environment variable support
+- **Local dashboard**
+  - `clipmorph web` serving a FastAPI dashboard at `127.0.0.1:8000`
+  - Queue, job detail, layouts, captions, uploads, and credential-health views
+  - Same shared JobService lifecycle as the CLI
+
+- **Flexible configuration**
+  - `app.yml` layered config with CLI/Web/API parity (see `docs/CONFIG_LAYERS.md`)
+  - Environment variable support with `auth.yaml` credential precedence
 
 ## License
 

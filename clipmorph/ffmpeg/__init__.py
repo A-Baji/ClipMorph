@@ -71,11 +71,11 @@ class FFmpegConfig:
                 raise FFmpegError(f"{name} binary not found at: {path}")
 
             try:
-                result = subprocess.run([path, "-version"],
-                                        capture_output=True,
-                                        text=True,
-                                        timeout=10,
-                                        check=True)
+                subprocess.run([path, "-version"],
+                               capture_output=True,
+                               text=True,
+                               timeout=10,
+                               check=True)
                 logging.debug(f"{name} version check passed")
             except (subprocess.SubprocessError,
                     subprocess.TimeoutExpired) as e:
@@ -93,14 +93,14 @@ class FFmpegConfig:
                 "PATH"] = f"{ffmpeg_dir}{os.pathsep}{os.environ.get('PATH', '')}"
 
     @property
-    def ffmpeg_path(self) -> str:
+    def ffmpeg_path(self) -> "str | None":
         return self._ffmpeg_path
 
     @property
-    def ffprobe_path(self) -> str:
+    def ffprobe_path(self) -> "str | None":
         return self._ffprobe_path
 
-    def get_paths(self) -> Tuple[str, str]:
+    def get_paths(self) -> "Tuple[str | None, str | None]":
         """Get FFmpeg and FFprobe paths as tuple (backward compatibility)."""
         return self._ffmpeg_path, self._ffprobe_path
 
@@ -245,7 +245,8 @@ class FFmpegRunner:
 
         return self.run_ffprobe(cmd)
 
-    def extract_audio(self, input_path: str, output_path: str = None) -> str:
+    def extract_audio(self, input_path: str,
+                      output_path: "str | None" = None) -> str:
         """Extract audio from video file."""
         if not output_path:
             output_path = self.create_temp_file('.wav')
@@ -285,7 +286,7 @@ class FFmpegRunner:
 
 
 # Convenience functions for backward compatibility
-def get_ffmpeg_paths() -> Tuple[str, str]:
+def get_ffmpeg_paths() -> "Tuple[str | None, str | None]":
     """Get FFmpeg and FFprobe paths (backward compatibility)."""
     config = FFmpegConfig()
     return config.get_paths()

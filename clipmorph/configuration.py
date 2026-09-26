@@ -13,6 +13,8 @@ import yaml
 
 from clipmorph.layout import normalize_layout
 from clipmorph.layout import resolve_layout_geometry
+from clipmorph.platforms import SUPPORTED_PLATFORMS
+from clipmorph.platforms import SUPPORTED_PLATFORMS_SET
 from clipmorph.layout import validate_layout
 
 
@@ -322,14 +324,14 @@ def validate_job_configuration(configuration: dict[str, Any]) -> None:
                                or any(not isinstance(tag, str) for tag in content["tags"])):
         raise ValueError("upload.content.tags must be a list of strings")
     platforms = check_object(upload.get("platforms", {}), "upload.platforms",
-                             {"include", "exclude", "youtube", "instagram", "tiktok", "twitter"})
+                             {"include", "exclude", *SUPPORTED_PLATFORMS})
     for key in ("include", "exclude"):
         values = platforms.get(key, [])
         if not isinstance(values, list) or any(
                 not isinstance(value, str) or value not in
-                {"youtube", "instagram", "tiktok", "twitter"} for value in values):
+                SUPPORTED_PLATFORMS_SET for value in values):
             raise ValueError(f"upload.platforms.{key} must contain supported platform names")
-    for platform in ("youtube", "instagram", "tiktok", "twitter"):
+    for platform in SUPPORTED_PLATFORMS:
         if platform in platforms and not isinstance(platforms[platform], dict):
             raise ValueError(f"upload.platforms.{platform} must be an object")
 

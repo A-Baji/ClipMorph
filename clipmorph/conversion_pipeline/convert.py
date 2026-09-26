@@ -232,7 +232,6 @@ class ConversionPipeline:
             logging.info("Extracting audio from video...")
             audio_path = self.ffmpeg_runner.extract_audio(self.input_path)
 
-            segments = []
             muted_audio_path = audio_path
             use_subtitles = False
 
@@ -311,7 +310,6 @@ class ConversionPipeline:
                     logging.warning(warning)
                     if self.strict:
                         raise
-                    segments = []
             else:
                 logging.info("Skipping transcription (conversion.subtitles.skip)")
 

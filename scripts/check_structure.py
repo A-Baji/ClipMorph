@@ -12,6 +12,8 @@ ALLOWED_ROOT_DIRS = {
     ".claude",
     ".github",
     ".git",
+    ".mypy_cache",
+    ".ruff_cache",
     ".venv",
     ".vscode",
     "build",

@@ -87,7 +87,7 @@ class EditingPipeline:
             }
             candidates = [Path("/System/Library/Fonts/Supplemental") / names[style]]
         elif system == "Linux":
-            names = {
+            filenames = {
                 (False, False): ("DejaVuSans.ttf", "LiberationSans-Regular.ttf"),
                 (True, False): ("DejaVuSans-Bold.ttf", "LiberationSans-Bold.ttf"),
                 (False, True): ("DejaVuSans-Oblique.ttf", "LiberationSans-Italic.ttf"),
@@ -99,7 +99,7 @@ class EditingPipeline:
                 Path("/usr/share/fonts/truetype/liberation2"),
                 Path("/usr/share/fonts/truetype/liberation"),
             )
-            candidates = [directory / name for directory in directories for name in names]
+            candidates = [directory / name for directory in directories for name in filenames]
         else:
             candidates = []
         return next((str(candidate) for candidate in candidates
@@ -164,7 +164,7 @@ class EditingPipeline:
                 crop_filter += f",scale={width}:{height}"
         else:
             width, height = source["width"], source["height"]
-        crop_filter += f",setsar=1[crop_layer]"
+        crop_filter += ",setsar=1[crop_layer]"
         filters.append(crop_filter)
 
         if composition_mode == "stacked":
@@ -237,7 +237,7 @@ class EditingPipeline:
             "width", first_width), stacked.get("dimensions", {}).get(
                 "height", first_height)
         padding = stacked.get("panel", {}).get("padding", {})
-        padding_x, padding_y = padding.get("left", 0), padding.get("top", 0)
+        padding_y = padding.get("top", 0)
         placement = stacked.get("placement", "center")
         _center_x, center_y = self._region_center(
             placement, width, height, stacked=True)
