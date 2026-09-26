@@ -7,9 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `clipmorph/platforms.py` as the single source of truth for the supported platform set, per-platform upload defaults, and `upload.platforms` include/exclude resolution; CLI, workflow, service, configuration, and web surfaces consume it.
+- Added `scripts/check_docs.py` and CI documentation health checks for broken relative links, encoding mojibake, and duplicated doc passages.
+- Added ruff (E9,F), typed mypy (0 issues across `clipmorph/`), and coverage reporting as CI gates, a `dev` package extra for the tooling, and CI runs on `dev` pushes.
+- Added the authentication setup guide `docs/AUTHENTICATION.md` with step-by-step credential generation for every provider section of `auth.yaml`.
+
 ### Changed
 
 - Resolve configuration sidecars by `general.source` instead of filename, allowing arbitrary `.yml`/`.yaml` names and distinct same-stem sources; duplicate sidecars for one source are rejected.
+- Rewrote the README feature and configuration sections to the 0.5.0 layered-configuration and checkpoint model, listing the full `job`/`layout` command families; dry-run wording now matches what the implementation validates (source selection and configuration).
+- Split `tests/test_cli.py` into focused modules named after the units they cover: `test_preflight.py`, `test_upload_platforms.py`, `test_oauth.py`, `test_service.py`, `test_job_manifest.py`, `test_transcription.py`, and `tests/test_platforms.py`.
+- Extracted upload attempt execution into `clipmorph/upload_attempts.py`; upload attempts now record real per-platform start/completion timestamps instead of backfilling them.
+- Documented the tagged GitHub repository as the current install channel for `clipmorph` and `clipmorph[web]`, noting PyPI publication as planned future work.
+- Removed `clipmorph/batch.py`: multi-source fan-out lives in `JobService.create_jobs`, and no documentation now claims BatchProcessor participates in job creation.
+
+### Fixed
+
+- Fixed audit-grade wheel builds, upload pipeline, job manifest, and FFmpeg helper type findings surfaced by mypy (83 flagged issues resolved across cli, service, web, and platform adapters); web routes validate that `configuration` and `patch` payloads are objects before applying them.
+- Repaired duplicated and interleaved corrupted passages in `docs/CONFIG_LAYERS.md`.
+- Reimplemented the empty-platform-include regression against the current `submit_upload` contract (upload fan-out boundary), replacing the stale expected-failure harness pinned to the pre-0.5.0 API; `quality/test_functional.py` follows the current CLI surface.
 
 ## [0.5.0] - 2026-09-26
 
