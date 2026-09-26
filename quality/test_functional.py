@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from clipmorph.cli import _apply_config_defaults, _load_config_data
+from clipmorph.configuration import merge_configuration
 from clipmorph.job import JobManifest, source_sha256
 from clipmorph.policy import validate_artifact
 
@@ -19,10 +19,15 @@ class FunctionalContractTests(unittest.TestCase):
         self.assertTrue(Path("clipmorph/workflow.py").exists())
 
     def test_config_precedence_contract(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "config.yaml"
-            path.write_text("general:\n  no_upload: true\n", encoding="utf-8")
-            self.assertEqual(_load_config_data(path)["general"]["no_upload"], True)
+        defaults = {
+            "general": {"no_confirm": False},
+            "conversion": {},
+            "upload": {"skip": False},
+        }
+        override = {"general": {"no_confirm": True}}
+        merged = merge_configuration(defaults, override)
+        self.assertTrue(merged["general"]["no_confirm"])
+        self.assertFalse(merged["upload"]["skip"])
 
     def test_platform_result_contract(self):
         with tempfile.TemporaryDirectory() as temp_dir:

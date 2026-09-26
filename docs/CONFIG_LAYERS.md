@@ -328,7 +328,6 @@ selected `layout_id` and fully materialized `layout` in the effective job.
   transcription uses `tiny`/`cpu`/`int8`, captions default to the overlay
   renderer, and unspecified styling delegates to pipeline defaults.
 - Section-level fallbacks (`conversion.subtitles.no_confirm` →
-   Section-level fallbacks (`conversion.subtitles.no_confirm` →
   `conversion.no_confirm` → `general.no_confirm`; `upload.no_confirm` →
   `general.no_confirm`; `conversion.subtitles.clean` → `conversion.clean` →
   `general.clean`) are resolved *after* the two sources are merged, against
@@ -465,14 +464,8 @@ configuration section; they are materialized at runtime inside the selected
 `conversion.layout.captions` renderer and persisted through the transcript edit
 session when reviewed.
 
-`clipmorph/batch.py` (`BatchProcessor`) will support multi-job creation by
-iterating root-level clips, applying per-job overrides, skipping invalid
-sources, and reusing its existing hashing/dedup and bounded concurrency
-behavior instead of being replaced outright.
-
 ## Web Job API
 
-and does not create a group manifest. Shared UI fields are copied into each
 `docs/CLI_WEB_PARITY.md` is authoritative for HTTP routes and request/response
 shapes. Single-source creation is `POST /api/v1/jobs`; multi-source creation is
 `POST /api/v1/jobs/bulk`, an ephemeral fan-out that creates independent jobs.

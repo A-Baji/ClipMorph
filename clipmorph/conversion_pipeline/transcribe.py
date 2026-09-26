@@ -341,7 +341,7 @@ class TranscriptionPipeline:
 
                 seg_out = {
                     "start": new_seg.get("start"),
-                    "end": new_seg.get("end") + actual_pad,
+                    "end": (new_seg.get("end") or 0) + actual_pad,
                     "text": final_text,
                     "speaker": new_seg.get("speaker"),
                     "words": new_seg.get("words"),

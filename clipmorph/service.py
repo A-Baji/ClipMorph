@@ -21,6 +21,8 @@ from clipmorph.job import checkpoint_configuration_hash
 from clipmorph.job import configuration_sha256
 from clipmorph.job import safe_error_message
 from clipmorph.job import source_sha256
+from clipmorph.platforms import enabled_platforms
+from clipmorph.platforms import SUPPORTED_PLATFORMS_SET
 
 
 def _stage_skipped(configuration: dict[str, Any], stage: str) -> bool:
@@ -410,14 +412,13 @@ class JobService:
                 manifest.checkpoints[stage]["configuration_hash"] = new_hashes[stage]
 
             changed = {stage for stage in old_hashes if old_hashes[stage] != new_hashes[stage]}
+            affected: tuple[str, ...] = ()
             if "transcript" in changed:
                 affected = ("transcript", "conversion", "upload")
             elif "conversion" in changed:
                 affected = ("conversion", "upload")
             elif "upload" in changed:
                 affected = ("upload",)
-            else:
-                affected = ()
             reason = {"code": "configuration_changed", "message": "Stage inputs changed"}
             for stage in affected:
                 if (manifest.checkpoints[stage]["status"] == "skipped"
@@ -518,7 +519,8 @@ class JobService:
             if checkpoint["status"] != "awaiting_review":
                 raise ValueError("upload checkpoint is not awaiting review")
             selected_artifact_id = artifact_id or manifest.current_artifact_id
-            artifact = manifest.artifacts.get(selected_artifact_id)
+            artifact = (manifest.artifacts.get(selected_artifact_id)
+                        if selected_artifact_id else None)
             if artifact is None:
                 raise ValueError("selected artifact is unavailable")
             is_historical = selected_artifact_id != manifest.current_artifact_id
@@ -535,12 +537,10 @@ class JobService:
                 configuration_snapshot if configuration_snapshot is not None
                 else manifest.configuration.get("upload", {}))
             platform_settings = upload_config.get("platforms", {})
-            include = platforms or platform_settings.get("include") or [
-                "youtube", "instagram", "tiktok", "twitter"]
-            exclude = set(platform_settings.get("exclude") or [])
-            selected = [str(platform).lower() for platform in include
-                        if str(platform).lower() not in exclude]
-            supported = {"youtube", "instagram", "tiktok", "twitter"}
+            include = platforms or platform_settings.get("include")
+            selected = enabled_platforms(
+                {**platform_settings, "include": include})
+            supported = SUPPORTED_PLATFORMS_SET
             if not selected or any(platform not in supported for platform in selected):
                 raise ValueError("upload platforms are empty or unsupported")
             if len(set(selected)) != len(selected):
@@ -548,7 +548,7 @@ class JobService:
 
             upload_hash = configuration_sha256(upload_config)
             now = datetime.now(timezone.utc).isoformat()
-            attempts = []
+            attempts: list[dict[str, Any]] = []
             for platform in selected:
                 attempt = {
                     "attempt_id": uuid.uuid4().hex,
@@ -586,33 +586,22 @@ class JobService:
     def _run_upload_attempts(self, job_id: str, attempt_ids: list[str],
                              artifact_path: str, upload_config: dict[str, Any],
                              platforms: list[str]) -> None:
+        from clipmorph.upload_attempts import execute_upload_pipeline
+        from clipmorph.upload_attempts import normalize_results
         try:
-            from clipmorph.upload_pipeline import UploadPipeline
-            pipeline = UploadPipeline(**{platform: True for platform in platforms})
-            content = upload_config.get("content", {})
-            options = {
-                "description": content.get("description", ""),
-                "tags": content.get("tags", []),
-            }
-            for platform, values in upload_config.get("platforms", {}).items():
-                if platform in platforms and isinstance(values, dict):
-                    options.update({f"{platform}_{key}": value
-                                    for key, value in values.items()})
-            results = pipeline.run(
-                artifact_path, content.get("title", ""), **options)
+            results = execute_upload_pipeline(
+                platforms, artifact_path, upload_config)
         except Exception as error:
-            results = {platform: {"success": False, "error": str(error)}
+            now = datetime.now(timezone.utc).isoformat()
+            results = {platform: {"success": False, "error": str(error),
+                                  "started_at": now, "completed_at": now}
                        for platform in platforms}
 
-        normalized_results = {
-            str(platform).lower().replace(" ", ""): result
-            for platform, result in results.items()
-        }
+        normalized_results = normalize_results(results)
         with self._lock:
             manifest = self.get_job(job_id)
             success_count = 0
             failure_count = 0
-            completed_at = datetime.now(timezone.utc).isoformat()
             for attempt_id in attempt_ids:
                 attempt = next((item for item in manifest.upload_attempts
                                 if item["attempt_id"] == attempt_id), None)
@@ -622,8 +611,10 @@ class JobService:
                 result = normalized_results.get(platform, {
                     "success": False, "error": "platform returned no result"})
                 success = bool(result.get("success"))
-                attempt["started_at"] = attempt["started_at"] or attempt["created_at"]
-                attempt["completed_at"] = completed_at
+                started_at = result.get("started_at") or attempt["started_at"]
+                attempt["started_at"] = started_at or attempt["created_at"]
+                attempt["completed_at"] = (result.get("completed_at")
+                                           or datetime.now(timezone.utc).isoformat())
                 attempt["status"] = "completed" if success else "failed"
                 attempt["result"] = {
                     "success": success,

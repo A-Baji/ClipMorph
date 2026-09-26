@@ -26,6 +26,10 @@ Run these from the repository root with Python 3.11 or newer:
 ```text
 python -m unittest discover -s tests -v
 python -m compileall -q clipmorph
+python scripts/check_structure.py
+python scripts/check_docs.py
+python -m ruff check --select E9,F clipmorph scripts tests quality  # pip install -e ".[dev]"
+python -m mypy --ignore-missing-imports clipmorph                   # pip install -e ".[dev]"
 python -m clipmorph --help
 python -m clipmorph init --config-path <temporary-path>/clipmorph.yaml
 python -m pip wheel . --no-deps --no-build-isolation --wheel-dir <temporary-path>/wheel

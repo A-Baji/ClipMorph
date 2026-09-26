@@ -384,7 +384,7 @@ class TwitterUploadPipeline(BaseUploadPipeline):
                 # Complete progress bar
                 self._complete_progress_bar(True)
 
-            except Exception as e:
+            except Exception:
                 self._complete_progress_bar(False)
                 raise
 

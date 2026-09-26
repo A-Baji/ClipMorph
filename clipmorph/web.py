@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import time
 import uuid
+from typing import NoReturn
 
 from clipmorph import __version__
 from clipmorph.auth import credential_status, load_auth_config, persist_auth_credentials
@@ -21,9 +22,9 @@ try:
     from fastapi.exceptions import RequestValidationError
     from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 except ImportError:
-    FastAPI = File = HTTPException = UploadFile = None
-    RequestValidationError = None
-    FileResponse = JSONResponse = StreamingResponse = None
+    FastAPI = File = HTTPException = UploadFile = None  # type: ignore[assignment, misc]
+    RequestValidationError = None  # type: ignore[assignment, misc]
+    FileResponse = JSONResponse = StreamingResponse = None  # type: ignore[assignment, misc]
 
 
 SUPPORTED_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm"}
@@ -61,11 +62,11 @@ def create_app(data_dir: str | Path | None = None,
     def output_root() -> Path:
         return resolve_output_dir(app_config()["output_dir"], root).resolve()
 
-    def fail(status: int, code: str, message: str):
+    def fail(status: int, code: str, message: str) -> NoReturn:
         raise HTTPException(status_code=status,
                             detail={"code": code, "message": message})
 
-    def service_failure(error: Exception):
+    def service_failure(error: Exception) -> NoReturn:
         message = str(error)
         conflict_terms = ("stale", "conflict", "immutable", "reopen", "review",
                           "artifact", "checkpoint", "source identity")
@@ -112,8 +113,11 @@ def create_app(data_dir: str | Path | None = None,
 
     @app.put("/api/v1/configuration")
     def put_configuration(payload: dict):
+        configuration = payload.get("configuration")
+        if not isinstance(configuration, dict):
+            fail(422, "invalid_configuration", "configuration must be an object")
         try:
-            save_app_configuration(app_path, payload.get("configuration"))
+            save_app_configuration(app_path, configuration)
         except (TypeError, ValueError) as error:
             fail(422, "invalid_configuration", str(error))
         return {"saved": True, "configuration": app_config()}
@@ -305,9 +309,12 @@ def create_app(data_dir: str | Path | None = None,
 
     @app.patch("/api/v1/jobs/{job_id}/configuration")
     def patch_job_configuration(job_id: str, payload: dict):
+        patch = payload.get("patch")
+        if not isinstance(patch, dict):
+            fail(422, "invalid_patch", "patch must be an object")
         try:
             result = service.update_job_configuration(
-                job_id, payload.get("patch"),
+                job_id, patch,
                 payload.get("expected_configuration_hash", ""),
                 bool(payload.get("reopen", False)))
         except FileNotFoundError:
@@ -469,7 +476,6 @@ def create_app(data_dir: str | Path | None = None,
             fail(422, "revision_required", "expected_revision is required")
         try:
             manifest = service.get_job(job_id)
-            checkpoint = manifest.checkpoints[stage]
             manifest.transition_checkpoint(stage, "pending", revision, service.jobs_dir)
             from clipmorph.workflow import execute_job
             service.resume_job(job_id, lambda job, token: execute_job(

@@ -143,7 +143,7 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
             if self.credentials.refresh_token:
                 try:
                     self.credentials.refresh(Request())
-                except Exception as e:
+                except Exception:
                     # If refresh fails, generate a new token
                     if self.progress_bar:
                         self.progress_bar.write(
@@ -370,7 +370,7 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
             self,
             video_path: str,
             title: str,
-            description: str = None,
+            description: Optional[str] = None,
             keywords: Optional[List[str]] = None,
             category: str = "20",  # Gaming
             privacy_status: str = "public"):
@@ -411,10 +411,9 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
                 video_size_mb = file_size / (1024 * 1024)
 
                 # Prepare upload request
-                request = self._prepare_upload_request(video_path, title,
-                                                       description, category,
-                                                       keywords,
-                                                       privacy_status)
+                request = self._prepare_upload_request(
+                    video_path, title, description or "", category,
+                    keywords, privacy_status)
 
                 # Execute upload
                 video_id = self._execute_resumable_upload(
@@ -423,7 +422,7 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
                 # Complete progress bar
                 self._complete_progress_bar(True)
 
-            except Exception as e:
+            except Exception:
                 self._complete_progress_bar(False)
                 raise
 

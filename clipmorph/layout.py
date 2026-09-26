@@ -11,7 +11,7 @@ REGIONS = {"top", "center", "bottom"}
 TYPOGRAPHY_KEYS = {
     "size", "color", "font_file", "outline_color", "bold", "italic", "underline"
 }
-CAPTION_DEFAULT_TYPOGRAPHY = {
+CAPTION_DEFAULT_TYPOGRAPHY: dict[str, Any] = {
     "size": 64,
     "color": None,
     "font_file": None,

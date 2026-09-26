@@ -25,6 +25,11 @@ web = [
     "python-multipart>=0.0.20",
     "httpx2>=2.13.1",
 ]
+dev = [
+    "ruff>=0.16.0",
+    "mypy>=2.3.0",
+    "coverage>=7.16.0",
+]
 
 [tool.setuptools]
 include-package-data = true
@@ -47,3 +52,27 @@ clipmorph = [
 [project.scripts]
 clipmorph = "clipmorph.__main__:main"
 clipmorph-ui = "clipmorph.ui_launcher:main"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+# Start non-breaking while existing code is brought forward; broaden later.
+select = ["E9", "F"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["clipmorph"]
+ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["clipmorph"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+]
