@@ -1,532 +1,413 @@
-# Handles CLI argument parsing, user prompts, and workflow orchestration
+"""Command-line parsing and shared service command handlers."""
+
+from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 import json
 from pathlib import Path
 import shutil
 import sys
+from typing import Any
+import uuid
+import webbrowser
 
 import yaml
 
-from clipmorph.auth import create_auth_template
-from clipmorph.job import default_data_dir, resolve_output_dir
-
-SUPPORTED_PLATFORMS = {'youtube', 'instagram', 'tiktok', 'twitter'}
-CONFIG_SECTIONS = {'general', 'conversion', 'layout', 'upload', 'content', 'platforms'}
+from clipmorph.job import default_data_dir
 
 
-def build_platform_default_config():
-    """Return the canonical platform defaults shared by runtime logic and examples."""
+SUPPORTED_PLATFORMS = {"youtube", "instagram", "tiktok", "twitter"}
+
+
+def build_platform_default_config() -> dict[str, dict[str, Any]]:
     return {
-        'youtube': {
-            'category': '22',
-            'privacy_status': 'public',
-        },
-        'instagram': {
-            'share_to_feed': True,
-            'thumb_offset': 0,
-        },
-        'tiktok': {
-            'privacy_level': 'PUBLIC_TO_EVERYONE',
-        },
-        'twitter': {},
+        "youtube": {"category": "22", "privacy_status": "public"},
+        "instagram": {"share_to_feed": True, "thumb_offset": 0},
+        "tiktok": {"privacy_level": "PUBLIC_TO_EVERYONE"},
+        "twitter": {},
     }
 
 
 def summarize_runtime_configuration(runtime_values=None):
-    """Merge runtime overrides with canonical defaults for display and dry-run output."""
     defaults = build_platform_default_config()
-    runtime_values = runtime_values or {}
-
-    for key, value in runtime_values.items():
-        if not isinstance(key, str):
-            continue
-        if key.startswith('youtube_'):
-            defaults['youtube'][key[len('youtube_'):]] = value
-        elif key.startswith('instagram_'):
-            defaults['instagram'][key[len('instagram_'):]] = value
-        elif key.startswith('tiktok_'):
-            defaults['tiktok'][key[len('tiktok_'):]] = value
-        elif key.startswith('twitter_'):
-            defaults.setdefault('twitter', {})[key[len('twitter_'):]] = value
-
+    for key, value in (runtime_values or {}).items():
+        for platform in defaults:
+            prefix = f"{platform}_"
+            if isinstance(key, str) and key.startswith(prefix):
+                defaults[platform][key[len(prefix):]] = value
     return defaults
 
 
-def _load_config_data(config_path):
-    """Load and validate the supported YAML/JSON configuration shape."""
-    if not config_path:
-        return {}
-
-    path = Path(config_path)
-    if not path.exists():
-        raise ValueError(f"Configuration file does not exist: {path}")
-
-    try:
-        with open(path, 'r', encoding='utf-8') as config_file:
-            data = (yaml.safe_load(config_file)
-                    if path.suffix.lower() in {'.yml', '.yaml'} else
-                    json.load(config_file))
-    except (OSError, json.JSONDecodeError, yaml.YAMLError) as error:
-        raise ValueError(f"Unable to read configuration file {path}: {error}")
-
-    if data is None:
-        return {}
-    if not isinstance(data, dict):
-        raise ValueError("Configuration root must be an object")
-
-    unknown_sections = set(data) - CONFIG_SECTIONS
-    if unknown_sections:
-        raise ValueError(
-            f"Unknown configuration section(s): {', '.join(sorted(unknown_sections))}"
-        )
-    return data
-
-
-def _flatten_config_values(config):
-    """Convert the documented nested configuration into CLI destinations."""
-    values = {}
-    values.update(config.get('general', {}))
-    values.update(config.get('upload', {}))
-    values.update(config.get('content', {}))
-    if 'layout' in config:
-        values['layout'] = config['layout']
-
-    conversion = config.get('conversion', {})
-    if conversion:
-        values.update({key: value for key, value in conversion.items()
-                       if key != 'camera'})
-        camera = conversion.get('camera', {})
-        for key in ('x', 'y', 'width', 'height'):
-            if key in camera:
-                values[f'cam_{key}'] = camera[key]
-        if 'no_cam' in conversion:
-            values['include_cam'] = not conversion['no_cam']
-
-    platforms = config.get('platforms', {})
-    if not isinstance(platforms, dict):
-        raise ValueError("Configuration 'platforms' must be an object")
-    unknown_platforms = set(platforms) - SUPPORTED_PLATFORMS
-    if unknown_platforms:
-        raise ValueError(
-            f"Unknown platform(s): {', '.join(sorted(unknown_platforms))}")
-    for platform, params in platforms.items():
-        if not isinstance(params, dict):
-            raise ValueError(f"Configuration for {platform} must be an object")
-        for param, value in params.items():
-            values[f'{platform}_{param}'] = value
-
-    return values
-
-
-def _apply_config_defaults(args):
-    """Apply config values only where the corresponding CLI option is absent."""
-    if not getattr(args, 'config', None):
-        default_config = default_data_dir() / "clipmorph.yaml"
-        if default_config.exists():
-            args.config = str(default_config)
-
-    config_values = _flatten_config_values(_load_config_data(
-        getattr(args, 'config', None)))
-    for key, value in config_values.items():
-        if not hasattr(args, key):
-            setattr(args, key, value)
-
-    defaults = {
-        'data_dir': None,
-        'layout': None,
-        'no_confirm': False,
-        'clean': False,
-        'no_conversion': False,
-        'dry_run': False,
-        'strict': False,
-        'resume': None,
-        'include_cam': True,
-        'cam_x': 1420,
-        'cam_y': 790,
-        'cam_width': 480,
-        'cam_height': 270,
-        'output_dir': None,
-        'no_subs': False,
-        'reviewed_transcript_path': None,
-        'no_upload': False,
-        'upload_to': None,
-        'skip': None,
-        'title': None,
-        'description': None,
-        'tags': None,
-        'platform_overrides': None,
-    }
-    for key, value in defaults.items():
-        if not hasattr(args, key):
-            setattr(args, key, value)
-
-    args.output_dir = str(resolve_output_dir(args.output_dir, args.data_dir))
-
-    return args
-
-
-def _rotate_backup_files(path: Path) -> Path:
-    """Shift older backups to numbered names and leave the newest slot free."""
-    backup_path = path.with_suffix(path.suffix + ".backup")
-    highest_index = 0
-    while backup_path.parent.joinpath(f"{backup_path.name}{highest_index + 1}").exists():
-        highest_index += 1
-
-    for index in range(highest_index, 0, -1):
-        source = backup_path.with_name(f"{backup_path.name}{index}")
-        target = backup_path.with_name(f"{backup_path.name}{index + 1}")
-        if source.exists():
-            source.rename(target)
-
-    if backup_path.exists():
-        backup_path.rename(backup_path.with_name(f"{backup_path.name}1"))
-    return backup_path
-
-
-def create_config_template(output_path=None):
-    """Create a template YAML configuration file."""
-    platform_defaults = build_platform_default_config()
-    template = {
-        "general": {
-            "no_confirm":
-            False,  # Bypass subtitles and upload confirmation prompt
-            "clean": False,  # Delete output video after upload
-            "no_conversion":
-            False  # Skip conversion and upload input video directly
-        },
-        "conversion": {
-            "no_cam": False,  # Exclude the camera feed from the output
-            "camera": {
-                "x": 20,  # Top left x coordinate of camera feed
-                "y": 20,  # Top left y coordinate of camera feed
-                "width": 320,  # Width in pixels of camera feed
-                "height": 240  # Height in pixels of camera feed
-            },
-            "output_dir":
-            "output",  # Custom output directory for processed videos
-            "no_subs": False,  # Skip transcription and subtitle generation
-            "transcription_language": "en",  # Whisper language code or auto
-            "transcription_model": "large-v3",  # Whisper model size
-            "transcription_device": "auto",  # auto, cpu, cuda, or mps
-            "transcription_compute_type": "float16"  # float16/int8/float32 for runtime compatibility
-        },
-        "upload": {
-            "no_upload": False,  # Skip all uploads
-            "upload_to": [],  # List of platforms to upload to (empty = all)
-            "skip": []  # List of platforms to skip
-        },
-        "content": {
-            "title": "",  # Title/caption for the content
-            "description": "",  # Description for the content
-            "tags": []  # List of tags/keywords
-        },
-        "platforms": platform_defaults,
-    }
-
-    # If no output path specified, use the app data directory.
-    if not output_path:
-        output_path = default_data_dir() / "clipmorph.yaml"
-    else:
-        output_path = Path(output_path)
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Check if file already exists
-    if output_path.exists():
-        backup_path = _rotate_backup_files(output_path)
-        shutil.copy2(output_path, backup_path)
-        print(f"Existing config file backed up to: {backup_path}")
-
-    # Write the template with comments preserved
-    with open(output_path, 'w') as f:
-        yaml.dump(template, f, sort_keys=False, default_flow_style=False)
-        print(f"Created config template at: {output_path}")
-
-
-def parse_args_with_parser():
-    """Parse arguments and return both args and parser for automatic categorization."""
-    argv = sys.argv[1:]
-    if argv and argv[0] == 'init':
-        parser = _create_parser(init_mode=True)
-        args = parser.parse_args(argv[1:])
-        output_path = getattr(args, 'config_path', None)
-        config_path = Path(output_path) if output_path else default_data_dir() / "clipmorph.yaml"
-        create_config_template(config_path)
-        create_auth_template(config_path.parent)
-        return None, parser
-
-    parser = _create_parser()
-    args = parser.parse_args(argv)
-
-    # Validate required args for normal operation
-    args = _apply_config_defaults(args)
-
-    if not getattr(args, 'input_path', None):
-        parser.error("input_path is required unless the 'init' subcommand is used")
-
-    # Title is only required if uploading
-    if not args.no_upload and not args.title:
-        parser.error("--title is required unless --no-upload is specified")
-
-    # Process platform overrides
-    args.platform_overrides = _process_platform_overrides(args)
-
-    # Process tags
-    if args.tags:
-        args.tags = [tag.strip() for tag in args.tags.split(',')]
-
-    return args, parser
-
-
-def _create_parser(init_mode: bool = False):
-    """Create and configure the argument parser."""
+def _build_command_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Convert and upload a video to short-form platforms.",
-        argument_default=argparse.SUPPRESS)
+        prog="clipmorph", description="Create and manage ClipMorph jobs.")
+    parser.add_argument("--data-dir", type=Path, default=default_data_dir())
+    parser.add_argument("--app-config", type=Path)
+    commands = parser.add_subparsers(dest="command", required=True)
 
-    if init_mode:
-        parser.add_argument(
-            "--config-path",
-            type=str,
-            help="Custom path for the generated config file when using init.")
-        return parser
+    init = commands.add_parser("init", help="Create app.yml and auth.yaml templates.")
+    init.add_argument("--config-path", type=Path)
 
-    # Input and basic options (neither conversion nor upload specific)
-    parser.add_argument("input_path",
-                        nargs='?',
-                        help="Path to the input video file.")
-    parser.add_argument(
-        "--no-confirm",
-        "-y",
-        action="store_true",
-        help="Bypass subtitles and upload confirmation prompt.")
-    parser.add_argument("--clean",
-                        "-c",
-                        action="store_true",
-                        help="Delete output video after upload.")
-    parser.add_argument(
-        "--no-conversion",
-        action="store_true",
-        help="Skip conversion and upload input video directly.")
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Validate the planned run without converting or uploading.")
-    parser.add_argument(
-        "--strict",
-        action="store_true",
-        help="Fail when optional transcription or subtitle processing fails.")
-    parser.add_argument(
-        "--resume",
-        metavar="JOB_ID",
-        help="Resume a previous job manifest by ID.")
-    parser.add_argument(
-        "--data-dir",
-        type=str,
-        help="Override the platform-specific ClipMorph data directory.")
+    web = commands.add_parser("web", help="Start the local API and dashboard.")
+    web.add_argument("--host", default="127.0.0.1")
+    web.add_argument("--port", type=int, default=8000)
 
-    # Conversion pipeline options
-    conversion_group = parser.add_argument_group('Conversion Options')
-    conversion_group.add_argument(
-        "--no-cam",
-        dest="include_cam",
-        action="store_false",
-        help="Exclude the camera feed from the output.")
-    conversion_group.add_argument("--cam-x",
-                                  type=int,
-                                  help="Top left x coordinate of camera feed.")
-    conversion_group.add_argument("--cam-y",
-                                  type=int,
-                                  help="Top left y coordinate of camera feed.")
-    conversion_group.add_argument("--cam-width",
-                                  type=int,
-                                  help="Width in pixels of camera feed.")
-    conversion_group.add_argument("--cam-height",
-                                  type=int,
-                                  help="Height in pixels of camera feed.")
-    conversion_group.add_argument(
-        "--output-dir",
-        type=str,
-        help="Custom output directory for the processed video.")
-    conversion_group.add_argument(
-        "--no-subs",
-        action="store_true",
-        help="Skip transcription and subtitle generation entirely.")
-    conversion_group.add_argument(
-        "--reviewed-transcript",
-        dest="reviewed_transcript_path",
-        type=str,
-        help="Render a saved transcript edit session without retranscribing.")
-    conversion_group.add_argument(
-        "--transcription-language",
-        default="en",
-        help="Whisper language code to use for transcription, or 'auto'.")
-    conversion_group.add_argument(
-        "--transcription-model",
-        default="large-v3",
-        help="Whisper model to use: tiny, base, small, medium, large, large-v3.")
-    conversion_group.add_argument(
-        "--transcription-device",
-        default="auto",
-        choices=["auto", "cpu", "cuda", "mps"],
-        help="Transcription device to prefer for Whisper inference.")
-    conversion_group.add_argument(
-        "--transcription-compute-type",
-        default="float16",
-        choices=["float16", "float32", "int8"],
-        help="Runtime compute type to use when the selected model supports it.")
+    auth = commands.add_parser("auth", help="Manage platform credentials.")
+    auth_commands = auth.add_subparsers(dest="auth_command", required=True)
+    auth_commands.add_parser("status")
+    auth_set = auth_commands.add_parser("set")
+    auth_set.add_argument("platform")
+    auth_commands.add_parser("twitter")
 
-    # Upload control options
-    upload_group = parser.add_argument_group('Upload Control')
-    upload_group.add_argument("--no-upload",
-                              action="store_true",
-                              help="Skip all uploads.")
-    upload_group.add_argument(
-        "--upload-to",
-        nargs="+",
-        choices=["youtube", "instagram", "tiktok", "twitter"],
-        help="Only upload to specified platforms.")
-    upload_group.add_argument(
-        "--skip",
-        nargs="+",
-        choices=["youtube", "instagram", "tiktok", "twitter"],
-        help="Skip specified platforms.")
+    job = commands.add_parser("job", help="Create and manage per-source jobs.")
+    job_commands = job.add_subparsers(dest="job_command", required=True)
+    create = job_commands.add_parser("create")
+    create.add_argument("source", type=Path)
+    create.add_argument("--job-configs", type=Path)
+    create.add_argument("--config-dir", type=Path)
+    create.add_argument("--dry-run", action="store_true")
+    create.add_argument("--yes", action="store_true")
+    listing = job_commands.add_parser("list")
+    listing.add_argument("--status")
+    get = job_commands.add_parser("get")
+    get.add_argument("job_id")
+    update = job_commands.add_parser("update")
+    update.add_argument("job_id")
+    update.add_argument("--patch", type=Path, required=True)
+    update.add_argument("--reopen", action="store_true")
+    delete = job_commands.add_parser("delete")
+    delete.add_argument("job_id")
+    delete.add_argument("--yes", action="store_true")
+    resume = job_commands.add_parser("resume")
+    resume.add_argument("job_id")
+    cancel = job_commands.add_parser("cancel")
+    cancel.add_argument("job_id")
+    cancel.add_argument("--yes", action="store_true")
+    review = job_commands.add_parser("review")
+    review.add_argument("job_id")
+    review.add_argument("checkpoint", choices=["transcript", "conversion", "upload"])
+    review.add_argument("--edits", type=Path)
+    review.add_argument("--accept", action="store_true")
+    review.add_argument("--reopen", action="store_true")
+    render = job_commands.add_parser("render")
+    render.add_argument("job_id")
+    upload = job_commands.add_parser("upload")
+    upload.add_argument("upload_args", nargs="+")
+    upload.add_argument("--platform", action="append")
+    upload.add_argument("--attempt-id")
+    upload.add_argument("--artifact-id")
+    upload.add_argument("--confirm-historical-artifact", action="store_true")
 
-    # Common upload parameters
-    content_group = parser.add_argument_group('Content Options')
-    content_group.add_argument(
-        "--title",
-        type=str,  # Removed required=True
-        help="Title/caption for the content (required unless --no-upload).")
-    content_group.add_argument("--description",
-                               type=str,
-                               help="Description for the content.")
-    content_group.add_argument("--tags",
-                               type=str,
-                               help="Comma-separated tags/keywords.")
+    artifacts = job_commands.add_parser("artifacts")
+    artifact_commands = artifacts.add_subparsers(dest="artifact_command", required=True)
+    artifact_list = artifact_commands.add_parser("list")
+    artifact_list.add_argument("job_id")
+    for name in ("preview", "download", "rename", "delete"):
+        command = artifact_commands.add_parser(name)
+        command.add_argument("job_id")
+        command.add_argument("artifact_id")
+        if name == "download":
+            command.add_argument("--destination", type=Path, required=True)
+        elif name == "rename":
+            command.add_argument("--name", required=True)
+        elif name == "delete":
+            command.add_argument("--yes", action="store_true")
 
-    # Platform overrides
-    override_group = parser.add_argument_group('Platform Overrides')
-    override_group.add_argument(
-        "--config",
-        type=str,
-        help="Path to YAML/JSON config file with platform overrides.")
-    override_group.add_argument(
-        "--platform-overrides",
-        type=str,
-        help="JSON string with platform-specific overrides.")
-
+    layout = commands.add_parser("layout", help="Manage the global layout registry.")
+    layout_commands = layout.add_subparsers(dest="layout_command", required=True)
+    layout_commands.add_parser("list")
+    layout_create = layout_commands.add_parser("create")
+    layout_create.add_argument("configuration", type=Path)
+    layout_get = layout_commands.add_parser("get")
+    layout_get.add_argument("layout_id")
+    layout_delete = layout_commands.add_parser("delete")
+    layout_delete.add_argument("layout_id")
+    layout_delete.add_argument("--yes", action="store_true")
     return parser
 
 
-def parse_args():
-    """Parse command line arguments."""
-    argv = sys.argv[1:]
-    if argv and argv[0] == 'init':
-        parser = _create_parser(init_mode=True)
-        args = parser.parse_args(argv[1:])
-        output_path = getattr(args, 'config_path', None)
-        config_path = Path(output_path) if output_path else default_data_dir() / "clipmorph.yaml"
-        create_config_template(config_path)
-        create_auth_template(config_path.parent)
-        return None
-
-    parser = _create_parser()
-    args = parser.parse_args(argv)
-
-    # Validate required args for normal operation
-    args = _apply_config_defaults(args)
-
-    if not getattr(args, 'input_path', None):
-        parser.error("input_path is required unless the 'init' subcommand is used")
-
-    # Title is only required if uploading
-    if not args.no_upload and not args.title:
-        parser.error("--title is required unless --no-upload is specified")
-
-    # Process platform overrides
-    args.platform_overrides = _process_platform_overrides(args)
-
-    # Process tags
-    if args.tags:
-        args.tags = [tag.strip() for tag in args.tags.split(',')]
-
-    return args
+def _read_structured_file(path: Path) -> dict[str, Any]:
+    try:
+        text = path.read_text(encoding="utf-8")
+        value = yaml.safe_load(text) if path.suffix.lower() in {".yaml", ".yml"} else json.loads(text)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, yaml.YAMLError) as error:
+        raise ValueError(f"Unable to read {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} must contain an object")
+    return value
 
 
-def separate_args_by_category(args, parser):
-    """
-    Automatically separate arguments into conversion and upload categories
-    based on their argument group assignments.
-    """
-    # Get argument groups and their arguments
-    conversion_args = set()
-    upload_args = set()
-
-    for group in parser._action_groups:
-        group_title = group.title
-        if 'Conversion' in group_title:
-            # Add all arguments from conversion group
-            for action in group._group_actions:
-                # Use dest attribute which is the actual argument name stored in args
-                if action.dest and action.dest != 'help':
-                    conversion_args.add(action.dest)
-        elif group_title in [
-                'Upload Control', 'Content Options', 'Platform Overrides'
-        ]:
-            # Add all arguments from upload-related groups
-            for action in group._group_actions:
-                # Use dest attribute which is the actual argument name stored in args
-                if action.dest and action.dest != 'help':
-                    upload_args.add(action.dest)
-
-    # Special handling for positional arguments and main control args
-    main_control_args = {
-        'input_path', 'no_confirm', 'clean', 'no_conversion', 'no_upload',
-        'upload_to', 'skip'
-    }
-    conversion_args.add('input_path')  # input_path goes to conversion
-    conversion_args.add('layout')
-
-    # Separate the actual argument values
-    args_dict = vars(args)
-    conversion_dict = {}
-    upload_dict = {}
-
-    for key, value in args_dict.items():
-        if key in conversion_args:
-            conversion_dict[key] = value
-        elif key in upload_args:
-            upload_dict[key] = value
-        # Main control args are handled separately in main()
-
-    return conversion_dict, upload_dict
+def _print_json(value: Any) -> None:
+    print(json.dumps(value, indent=2, default=str))
 
 
-def _process_platform_overrides(args):
-    """Process platform overrides from config file or JSON string."""
-    overrides = {}
+def run_cli(argv: list[str] | None = None) -> int:
+    """Execute one public command, returning the documented process status."""
+    import getpass
 
-    config_data = _load_config_data(getattr(args, 'config', None))
-    if 'platforms' in config_data:
-        overrides.update(config_data['platforms'])
+    from clipmorph.auth import AUTH_ENVIRONMENT_KEYS
+    from clipmorph.auth import create_auth_template
+    from clipmorph.auth import credential_status
+    from clipmorph.auth import persist_auth_credentials
+    from clipmorph.configuration import DEFAULT_APP_CONFIGURATION
+    from clipmorph.configuration import load_app_configuration
+    from clipmorph.configuration import load_job_records
+    from clipmorph.configuration import save_app_configuration
+    from clipmorph.job import JobManifest
+    from clipmorph.service import JobService
 
-    # Load from JSON string if provided (takes precedence over config file)
-    if hasattr(args, 'platform_overrides') and args.platform_overrides:
+    args = _build_command_parser().parse_args(argv)
+    data_dir = args.data_dir
+    app_config_path = args.app_config or data_dir / "app.yml"
+    try:
+        if args.command == "init":
+            target = args.config_path or app_config_path
+            if not target.exists():
+                save_app_configuration(target, DEFAULT_APP_CONFIGURATION)
+            create_auth_template(target.parent)
+            print(f"Initialized {target}")
+            return 0
+
+        if args.command == "web":
+            import uvicorn
+            from clipmorph.web import create_app
+            uvicorn.run(create_app(data_dir, app_config_path),
+                        host=args.host, port=args.port)
+            return 0
+
+        if args.command == "auth":
+            if args.auth_command == "status":
+                _print_json(credential_status())
+                return 0
+            if args.auth_command == "twitter":
+                from clipmorph.twitter_auth import authorize_twitter
+                print(f"Twitter OAuth2 credentials saved to {authorize_twitter(data_dir)}")
+                return 0
+            fields = AUTH_ENVIRONMENT_KEYS.get(args.platform)
+            if fields is None:
+                raise ValueError(f"Unsupported auth platform: {args.platform}")
+            values = {field: value for field in fields
+                      if (value := getpass.getpass(f"{args.platform} {field}: "))}
+            if not values:
+                raise ValueError("No credential values were entered")
+            persist_auth_credentials(args.platform, values, data_dir)
+            print(f"Updated {args.platform} credentials")
+            return 0
+
+        if args.command == "layout":
+            configuration = load_app_configuration(app_config_path)
+            layouts = configuration["layouts"]
+            if args.layout_command == "list":
+                _print_json(layouts)
+                return 0
+            if args.layout_command == "create":
+                value = _read_structured_file(args.configuration)
+                from clipmorph.layout import validate_layout
+                name, layout_value = value.get("name"), value.get("layout")
+                if not isinstance(name, str) or not name.strip() or not isinstance(layout_value, dict):
+                    raise ValueError("layout config requires name and layout object")
+                validate_layout(layout_value)
+                record = {"id": uuid.uuid4().hex, "name": name.strip(),
+                          "layout": layout_value}
+                configuration["layouts"] = [*layouts, record]
+                save_app_configuration(app_config_path, configuration)
+                _print_json(record)
+                return 0
+            if args.layout_command == "get":
+                record = next((item for item in layouts if item["id"] == args.layout_id), None)
+                if record is None:
+                    raise FileNotFoundError("layout not found")
+                _print_json(record)
+                return 0
+            if not args.yes:
+                raise ValueError("layout delete requires --yes")
+            remaining = [item for item in layouts if item["id"] != args.layout_id]
+            if len(remaining) == len(layouts):
+                raise FileNotFoundError("layout not found")
+            configuration["layouts"] = remaining
+            save_app_configuration(app_config_path, configuration)
+            return 0
+
+        service = JobService(data_dir, app_config_path=app_config_path)
         try:
-            json_overrides = json.loads(args.platform_overrides)
-            overrides.update(json_overrides)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON in --platform-overrides: {e}")
-
-    # Flatten the nested structure to the {platform}_{parameter} format expected by upload pipeline
-    flattened = {}
-    for platform, params in overrides.items():
-        if isinstance(params, dict):
-            for param, value in params.items():
-                flattened[f"{platform}_{param}"] = value
-
-    return flattened
-
-    return flattened
+            if args.command != "job":
+                raise ValueError("unsupported command")
+            if args.job_command == "create":
+                app_configuration = load_app_configuration(app_config_path)
+                source_root = Path(app_configuration["source_dir"])
+                if not source_root.is_absolute():
+                    source_root = app_config_path.parent / source_root
+                if args.source.is_dir():
+                    if args.source.resolve() != source_root.resolve():
+                        raise ValueError("source directory must match app.yml source_dir")
+                    source_names = None
+                else:
+                    source_names = [args.source.name]
+                records = load_job_records(args.job_configs) if args.job_configs else []
+                runner = None
+                if not args.dry_run:
+                    from clipmorph.workflow import execute_job
+                    runner = lambda job, token: execute_job(
+                        job, token, service.jobs_dir, service.app_config_path)
+                result = service.create_jobs(
+                    source_names=source_names, job_configs=records,
+                    config_dir=args.config_dir, runner=runner, dry_run=args.dry_run)
+                _print_json(result)
+                return 1 if result["failed"] else 0
+            if args.job_command == "list":
+                jobs = service.list_jobs()
+                if args.status:
+                    jobs = [item for item in jobs if item.status == args.status]
+                _print_json([asdict(item) for item in jobs])
+                return 0
+            if args.job_command == "get":
+                _print_json(asdict(service.get_job(args.job_id)))
+                return 0
+            if args.job_command == "update":
+                manifest = service.get_job(args.job_id)
+                updated = service.update_job_configuration(
+                    args.job_id, _read_structured_file(args.patch),
+                    manifest.current_configuration_hash, args.reopen)
+                _print_json(asdict(updated))
+                return 0
+            if args.job_command == "delete":
+                if not args.yes:
+                    raise ValueError("job delete requires --yes")
+                manifest = service.get_job(args.job_id)
+                from send2trash import send2trash
+                job_dir = service.jobs_dir / args.job_id
+                if job_dir.exists():
+                    send2trash(str(job_dir))
+                output_dir = Path(load_app_configuration(app_config_path)["output_dir"])
+                if not output_dir.is_absolute():
+                    output_dir = app_config_path.parent / output_dir
+                output_job = output_dir / args.job_id
+                if output_job.exists():
+                    send2trash(str(output_job))
+                print(manifest.job_id)
+                return 0
+            if args.job_command == "cancel":
+                if not args.yes:
+                    raise ValueError("job cancel requires --yes")
+                _print_json(asdict(service.cancel_job(args.job_id)))
+                return 0
+            if args.job_command == "resume":
+                from clipmorph.workflow import execute_job
+                service.resume_job(args.job_id, lambda job, token: execute_job(
+                    job, token, service.jobs_dir, service.app_config_path))
+                return 0
+            if args.job_command == "review":
+                manifest = service.get_job(args.job_id)
+                if args.edits:
+                    edits = _read_structured_file(args.edits)
+                    if args.checkpoint == "transcript":
+                        active_revision = (manifest.active_transcript or {}).get("revision", 0)
+                        service.save_transcript_session(
+                            args.job_id, edits, active_revision,
+                            manifest.checkpoints["transcript"]["revision"], args.reopen)
+                    elif args.checkpoint == "upload":
+                        upload_draft = edits.get("upload", edits)
+                        service.update_upload_draft(
+                            args.job_id, upload_draft,
+                            manifest.checkpoints["upload"]["revision"], args.reopen)
+                    elif args.checkpoint == "conversion":
+                        patch = edits.get("patch", edits)
+                        service.update_job_configuration(
+                            args.job_id, patch,
+                            manifest.current_configuration_hash, args.reopen)
+                    manifest = service.get_job(args.job_id)
+                if args.accept:
+                    manifest = service.accept_checkpoint(
+                        args.job_id, args.checkpoint,
+                        manifest.checkpoints[args.checkpoint]["revision"])
+                _print_json(asdict(manifest))
+                return 0
+            if args.job_command == "render":
+                manifest = service.get_job(args.job_id)
+                checkpoint = manifest.checkpoints["conversion"]
+                if checkpoint["status"] in {"failed", "cancelled", "stale"}:
+                    manifest.transition_checkpoint(
+                        "conversion", "pending", checkpoint["revision"], service.jobs_dir)
+                elif checkpoint["status"] == "completed":
+                    manifest.transition_checkpoint(
+                        "conversion", "stale", checkpoint["revision"], service.jobs_dir)
+                    manifest = service.get_job(args.job_id)
+                    manifest.transition_checkpoint(
+                        "conversion", "pending",
+                        manifest.checkpoints["conversion"]["revision"], service.jobs_dir)
+                from clipmorph.workflow import execute_job
+                service.resume_job(args.job_id, lambda job, token: execute_job(
+                    job, token, service.jobs_dir, service.app_config_path))
+                return 0
+            if args.job_command == "upload":
+                if args.upload_args[0] == "retry":
+                    if len(args.upload_args) != 3:
+                        raise ValueError("syntax: job upload retry ID PLATFORM")
+                    _, job_id, platform = args.upload_args
+                    manifest = service.get_job(job_id)
+                    attempt_id = args.attempt_id
+                    if attempt_id is None:
+                        attempt = next((item for item in reversed(manifest.upload_attempts)
+                                        if item["platform"] == platform
+                                        and item["status"] == "failed"), None)
+                        if attempt is None:
+                            raise ValueError("no failed upload attempt for that platform")
+                        attempt_id = attempt["attempt_id"]
+                    result = service.retry_upload(
+                        job_id, platform, attempt_id, args.artifact_id,
+                        args.confirm_historical_artifact)
+                else:
+                    if len(args.upload_args) != 1:
+                        raise ValueError("syntax: job upload ID")
+                    result = service.submit_upload(
+                        args.upload_args[0], args.platform, args.artifact_id,
+                        args.confirm_historical_artifact)
+                _print_json(result)
+                return 0
+            if args.job_command == "artifacts":
+                manifest = service.get_job(args.job_id)
+                if args.artifact_command == "list":
+                    _print_json([{key: value for key, value in item.items() if key != "path"}
+                                 for item in manifest.artifacts.values()])
+                    return 0
+                artifact = manifest.artifacts.get(args.artifact_id)
+                if artifact is None:
+                    raise FileNotFoundError("artifact not found")
+                path = Path(artifact["path"])
+                if args.artifact_command == "preview":
+                    if not path.is_file():
+                        raise FileNotFoundError("artifact bytes are unavailable")
+                    webbrowser.open(path.resolve().as_uri())
+                    return 0
+                if args.artifact_command == "download":
+                    shutil.copy2(path, args.destination)
+                    print(str(args.destination))
+                    return 0
+                if args.artifact_command == "rename":
+                    if "/" in args.name or "\\" in args.name:
+                        raise ValueError("artifact display name must be a filename")
+                    artifact["display_name"] = args.name
+                    manifest.save(service.jobs_dir)
+                    return 0
+                if not args.yes:
+                    raise ValueError("artifact delete requires --yes")
+                from send2trash import send2trash
+                if path.exists():
+                    send2trash(str(path))
+                artifact["state"] = "deleted"
+                if manifest.current_artifact_id == args.artifact_id:
+                    manifest.artifact_path = None
+                manifest.save(service.jobs_dir)
+                return 0
+            raise ValueError("unsupported job operation")
+        finally:
+            service.close()
+    except KeyboardInterrupt:
+        return 130
+    except FileNotFoundError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    except (ValueError, OSError) as error:
+        print(str(error), file=sys.stderr)
+        return 2

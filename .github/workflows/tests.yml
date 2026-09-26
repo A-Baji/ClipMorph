@@ -51,22 +51,44 @@ jobs:
       - name: Set execute permissions for bundled FFmpeg
         run: chmod +x clipmorph/ffmpeg/linux/ffmpeg clipmorph/ffmpeg/linux/ffprobe
 
-      - name: CLI smoke tests (dry-run, resume, data-dir, ordinary startup)
+      - name: CLI smoke tests (dry-run, job creation, data-dir, review gate)
         run: |
           set -euo pipefail
-          SAMPLE="$RUNNER_TEMP/sample.mp4"
           DATA_DIR="$RUNNER_TEMP/cli-smoke-data"
-          # Sized to satisfy the default camera crop preflight check (1420,790,480,270).
+          SAMPLE="$DATA_DIR/sources/sample.mp4"
+          mkdir -p "$(dirname "$SAMPLE")"
           clipmorph/ffmpeg/linux/ffmpeg -y -f lavfi -i testsrc=duration=1:size=1920x1080:rate=10 "$SAMPLE"
+          python -m clipmorph --data-dir "$DATA_DIR" init
 
-          # Ordinary startup + dry-run: validates the input and prints the effective
-          # configuration without converting or uploading anything.
-          python -m clipmorph "$SAMPLE" --no-upload --dry-run --title "Smoke Test" --data-dir "$DATA_DIR"
+          cat > "$RUNNER_TEMP/job.yml" <<'EOF'
+          - general:
+              source: sample.mp4
+            conversion:
+              skip: true
+              subtitles:
+                skip: true
+          EOF
 
-          # data-dir + resume: create a resumable job, then resume it by job id.
-          python -m clipmorph "$SAMPLE" --no-conversion --no-upload --title "Smoke Test" --data-dir "$DATA_DIR"
-          JOB_ID=$(ls "$DATA_DIR/jobs")
-          python -m clipmorph "$SAMPLE" --resume "$JOB_ID" --no-conversion --no-upload --title "Smoke Test" --data-dir "$DATA_DIR"
+          python -m clipmorph --data-dir "$DATA_DIR" job create "$SAMPLE" \
+            --job-configs "$RUNNER_TEMP/job.yml" --dry-run
+          JOB_RESULT=$(python -m clipmorph --data-dir "$DATA_DIR" job create \
+            "$SAMPLE" --job-configs "$RUNNER_TEMP/job.yml")
+          JOB_ID=$(python -c 'import json,sys; print(json.load(sys.stdin)["created"][0]["job_id"])' <<<"$JOB_RESULT")
+          python -m clipmorph --data-dir "$DATA_DIR" job get "$JOB_ID" > "$RUNNER_TEMP/job.json"
+          python -c 'import json,pathlib; job=json.loads(pathlib.Path("'$RUNNER_TEMP'/job.json").read_text()); assert job["checkpoints"]["upload"]["status"] == "awaiting_review"'
+
+          if python -m clipmorph --data-dir "$DATA_DIR" job resume "$JOB_ID" \
+              > "$RUNNER_TEMP/resume.log" 2>&1; then
+            echo "job resume unexpectedly bypassed upload review" >&2
+            exit 1
+          else
+            RESUME_STATUS=$?
+            if [ "$RESUME_STATUS" -ne 2 ]; then
+              cat "$RUNNER_TEMP/resume.log" >&2
+              exit "$RESUME_STATUS"
+            fi
+          fi
+          grep -F "job requires review before it can resume" "$RUNNER_TEMP/resume.log"
         shell: bash
 
       - name: Verify package install

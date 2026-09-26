@@ -1,504 +1,297 @@
-import logging
-import os
-import uuid
-from typing import Any, Dict, List
+"""Render vertical video canvases using the canonical crop/caption layout."""
 
-from clipmorph.ffmpeg import FFmpegError
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import platform
+import uuid
+from typing import Any
+
 from clipmorph.ffmpeg import FFmpegRunner
 from clipmorph.job import default_output_dir, resolve_output_dir
+from clipmorph.layout import measure_caption_dimensions
+
+
+CANVAS_WIDTH = 1080
+CANVAS_HEIGHT = 1920
+AUTO_COLORS = ["white", "yellow", "cyan", "lime", "orange", "magenta"]
 
 
 class EditingPipeline:
-
-    def __init__(self,
-                 input_path,
-                 output_dir=None,
-                 muted_audio=None,
-                 segments=None,
-                 include_cam=True,
-                 cam_x=1420,
-                 cam_y=790,
-                 cam_width=480,
-                 cam_height=270,
-                 clip_height=1312,
-                 layout=None,
-                 ffmpeg_runner=None):
+    def __init__(self, input_path: str, output_dir: str | Path | None = None,
+                 muted_audio: str | None = None, segments=None,
+                 layout: dict[str, Any] | None = None, ffmpeg_runner=None):
         self.input_path = input_path
-        self.output_dir = str(resolve_output_dir(
-            output_dir, default_output_dir().parent)) + "/"
+        self.output_dir = resolve_output_dir(
+            output_dir, default_output_dir().parent)
         self.muted_audio = muted_audio
-        self.segments = segments
-        self.include_cam = include_cam
-        self.cam_x = cam_x
-        self.cam_y = cam_y
-        self.cam_width = cam_width
-        self.cam_height = cam_height
-        self.clip_height = clip_height
-        self.layout = layout
+        self.segments = segments or []
+        self.layout = layout or {}
         self.ffmpeg_runner = ffmpeg_runner or FFmpegRunner()
 
-    def _get_video_info(self, video_path: str) -> Dict[str, Any]:
-        """Get video information using ffprobe"""
-        return self.ffmpeg_runner.get_video_info(video_path)
+    @staticmethod
+    def _escape_text(text: Any) -> str:
+        value = str(text).replace("\\", "\\\\")
+        for character in (":", "'", "%", ",", "[", "]", ";"):
+            value = value.replace(character, f"\\{character}")
+        return value.replace("\n", "\\n")
 
-    def _set_audio(self, input_path: str, muted_audio_path: str,
-                   output_path: str) -> None:
-        """Replace audio in video using ffmpeg"""
-        if muted_audio_path and muted_audio_path != input_path:
-            # When using a different audio file (muted version)
-            cmd = [
-                self.ffmpeg_runner.config.ffmpeg_path, '-i', input_path, '-i',
-                muted_audio_path, '-c:v', 'copy', '-c:a', 'aac', '-map',
-                '0:v:0', '-map', '1:a:0', '-shortest', '-y', output_path
-            ]
+    @staticmethod
+    def _range_enable(item: dict[str, Any]) -> str:
+        timing = item.get("range")
+        if timing is None:
+            return ""
+        start, end = timing
+        return f":enable='between(t,{start},{end})'"
+
+    @staticmethod
+    def _estimated_dimensions(item: dict[str, Any]) -> tuple[int, int]:
+        dimensions = item.get("dimensions")
+        if isinstance(dimensions, dict):
+            return dimensions["width"], dimensions["height"]
+        dimensions = measure_caption_dimensions(
+            str(item.get("text", "")), item.get("typography", {}))
+        return dimensions["width"], dimensions["height"]
+
+    @staticmethod
+    def _font_style_option(typography: dict[str, Any]) -> str:
+        if typography.get("font_file"):
+            return ""
+        styles = []
+        if typography.get("bold"):
+            styles.append("Bold")
+        if typography.get("italic"):
+            styles.append("Italic")
+        return f":font='Sans|{' '.join(styles)}'" if styles else ""
+
+    @staticmethod
+    def _system_font_file(typography: dict[str, Any]) -> str | None:
+        style = (bool(typography.get("bold")), bool(typography.get("italic")))
+        system = platform.system()
+        if system == "Windows":
+            filenames = {
+                (False, False): ("segoeui.ttf", "arial.ttf"),
+                (True, False): ("segoeuib.ttf", "arialbd.ttf"),
+                (False, True): ("segoeuii.ttf", "ariali.ttf"),
+                (True, True): ("segoeuiz.ttf", "arialbi.ttf"),
+            }[style]
+            fonts_dir = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
+            candidates = [fonts_dir / name for name in filenames]
+        elif system == "Darwin":
+            names = {
+                (False, False): "Arial.ttf",
+                (True, False): "Arial Bold.ttf",
+                (False, True): "Arial Italic.ttf",
+                (True, True): "Arial Bold Italic.ttf",
+            }
+            candidates = [Path("/System/Library/Fonts/Supplemental") / names[style]]
+        elif system == "Linux":
+            names = {
+                (False, False): ("DejaVuSans.ttf", "LiberationSans-Regular.ttf"),
+                (True, False): ("DejaVuSans-Bold.ttf", "LiberationSans-Bold.ttf"),
+                (False, True): ("DejaVuSans-Oblique.ttf", "LiberationSans-Italic.ttf"),
+                (True, True): ("DejaVuSans-BoldOblique.ttf", "LiberationSans-BoldItalic.ttf"),
+            }[style]
+            directories = (
+                Path("/usr/share/fonts/truetype/dejavu"),
+                Path("/usr/share/fonts/dejavu"),
+                Path("/usr/share/fonts/truetype/liberation2"),
+                Path("/usr/share/fonts/truetype/liberation"),
+            )
+            candidates = [directory / name for directory in directories for name in names]
         else:
-            # When using original audio, just copy both streams
-            cmd = [
-                self.ffmpeg_runner.config.ffmpeg_path, '-i', input_path,
-                '-c:v', 'copy', '-c:a', 'aac', '-y', output_path
-            ]
-        self.ffmpeg_runner.run_ffmpeg(cmd)
+            candidates = []
+        return next((str(candidate) for candidate in candidates
+                     if candidate.is_file()), None)
 
-    def _process_camera_feed(self, input_path: str, output_path: str,
-                             cam_x: int, cam_y: int, cam_width: int,
-                             cam_height: int, crop_width: int) -> int:
-        """Process camera feed: crop and resize"""
-        # Ensure even dimensions for codec compatibility
-        if cam_height % 2 != 0:
-            cam_height += 1
+    @staticmethod
+    def _underline_filter(filters: list[str], current: str, label: str,
+                          text: str, typography: dict[str, Any], color: str,
+                          x: str, y: str, enable: str) -> str:
+        if not typography.get("underline"):
+            return current
+        font_size = typography.get("size", 64)
+        text_width = measure_caption_dimensions(
+            text, typography, padding_x=0, padding_y=0)["width"]
+        thickness = max(1, font_size // 20)
+        underline_label = f"{label}_underline"
+        filters.append(
+            f"[{current}]drawbox=x={x}:y={y}:w={text_width}:h={thickness}:"
+            f"color={color}:t=fill{enable}[{underline_label}]")
+        return underline_label
 
-        # Calculate resize height maintaining aspect ratio
-        aspect_ratio = cam_width / cam_height
-        resize_height = int(crop_width / aspect_ratio)
-        if resize_height % 2 != 0:
-            resize_height += 1
+    @staticmethod
+    def _region_center(placement: Any, width: int, height: int,
+                       stacked: bool = False) -> tuple[str, str]:
+        if isinstance(placement, dict):
+            x = "540" if stacked else str(placement["x"])
+            return x, str(placement["y"])
+        x = "540"
+        if placement == "top":
+            y = str(height / 2)
+        elif placement == "bottom":
+            y = str(CANVAS_HEIGHT - height / 2)
+        else:
+            y = str(CANVAS_HEIGHT / 2)
+        return x, y
 
-        cmd = [
-            self.ffmpeg_runner.config.ffmpeg_path, '-i', input_path, '-vf',
-            f'crop={cam_width}:{cam_height}:{cam_x}:{cam_y},scale={crop_width}:{resize_height}',
-            '-c:a', 'copy', '-y', output_path
-        ]
-        self.ffmpeg_runner.run_ffmpeg(cmd)
-        return resize_height
+    def _base_filter(self) -> str:
+        return (f"[0:v]scale={CANVAS_WIDTH}:{CANVAS_HEIGHT}:"
+                "force_original_aspect_ratio=increase,"
+                f"crop={CANVAS_WIDTH}:{CANVAS_HEIGHT},setsar=1[base]")
 
-    def _process_main_clip(self, input_path: str, output_path: str,
-                           crop_height: int, cam_h: int,
-                           crop_width: int) -> None:
-        """Process main clip: resize and crop"""
-        main_height = crop_height - cam_h
-        if main_height % 2 != 0:
-            main_height += 1
-
-        # Get video info to calculate center crop
-        video_info = self._get_video_info(input_path)
-        video_stream = next(s for s in video_info['streams']
-                            if s['codec_type'] == 'video')
-        orig_width = int(video_stream['width'])
-        orig_height = int(video_stream['height'])
-
-        # Calculate scale to fit height, then crop width to center
-        scale_factor = main_height / orig_height
-        scaled_width = int(orig_width * scale_factor)
-
-        # Ensure even width
-        if scaled_width % 2 != 0:
-            scaled_width += 1
-
-        crop_x = max(0, (scaled_width - crop_width) // 2)
-
-        cmd = [
-            self.ffmpeg_runner.config.ffmpeg_path, '-i', input_path, '-vf',
-            f'scale={scaled_width}:{main_height},crop={crop_width}:{main_height}:{crop_x}:0',
-            '-c:a', 'copy', '-y', output_path
-        ]
-        self.ffmpeg_runner.run_ffmpeg(cmd)
-
-    def _blur_background(self, input_path: str, output_path: str,
-                         crop_width: int, crop_height: int, cam_h: int,
-                         main_clip_path: str) -> None:
-        """Create blurred background and combine with main clip"""
-        bg_h = cam_h // 2
-        if bg_h % 2 != 0:
-            bg_h += 1
-
-        # Get video info for centering
-        video_info = self._get_video_info(input_path)
-        video_stream = next(s for s in video_info['streams']
-                            if s['codec_type'] == 'video')
-        orig_width = int(video_stream['width'])
-        orig_height = int(video_stream['height'])
-
-        # Calculate center crop coordinates
-        scale_factor = crop_height / orig_height
-        scaled_width = int(orig_width * scale_factor)
-        crop_x_center = max(0, (scaled_width - crop_width) // 2)
-
-        # Create the full blurred and cropped background first
-        blur_temp = self.ffmpeg_runner.create_temp_file()
-
-        cmd = [
-            self.ffmpeg_runner.config.ffmpeg_path, '-i', input_path, '-vf',
-            f'scale=-1:{crop_height},gblur=sigma=10,crop={crop_width}:{crop_height}:{crop_x_center}:0',
-            '-c:a', 'copy', '-y', blur_temp
-        ]
-        self.ffmpeg_runner.run_ffmpeg(cmd)
-
-        # Now extract top and bottom sections from the blurred background
-        # and combine with the main clip
-        main_height = crop_height - (2 * bg_h)
-
-        filter_complex = f"""
-        [0:v]crop={crop_width}:{bg_h}:0:0[top];
-        [0:v]crop={crop_width}:{bg_h}:0:{bg_h + main_height}[bottom];
-        [top][1:v][bottom]vstack=inputs=3[v]
-        """
-
-        cmd = [
-            self.ffmpeg_runner.config.ffmpeg_path, '-i', blur_temp, '-i',
-            main_clip_path, '-filter_complex',
-            filter_complex.strip(), '-map', '[v]', '-map', '0:a?', '-c:a',
-            'copy', '-y', output_path
-        ]
-        self.ffmpeg_runner.run_ffmpeg(cmd)
-
-    def _combine_clips_vertical(self, clip1_path: str, clip2_path: str,
-                                output_path: str) -> None:
-        """Combine two clips vertically while preserving audio"""
-        cmd = [
-            self.ffmpeg_runner.config.ffmpeg_path, '-i', clip1_path, '-i',
-            clip2_path, '-filter_complex', '[0:v][1:v]vstack=inputs=2[v]',
-            '-map', '[v]', '-map', '0:a', '-c:a', 'copy', '-y', output_path
-        ]
-        self.ffmpeg_runner.run_ffmpeg(cmd)
-
-    def _overlay_subtitles(self, input_path: str, output_path: str,
-                           segments: List[Dict]) -> None:
-        """Overlay subtitles using ffmpeg subtitles filter"""
-        # If no segments or empty list, just copy
-        if not segments:
-            cmd = [
-                self.ffmpeg_runner.config.ffmpeg_path, '-i', input_path, '-c',
-                'copy', '-y', output_path
-            ]
-            self.ffmpeg_runner.run_ffmpeg(cmd)
-            return
-
-        # Filter out invalid segments
-        valid_segments = []
-        for seg in segments:
-            text = (seg.get('text') or '').strip()
-            try:
-                start = float(seg.get('start', 0))
-                end = float(seg.get('end', 0))
-                speaker = seg.get('speaker', 'default')
-                if text and start is not None and end is not None:
-                    valid_segments.append({
-                        'text': text,
-                        'start': start,
-                        'end': end,
-                        'speaker': speaker
-                    })
-            except (TypeError, ValueError):
-                continue
-
-        if not valid_segments:
-            cmd = [
-                self.ffmpeg_runner.config.ffmpeg_path, '-i', input_path, '-c',
-                'copy', '-y', output_path
-            ]
-            self.ffmpeg_runner.run_ffmpeg(cmd)
-            return
-
-        def _format_timestamp(seconds: float) -> str:
-            # SRT needs "hh:mm:ss,mmm"
-            total_ms = int(round(seconds * 1000))
-            ms = total_ms % 1000
-            s = (total_ms // 1000) % 60
-            m = (total_ms // 60000) % 60
-            h = total_ms // 3600000
-            return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
-
-        COLOR_PALETTE = [
-            '#00BFFF',  # Deep Sky Blue
-            '#FFD700',  # Gold
-            '#32CD32',  # Lime Green
-            '#FF4500',  # Orange Red
-            '#7B68EE',  # Medium Slate Blue
-            '#FF69B4',  # Hot Pink
-            '#FFA500',  # Orange
-            '#ADFF2F',  # Green Yellow
-            '#40E0D0',  # Turquoise
-            '#FFFFFF'  # White (default)
-        ]
-
-        # Get unique speakers from segments and sort for consistent colors
-        speakers = sorted(
-            {seg['speaker']
-             for seg in valid_segments if seg.get('speaker')})
-
-        # Create color mapping for speakers
-        speaker_colors = {}
-        for idx, speaker in enumerate(speakers):
-            if idx < len(COLOR_PALETTE) - 1:
-                speaker_colors[speaker] = COLOR_PALETTE[idx]
+    def _crop_filters(self, filters: list[str], current: str) -> str:
+        crop = self.layout.get("crop") or {}
+        if not crop.get("enabled"):
+            return current
+        source = crop["source"]
+        sizing = crop.get("sizing", {})
+        mode = sizing.get("mode", "fit")
+        composition = crop.get("composition", {})
+        composition_mode = composition.get("mode", "overlay")
+        placement = composition.get("placement", "top")
+        crop_filter = (
+            f"[0:v]crop={source['width']}:{source['height']}:{source['x']}:{source['y']}")
+        if mode in {"fit", "stretch"}:
+            dimensions = sizing["dimensions"]
+            width, height = dimensions["width"], dimensions["height"]
+            if mode == "fit":
+                crop_filter += (
+                    f",scale={width}:{height}:force_original_aspect_ratio=decrease"
+                    f",pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black")
             else:
-                speaker_colors[speaker] = COLOR_PALETTE[-1]  # Default to white
+                crop_filter += f",scale={width}:{height}"
+        else:
+            width, height = source["width"], source["height"]
+        crop_filter += f",setsar=1[crop_layer]"
+        filters.append(crop_filter)
 
-        # Create an SRT file using validated segments with color tags
-        srt_temp = self.ffmpeg_runner.create_temp_file(suffix='.srt')
-        with open(srt_temp, 'w', encoding='utf-8') as f:
-            for idx, seg in enumerate(valid_segments, 1):
-                start_ts = _format_timestamp(seg['start'])
-                end_ts = _format_timestamp(seg['end'])
-                speaker = seg.get('speaker', 'default')
-                color = speaker_colors.get(speaker, COLOR_PALETTE[-1])
+        if composition_mode == "stacked":
+            crop_center_y = (height / 2 if placement == "top" else
+                             CANVAS_HEIGHT - height / 2 if placement == "bottom" else
+                             CANVAS_HEIGHT / 2)
+            if isinstance(placement, dict):
+                crop_center_y = placement["y"]
+            top_height = int(crop_center_y - height / 2)
+            bottom_y = int(crop_center_y + height / 2)
+            bottom_height = CANVAS_HEIGHT - bottom_y
+            filters.append(
+                f"[crop_layer]pad={CANVAS_WIDTH}:{height}:(ow-iw)/2:0:color=black[crop_band]")
+            if top_height > 0:
+                filters.append(f"[{current}]crop={CANVAS_WIDTH}:{top_height}:0:0[stack_top]")
+            if bottom_height > 0:
+                filters.append(
+                    f"[{current}]crop={CANVAS_WIDTH}:{bottom_height}:0:{bottom_y}[stack_bottom]")
+            pieces = []
+            if top_height > 0:
+                pieces.append("[stack_top]")
+            pieces.append("[crop_band]")
+            if bottom_height > 0:
+                pieces.append("[stack_bottom]")
+            filters.append(f"{''.join(pieces)}vstack=inputs={len(pieces)}[{current}_stacked]")
+            return f"{current}_stacked"
 
-                f.write(f"{idx}\n")
-                f.write(f"{start_ts} --> {end_ts}\n")
-                # Add color formatting to each line
-                for line in seg['text'].splitlines():
-                    f.write(f'<font color="{color}">{line}</font>\n')
-                f.write("\n")
-        # Get path to Roboto font
-        font_path = os.path.join(os.path.dirname(__file__), '..', 'resources',
-                                 'fonts', 'roboto', 'Roboto-Bold.ttf')
-        # Normalize path for ffmpeg
-        font_path = os.path.abspath(font_path).replace('\\', '/').replace(
-            ':', '\\:')
+        center_x, center_y = self._region_center(placement, width, height)
+        filters.append(
+            f"[{current}][crop_layer]overlay=x={center_x}-overlay_w/2:"
+            f"y={center_y}-overlay_h/2[{current}_crop]")
+        return f"{current}_crop"
 
-        subtitle_style = (
-            f'Fontfile={font_path},'  # Use embedded font file
-            'Fontname=Roboto,'  # Font family name
-            'Fontsize=18,'  # Font size
-            'PrimaryColour=&Hffffff,'  # Text color (white)
-            'OutlineColour=&H000000,'  # Outline color (black)
-            'BackColour=&H80000000,'  # Background color (semi-transparent)
-            'Bold=1,'  # Bold text
-            'Outline=1,'  # Outline width
-            'Shadow=1,'  # Shadow size
-            'Blur=0.6,'  # Add slight blur for anti-aliasing
-            'MarginV=40,'  # Vertical margin from bottom
-            'Spacing=0.2'  # Add slight spacing between letters
-        )
+    def _caption_filters(self, filters: list[str], current: str) -> str:
+        captions = self.layout.get("captions") or {}
+        index = 0
+        for item in captions.get("overlay", {}).get("items", []):
+            width, height = self._estimated_dimensions(item)
+            center_x, center_y = self._region_center(
+                item.get("placement", "center"), width, height)
+            typography = item.get("typography", {})
+            font_size = typography.get("size", 64)
+            color = typography.get("color") or AUTO_COLORS[index % len(AUTO_COLORS)]
+            font_file = typography.get("font_file") or self._system_font_file(typography)
+            font_option = f":fontfile='{self._escape_text(font_file)}'" if font_file else ""
+            if not font_file:
+                font_option += self._font_style_option(typography)
+            outline = typography.get("outline_color", "black")
+            style = f":fontsize={font_size}:fontcolor={color}{font_option}:borderw=3:bordercolor={outline}"
+            text = self._escape_text(item.get("text", ""))
+            label = f"caption_{index}"
+            text_width = measure_caption_dimensions(
+                item.get("text", ""), typography, padding_x=0, padding_y=0)["width"]
+            current = self._underline_filter(
+                filters, current, label, item.get("text", ""), typography,
+                color, f"{center_x}-{text_width}/2",
+                f"{center_y}+{font_size}*0.4", self._range_enable(item))
+            filters.append(
+                f"[{current}]drawtext=text='{text}':x={center_x}-text_w/2:"
+                f"y={center_y}-text_h/2{style}{self._range_enable(item)}[{label}]")
+            current = label
+            index += 1
 
-        # Build safe path for ffmpeg subtitles filter with lanczos scaling
-        abs_path = os.path.abspath(srt_temp)
-        ff_path = abs_path.replace('\\', '/').replace(':', '\\:')
-
-        # Combine subtitle overlay with lanczos scaling
-        vf_expr = (
-            f"scale=flags=lanczos,subtitles='{ff_path}':force_style='{subtitle_style}',"
-            "scale=flags=lanczos"  # Second scale pass for final refinement
-        )
-
-        cmd = [
-            self.ffmpeg_runner.config.ffmpeg_path,
-            '-i',
-            input_path,
-            '-vf',
-            vf_expr,
-            '-c:v',
-            'libx264',  # Use H.264 codec
-            '-preset',
-            'slow',  # Higher quality preset
-            '-crf',
-            '18',  # Higher quality CRF (lower = better)
-            '-c:a',
-            'copy',  # Copy audio stream
-            '-y',
-            output_path
-        ]
-
-        self.ffmpeg_runner.run_ffmpeg(cmd)
+        stacked = captions.get("stacked", {})
+        items = stacked.get("items", [])
+        if not items:
+            return current
+        first_width, first_height = self._estimated_dimensions(items[0])
+        width, height = stacked.get("dimensions", {}).get(
+            "width", first_width), stacked.get("dimensions", {}).get(
+                "height", first_height)
+        padding = stacked.get("panel", {}).get("padding", {})
+        padding_x, padding_y = padding.get("left", 0), padding.get("top", 0)
+        placement = stacked.get("placement", "center")
+        _center_x, center_y = self._region_center(
+            placement, width, height, stacked=True)
+        panel_color = stacked.get("panel", {}).get("color", "black")
+        for item_index, item in enumerate(items):
+            label = f"stacked_panel_{item_index}"
+            text_label = f"stacked_caption_{item_index}"
+            enable = self._range_enable(item)
+            filters.append(
+                f"[{current}]drawbox=x=(iw-{width})/2:y={center_y}-{height}/2:"
+                f"w={width}:h={height}:color={panel_color}:t=fill{enable}[{label}]")
+            typography = item.get("typography", {})
+            font_size = typography.get("size", 64)
+            color = typography.get("color") or AUTO_COLORS[(index + item_index) % len(AUTO_COLORS)]
+            font_file = typography.get("font_file") or self._system_font_file(typography)
+            font_option = f":fontfile='{self._escape_text(font_file)}'" if font_file else ""
+            if not font_file:
+                font_option += self._font_style_option(typography)
+            outline = typography.get("outline_color", "black")
+            text = self._escape_text(item.get("text", ""))
+            text_width = measure_caption_dimensions(
+                item.get("text", ""), typography, padding_x=0, padding_y=0)["width"]
+            current = self._underline_filter(
+                filters, label, text_label, item.get("text", ""),
+                typography, color, f"(iw-{text_width})/2",
+                f"{center_y}-{height}/2+{padding_y}+{font_size}*1.2", enable)
+            filters.append(
+                f"[{current}]drawtext=text='{text}':x=(w-text_w)/2:"
+                f"y={center_y}-{height}/2+{padding_y}{enable}:fontsize={font_size}:"
+                f"fontcolor={color}{font_option}:borderw=3:bordercolor={outline}"
+                f"[{text_label}]")
+            current = text_label
+        return current
 
     def _apply_layout(self, input_path: str, output_path: str) -> None:
-        """Apply composable crop and caption layers to the vertical canvas."""
-        layout = self.layout or {}
-        crop = layout.get("crop") or {}
-        caption = layout.get("caption") or {}
-        filters = ["[0:v]null[base]"]
-        current = "base"
-
-        def region_y(region: str, height: int) -> str:
-            if region == "bottom":
-                return f"1920-{height}"
-            if region == "center":
-                return f"(1920-{height})/2"
-            return "0"
-
-        if crop.get("enabled"):
-            source = crop["source"]
-            placement = crop.get("placement", {})
-            mode = placement.get("mode", "fit")
-            if mode == "none":
-                crop_size = f"{source['width']}:{source['height']}"
-            elif mode == "stretch":
-                dimensions = placement["dimensions"]
-                crop_size = f"{dimensions['width']}:{dimensions['height']}"
-            else:
-                crop_size = "1080:-2"
-            crop_height = source["height"] if mode == "none" else (
-                placement.get("dimensions", {}).get("height", 608))
-            crop_y = region_y(placement.get("region", "top"), crop_height)
-            filters.append(
-                f"[0:v]crop={source['width']}:{source['height']}:{source['x']}:{source['y']},"
-                f"scale={crop_size}[crop]")
-            if placement.get("mode", "fit") == "none":
-                filters.append(f"[base][crop]overlay=(W-w)/2:{crop_y}[withcrop]")
-            else:
-                filters.append(f"[base][crop]overlay=(W-w)/2:{crop_y}[withcrop]")
-            current = "withcrop"
-
-        if caption.get("enabled"):
-            text_items = caption.get("items")
-            if text_items is None:
-                text_items = [{"text": caption.get("text", ""), "range": [0, None]}]
-            for index, item in enumerate(text_items):
-                text = str(item.get("text", "")).replace("'", "\\'").replace(":", "\\:")
-                start, end = item["range"]
-                enable = f":enable='gte(t,{start})'"
-                if end is not None:
-                    enable = f":enable='between(t,{start},{end})'"
-                if caption.get("mode", "overlay") == "background":
-                    dimensions = caption.get("dimensions", {})
-                    panel_width = dimensions.get("width", 1080)
-                    panel_height = dimensions.get("height", 608)
-                    panel = caption.get("panel", {})
-                    panel_color = panel.get("color", "black")
-                    panel_opacity = panel.get("opacity", 0.65)
-                    padding = caption.get("padding", {})
-                    padding_x = padding.get("left", 64)
-                    padding_y = padding.get("top", 48)
-                    text_style = caption.get("typography", {})
-                    font_size = text_style.get("size", 64)
-                    font_color = text_style.get("color", "white")
-                    font_file = text_style.get("font_file")
-                    font_option = f":fontfile='{font_file}'" if font_file else ""
-                    panel_y = region_y(caption.get("region", "top"), panel_height)
-                    filters.append(
-                        f"[{current}]drawbox=x=(iw-{panel_width})/2:y={panel_y}:w={panel_width}:h={panel_height}:"
-                        f"color={panel_color}@{panel_opacity}:t=fill[panel{index}];"
-                        f"[panel{index}]drawtext=text='{text}':x=(w-text_w)/2:y={panel_y}+{padding_y}:"
-                        f"fontsize={font_size}:fontcolor={font_color}{font_option}{enable}[caption{index}]")
-                else:
-                    text_style = caption.get("typography", {})
-                    font_size = text_style.get("size", 64)
-                    font_color = text_style.get("color", "white")
-                    font_file = text_style.get("font_file")
-                    font_option = f":fontfile='{font_file}'" if font_file else ""
-                    overlay_height = caption.get("dimensions", {}).get("height", 120)
-                    caption_y = region_y(caption.get("region", "top"), overlay_height)
-                    filters.append(
-                        f"[{current}]drawtext=text='{text}':x=(w-text_w)/2:y={caption_y}:"
-                        f"fontsize={font_size}:fontcolor={font_color}{font_option}:borderw=3:bordercolor=black{enable}[caption{index}]")
-                current = f"caption{index}"
-        filters[-1] += f"[{current}]" if not filters[-1].endswith(f"[{current}]") else ""
-        cmd = [
-            self.ffmpeg_runner.config.ffmpeg_path, "-i", input_path,
-            "-filter_complex", ";".join(filters), "-map", f"[{current}]",
-            "-map", "0:a?", "-c:v", "libx264", "-c:a", "copy", "-y", output_path,
+        filters = [self._base_filter()]
+        current = self._crop_filters(filters, "base")
+        current = self._caption_filters(filters, current)
+        command = [
+            self.ffmpeg_runner.config.ffmpeg_path,
+            "-i", input_path,
+            "-filter_complex", ";".join(filters),
+            "-map", f"[{current}]", "-map", "0:a?",
+            "-c:v", "libx264", "-c:a", "copy", "-y", output_path,
         ]
-        self.ffmpeg_runner.run_ffmpeg(cmd)
+        self.ffmpeg_runner.run_ffmpeg(command)
 
-    def run(self):
-        try:
-            logging.info("Starting video processing...")
-
-            # Extract filename for output
-            filename = os.path.splitext(os.path.basename(self.input_path))[0]
-            os.makedirs(self.output_dir, exist_ok=True)
-            output_path = f"{self.output_dir}{filename}-converted.mp4"
-            if os.path.exists(output_path):
-                output_path = (
-                    f"{self.output_dir}{filename}-converted-{uuid.uuid4().hex[:8]}.mp4")
-
-            # Set audio
-            logging.info("Applying audio to the video...")
-            audio_temp = self.ffmpeg_runner.create_temp_file()
-            self._set_audio(self.input_path, self.muted_audio, audio_temp)
-
-            crop_width = 1080
-            crop_height = 1920
-
-            if self.include_cam:
-                # Process camera feed
-                logging.info("Processing camera feed...")
-                cam_temp = self.ffmpeg_runner.create_temp_file()
-                cam_h = self._process_camera_feed(audio_temp, cam_temp,
-                                                  self.cam_x, self.cam_y,
-                                                  self.cam_width,
-                                                  self.cam_height, crop_width)
-            else:
-                cam_h = crop_height - self.clip_height
-
-            # Process main clip
-            logging.info("Processing main clip...")
-            main_temp = self.ffmpeg_runner.create_temp_file()
-            self._process_main_clip(audio_temp, main_temp, crop_height, cam_h,
-                                    crop_width)
-
-            # Combine or blur
-            if not self.include_cam:
-                logging.info("Blurring background...")
-                composited_temp = self.ffmpeg_runner.create_temp_file()
-                self._blur_background(audio_temp, composited_temp, crop_width,
-                                      crop_height, cam_h, main_temp)
-            else:
-                logging.info("Combining camera feed and main clip...")
-                composited_temp = self.ffmpeg_runner.create_temp_file()
-                self._combine_clips_vertical(cam_temp, main_temp,
-                                             composited_temp)
-
-            if self.layout:
-                logging.info("Applying composable layout...")
-                layout_temp = self.ffmpeg_runner.create_temp_file()
-                self._apply_layout(composited_temp, layout_temp)
-                composited_temp = layout_temp
-
-            # Add subtitles
-            if self.segments:
-                logging.info("Overlaying subtitles...")
-                final_temp = self.ffmpeg_runner.create_temp_file()
-                self._overlay_subtitles(composited_temp, final_temp,
-                                        self.segments)
-            else:
-                logging.info("No subtitles provided, skipping overlay.")
-                final_temp = composited_temp
-
-            # Final encode with proper codec settings
-            logging.info("Writing final video to file...")
-            cmd = [
-                self.ffmpeg_runner.config.ffmpeg_path,
-                '-i',
-                final_temp,
-                '-map',
-                '0',  # Map all streams from input
-                '-c:v',
-                'libx264',
-                '-preset',
-                'medium',
-                '-crf',
-                '23',
-                '-c:a',
-                'aac',
-                '-b:a',
-                '128k',
-                '-movflags',
-                '+faststart',
-                '-y',
-                output_path
-            ]
-            self.ffmpeg_runner.run_ffmpeg(cmd)
-
-            logging.info(f"Video processing completed: {output_path}")
-            return output_path
-
-        except FFmpegError as e:
-            logging.error(f"Video processing failed: {e}")
-            raise
-        except Exception as e:
-            logging.error(f"An error occurred during video processing: {e}")
-            raise
-        finally:
-            # Clean up is handled by the FFmpegRunner in the conversion pipeline
-            pass
+    def run(self) -> str:
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        stem = Path(self.input_path).stem
+        output_path = self.output_dir / f"{stem}-converted-{uuid.uuid4().hex[:8]}.mp4"
+        self._apply_layout(self.input_path, str(output_path))
+        if not output_path.exists():
+            raise RuntimeError("Video output was not created")
+        if output_path.stat().st_size < 1024:
+            raise RuntimeError("Video output is suspiciously small")
+        return str(output_path)

@@ -43,10 +43,11 @@ The dependency set includes large media and ML packages. Prefer focused unit tes
 
 - Maintain a single source of truth for each rule, configuration value, workflow, and piece of project knowledge. Reference the authoritative location instead of copying it into parallel docs, configs, or implementations; when duplication is unavoidable, generate it or add a check that detects drift.
 - Make and publish normal changes on `dev`; merge `dev` into `main` only through the repository's approved merge process.
-- Preserve the CLI contract and documented YAML/JSON configuration shape. Add or update focused tests when changing parsing, defaults, validation, or initialization behavior.
+- Do not preserve backward compatibility for internal formats, ever: job manifest schemas, config file shapes, layout/job/batch JSON, and internal APIs may change freely. Prefer clean breaking changes over migration shims, versioned dual-read paths, or legacy-format fallbacks. Update the CLI, web API, docs, and tests to match the new shape in the same change instead of keeping old-format handling around.
+- Keep the CLI parser, config loader, and documented YAML/JSON configuration shape internally consistent with each other; update all three together when the shape changes rather than preserving an old shape for compatibility.
 - Keep media processing behind the conversion pipeline and keep platform API behavior inside the relevant upload platform module. Do not duplicate orchestration in platform implementations.
 - Treat preflight as the boundary before conversion or upload. New input, geometry, output, or credential requirements should be validated there when possible.
-- Preserve resumability: job manifests must retain source identity, artifact state, status, and per-platform results. A successful platform must remain distinguishable from a partial failure.
+- Job manifests must retain source identity, artifact state, status, and per-platform results so a successful platform remains distinguishable from a partial failure. This does not require preserving old manifest schema versions.
 - Keep heavy imports lazy where the `--help` and `init` subcommand paths do not need them.
 - Do not perform live uploads or require real credentials in tests. Mock network clients and platform initialization, and use temporary directories for files and manifests.
 - Do not hand-edit generated or local runtime output. Video, audio, subtitle, conversion, upload, build, and package artifacts are local state unless a release workflow explicitly packages them.

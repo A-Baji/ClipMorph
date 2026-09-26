@@ -38,6 +38,28 @@ class TranscriptEditSessionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             create_edit_session("hash", [{"start": 0, "end": 4}], 3)
 
+    def test_sessions_have_stable_ids_and_segment_typography_overrides(self):
+        session = create_edit_session("hash", [{
+            "start": 0, "end": 1, "text": "Hello",
+            "typography": {"size": 42, "italic": True},
+        }], 2)
+
+        self.assertEqual(session["schema_version"], 2)
+        self.assertEqual(session["segments"][0]["id"],
+                         session["original_segments"][0]["id"])
+        self.assertEqual(session["segments"][0]["typography"]["size"], 42)
+
+    def test_saved_revisions_are_immutable(self):
+        session = create_edit_session("hash", [{
+            "start": 0, "end": 1, "text": "Hello",
+        }], 2)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "revision-0001.json"
+            save_edit_session(session, path)
+            with self.assertRaises(FileExistsError):
+                save_edit_session(session, path)
+            self.assertEqual(load_edit_session(path)["revision"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

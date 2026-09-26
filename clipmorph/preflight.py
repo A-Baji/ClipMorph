@@ -1,3 +1,5 @@
+"""Validate nested job configuration and source media before execution."""
+
 import os
 from pathlib import Path
 import shutil
@@ -6,81 +8,71 @@ from typing import Any
 
 PLATFORM_CREDENTIALS = {
     "youtube": ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"),
-    "instagram": (
-        "FACEBOOK_APP_ID",
-        "FACEBOOK_APP_SECRET",
-        "FACEBOOK_PAGE_ID",
-        "GCS_BUCKET_NAME",
-    ),
+    "instagram": ("FACEBOOK_APP_ID", "FACEBOOK_APP_SECRET", "FACEBOOK_PAGE_ID",
+                  "GCS_BUCKET_NAME"),
     "tiktok": ("TIKTOK_CLIENT_KEY", "TIKTOK_CLIENT_SECRET"),
-    "twitter": (
-        "TWITTER_CLIENT_ID",
-        "TWITTER_CLIENT_SECRET",
-        "TWITTER_OAUTH2_ACCESS_TOKEN",
-    ),
+    "twitter": ("TWITTER_CLIENT_ID", "TWITTER_CLIENT_SECRET",
+                "TWITTER_OAUTH2_ACCESS_TOKEN"),
 }
 
 
 class PreflightError(ValueError):
-    """Raised when a run cannot safely proceed."""
+    """Raised when a job cannot safely begin its next stage."""
 
 
 class PreflightValidator:
-    """Validate a run before conversion or upload work begins."""
-
     def __init__(self, ffmpeg_runner):
         self.ffmpeg_runner = ffmpeg_runner
 
-    def validate(self, *, input_path: str, output_dir: str, no_conversion: bool,
-                 no_upload: bool, enabled_platforms: list[str], title: str | None,
-                 cam_x: int, cam_y: int, cam_width: int, cam_height: int,
-                 platform_overrides: dict[str, Any] | None = None,
+    def validate(self, *, input_path: str, output_dir: str,
+                 conversion: dict[str, Any], upload: dict[str, Any],
+                 enabled_platforms: list[str], title: str | None,
                  layout: dict[str, Any] | None = None) -> list[str]:
-        warnings = []
         self._validate_input(input_path)
         info = self.ffmpeg_runner.get_video_info(input_path)
-        self._validate_video_stream(info)
-        self._validate_output_dir(output_dir, no_conversion)
+        video = self._validate_video_stream(info)
+        conversion_skipped = bool(conversion.get("skip"))
+        upload_skipped = bool(upload.get("skip"))
+        self._validate_output_dir(output_dir, conversion_skipped)
         if layout is not None:
             from clipmorph.layout import validate_layout
-            video = next(stream for stream in info["streams"]
-                         if stream.get("codec_type") == "video")
-            validate_layout(layout, video["width"], video["height"],
-                            float(info.get("format", {}).get("duration", 0) or 0))
-
-        if not no_conversion:
-            self._validate_camera(info, cam_x, cam_y, cam_width, cam_height)
-
-        if not no_upload:
+            duration = float(info.get("format", {}).get("duration", 0) or 0)
+            try:
+                validate_layout(layout, video["width"], video["height"], duration)
+            except ValueError as error:
+                raise PreflightError(str(error)) from error
+        warnings = []
+        if not upload_skipped:
             if not title:
-                raise PreflightError("Provide --title before uploading.")
+                raise PreflightError("upload.content.title is required before upload")
             self._validate_title(title, enabled_platforms)
             warnings.extend(self._validate_credentials(enabled_platforms))
-
         return warnings
 
-    def _validate_input(self, input_path: str):
+    def _validate_input(self, input_path: str) -> None:
         path = Path(input_path)
         if not path.exists():
             raise PreflightError(f"Input file does not exist: {path}")
         if not path.is_file() or path.stat().st_size == 0:
             raise PreflightError(f"Input file is empty or not a file: {path}")
 
-    def _validate_video_stream(self, info: dict[str, Any]):
+    def _validate_video_stream(self, info: dict[str, Any]) -> dict[str, Any]:
         streams = info.get("streams", [])
         video = next((stream for stream in streams
                       if stream.get("codec_type") == "video"), None)
         if not video:
             raise PreflightError("Input does not contain a video stream.")
         width, height = video.get("width"), video.get("height")
-        if not isinstance(width, int) or not isinstance(height, int) or width <= 0 or height <= 0:
+        if (not isinstance(width, int) or not isinstance(height, int)
+                or width <= 0 or height <= 0):
             raise PreflightError("Video stream has invalid dimensions.")
         duration = float(info.get("format", {}).get("duration", 0) or 0)
         if duration <= 0:
             raise PreflightError("Video duration could not be determined.")
+        return video
 
-    def _validate_output_dir(self, output_dir: str, no_conversion: bool):
-        if no_conversion:
+    def _validate_output_dir(self, output_dir: str, conversion_skipped: bool) -> None:
+        if conversion_skipped:
             return
         path = Path(output_dir)
         path.mkdir(parents=True, exist_ok=True)
@@ -89,19 +81,7 @@ class PreflightValidator:
         if shutil.disk_usage(path).free < 100 * 1024 * 1024:
             raise PreflightError(f"Less than 100 MB free in output directory: {path}")
 
-    def _validate_camera(self, info: dict[str, Any], x: int, y: int,
-                         width: int, height: int):
-        video = next(stream for stream in info["streams"]
-                     if stream.get("codec_type") == "video")
-        source_width, source_height = video["width"], video["height"]
-        if min(x, y, width, height) < 0 or width <= 0 or height <= 0:
-            raise PreflightError("Camera coordinates and dimensions must be positive.")
-        if x + width > source_width or y + height > source_height:
-            raise PreflightError(
-                f"Camera crop {width}x{height}+{x}+{y} exceeds source {source_width}x{source_height}."
-            )
-
-    def _validate_title(self, title: str, platforms: list[str]):
+    def _validate_title(self, title: str, platforms: list[str]) -> None:
         if "youtube" in platforms and len(title) > 100:
             raise PreflightError("YouTube title must be 100 characters or fewer.")
         if "twitter" in platforms and len(title) > 280:
@@ -110,12 +90,8 @@ class PreflightValidator:
     def _validate_credentials(self, platforms: list[str]) -> list[str]:
         warnings = []
         for platform in platforms:
-            if platform == "twitter":
-                missing = [name for name in PLATFORM_CREDENTIALS[platform][:2]
-                           if not os.getenv(name)]
-            else:
-                missing = [name for name in PLATFORM_CREDENTIALS[platform]
-                           if not os.getenv(name)]
+            missing = [name for name in PLATFORM_CREDENTIALS[platform]
+                       if not os.getenv(name)]
             if missing:
                 warnings.append(
                     f"{platform}: missing credentials ({', '.join(missing)})")

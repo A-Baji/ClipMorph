@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-26
+
+### Added
+
+- Added per-job transcript, composition, and upload review checkpoints with revision checks, resumable state, immutable artifacts, and append-only upload history.
+- Added dashboard controls for per-source job overrides, transcript timing and typography, composition review, and upload drafts.
+- Added shared CLI and web API workflows for configuration validation, source fan-out, layout management, and job lifecycle operations.
+
+### Changed
+
+- **Breaking:** Replaced the flat configuration model with `app.yml` defaults and per-job overrides, finalized in each job's `job.yml`. Multi-source creation now creates independent jobs without persistent batch state.
+
+### Fixed
+
+- Corrected step-specific confirmation fallback and stacked caption panel padding.
+- Reported duplicate per-source configuration records instead of silently ignoring them.
+
 ## [0.4.3] - 2026-09-25
 
 ### Fixed
@@ -98,7 +115,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Updated the initial automated build and release workflow.
 
-[unreleased]: https://github.com/A-Baji/ClipMorph/compare/v0.4.3...HEAD
+[unreleased]: https://github.com/A-Baji/ClipMorph/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/A-Baji/ClipMorph/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/A-Baji/ClipMorph/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/A-Baji/ClipMorph/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/A-Baji/ClipMorph/compare/v0.4.0...v0.4.1
