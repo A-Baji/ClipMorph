@@ -82,15 +82,19 @@ class WebApiTests(unittest.TestCase):
     def test_source_upload_is_sanitized_and_checkpoint_transcript_is_versioned(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
-            with TestClient(create_app(data_dir)) as client:
+            app = create_app(data_dir)
+            with TestClient(app) as client:
                 uploaded = client.post(
                     "/api/v1/sources",
                     files={"file": ("../clip.mp4", b"video", "video/mp4")})
                 self.assertEqual(uploaded.status_code, 201)
                 name = uploaded.json()["name"]
-                job = client.post("/api/v1/jobs", json={
-                    "source": name, "configuration": {},
-                }).json()
+                with patch("clipmorph.workflow.execute_job") as execute_job:
+                    job = client.post("/api/v1/jobs", json={
+                        "source": name, "configuration": {},
+                    }).json()
+                    app.state.job_service._futures[job["job_id"]].result(timeout=2)
+                execute_job.assert_called_once()
                 job_id = job["job_id"]
                 manifest = client.get(f"/api/v1/jobs/{job_id}").json()
                 transcript = {
