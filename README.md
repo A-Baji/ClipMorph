@@ -79,7 +79,8 @@ the user access and refresh tokens. The requested scopes are `tweet.read`,
 ClipMorph deep-merges `app.yml:job_defaults` with one per-job configuration
 object. Dictionaries merge recursively; lists and scalars in the job object
 replace their defaults. Multi-source inputs may provide a direct job object in
-JSONL/YAML or a `<source filename>.yml` sidecar. See
+JSONL/YAML or a `.yml`/`.yaml` sidecar with `general.source`; the sidecar
+filename is arbitrary. See
 [Layered configuration](docs/CONFIG_LAYERS.md) for the schema and resolution
 rules.
 

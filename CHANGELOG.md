@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Resolve configuration sidecars by `general.source` instead of filename, allowing arbitrary `.yml`/`.yaml` names and distinct same-stem sources; duplicate sidecars for one source are rejected.
+
 ## [0.5.0] - 2026-09-26
 
 ### Added

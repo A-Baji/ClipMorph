@@ -23,8 +23,11 @@ artifacts, and platform results.
   traversal, separators, nested/outside-root paths. Persist normalized absolute
   source path and SHA-256 in the manifest. Discovery never recurses.
 - Per-source priority is field-wise deep merge: explicit JSONL/YAML record,
-  explicit config-dir `<filename>.yml`, source-dir sidecar, app defaults.
-  Objects merge; scalars/lists replace. CONFIG_LAYERS.md owns config semantics.
+  explicit config-dir sidecar, source-dir sidecar, app defaults. Sidecars are
+  immediate `.yml`/`.yaml` job objects selected by exact `general.source`;
+  filenames are not semantic and duplicate source keys in one directory are
+  invalid. Objects merge; scalars/lists replace. CONFIG_LAYERS.md owns config
+  semantics.
 - Conversion artifacts are in `output_dir/<job_id>/`, registered in the
   manifest. Review sessions live in the job directory. Trash local files only;
   never delete remote posts.
@@ -117,6 +120,10 @@ schema, queue, timezone, states, dedup and history belong to [#100](https://gith
 - Scan immediate source_dir children only. JSONL is one object per nonblank
   line; YAML is a list. Records are job configs with unique root-level
   `general.source`; wrappers/batch fields are invalid.
+- Sidecars are immediate `.yml`/`.yaml` files containing one job object with
+  `general.source`; filenames do not map to source names. Duplicate sidecars
+  for the same source in one directory are invalid. `clip.mp4` and `clip.mov`
+  remain distinct sources despite sharing a stem.
 - Read/encoding/JSON/YAML syntax errors reject atomically (CLI exit 2/API 422).
   Invalid individual records fail while valid records continue. Priority is
   explicit record > explicit config-dir sidecar > source sidecar > app defaults.
