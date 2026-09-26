@@ -58,7 +58,7 @@ class BaseUploadPipeline(ABC):
         if max_retries is None:
             max_retries = self.MAX_RETRIES
 
-        last_exception = None
+        last_exception: BaseException | None = None
 
         for attempt in range(max_retries):
             try:
