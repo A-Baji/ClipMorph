@@ -1,7 +1,11 @@
 import logging
+from importlib.metadata import PackageNotFoundError, version
 import warnings
 
-from clipmorph.__version__ import __version__
+try:
+    __version__ = version("clipmorph")
+except PackageNotFoundError:
+    __version__ = "0+unknown"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 

@@ -9,6 +9,7 @@ from pathlib import Path
 import time
 import uuid
 
+from clipmorph import __version__
 from clipmorph.auth import credential_status, load_auth_config, persist_auth_credentials
 from clipmorph.configuration import discover_source_names, load_app_configuration
 from clipmorph.configuration import save_app_configuration
@@ -43,7 +44,7 @@ def create_app(data_dir: str | Path | None = None,
     app_path = Path(app_config_path) if app_config_path else root / "app.yml"
     load_auth_config(root)
     service = JobService(root, app_config_path=app_path)
-    app = FastAPI(title="ClipMorph", version="0.4.1")
+    app = FastAPI(title="ClipMorph", version=__version__)
     app.state.job_service = service
 
     @app.on_event("shutdown")
