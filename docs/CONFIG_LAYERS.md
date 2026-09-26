@@ -16,8 +16,9 @@ described informally in
   A user can set `upload.content.title` in `app.yml`, then override it for
   an individual job.
 - `layouts` remain a **global-only named registry** in `app.yml`
-  (`GET/POST /layouts`). Tiers reference a layout by id; they don't compose
-  the registry itself.
+  (`GET/POST /layouts`). Records are `{id, name, layout}`; validate and save
+  them through the shared layout validator. Tiers reference a layout by id;
+  they don't compose the registry itself.
 - Preserve CLI/Web parity: the CLI and web surfaces use the same `job` CRUD
   operations, per-job override records, and two-source merge.
 - Preserve resumability: job manifests keep enough information to show the
@@ -61,8 +62,9 @@ general:
   clean: false                   # null-able per section below; this is the top-level default
 conversion:
   layout_id: <uuid | null>      # reference into the global layouts registry
-  layout: {...}                 # OR an inline layout object (mutually exclusive with layout_id)
+  layout: {...}                 # optional inline overrides over layout_id; inline layout is valid without an id
   skip: false                   # skip conversion and upload the input video directly
+  strict: false                 # fail on configured optional conversion/transcription errors
   no_confirm: null              # null = fall back to general.no_confirm; true/false overrides it for this step only
   clean: null                   # null = fall back to general.clean; deletes the converted clip (and subtitle artifact, unless overridden below)
   subtitles:
@@ -302,9 +304,10 @@ to their normal overlay rules.
 `crop` and `captions` are each optional; an empty `{}` layout is valid (no
 crop, no captions). `conversion.subtitles` controls
 whether and how transcript content is generated, while generated content is
-rendered through `captions`. `conversion.layout_id` and `conversion.layout`
-remain mutually exclusive — resolving a reference produces the same object
-shape a job would otherwise inline.
+rendered through `captions`. When `conversion.layout_id` is set, resolve its
+registry layout first and deep-merge optional `conversion.layout` overrides on
+top. Without an id, `conversion.layout` is the inline layout. Persist both the
+selected `layout_id` and fully materialized `layout` in the effective job.
 
 ## Merge semantics
 
@@ -323,9 +326,10 @@ shape a job would otherwise inline.
   transcription uses `tiny`/`cpu`/`int8`, captions default to the overlay
   renderer, and unspecified styling delegates to pipeline defaults.
 - Section-level fallbacks (`conversion.subtitles.no_confirm` →
+   Section-level fallbacks (`conversion.subtitles.no_confirm` →
   `conversion.no_confirm` → `general.no_confirm`; `upload.no_confirm` →
   `general.no_confirm`; `conversion.subtitles.clean` → `conversion.clean` →
-  `general.clean`) are resolved *after* the three tiers are merged, against
+  `general.clean`) are resolved *after* the two sources are merged, against
   the single effective configuration — they are not part of the tier-merge
   algorithm itself.
 
@@ -461,56 +465,216 @@ behavior instead of being replaced outright.
 
 ## Web Job API
 
-The web API uses the same job CRUD contract. Multi-job creation accepts selected
-sources and per-job override objects. UI batch-form changes are expanded into
-each job's override object before creation:
+and does not create a group manifest. Shared UI fields are copied into each
+`docs/CLI_WEB_PARITY.md` is authoritative for HTTP routes and request/response
+shapes. Single-source creation is `POST /api/v1/jobs`; multi-source creation is
+`POST /api/v1/jobs/bulk`, an ephemeral fan-out that creates independent jobs.
+Its request carries `source_names`, direct job-schema `job_configs`, and
+optional shared `overrides`. No group identifier, batch configuration tier, or
+group manifest is persisted. Explicit records override matching sidecars but
+do not narrow default root-level discovery.
 
-```json
-{
-  "overrides": {"upload": {"platforms": {"youtube": {"privacy_status": "unlisted"}}}},
-  "sources": [
-    {"general": {"source": "clip1.mp4"}, "upload": {"content": {"title": "Clip 1"}}},
-    {"general": {"source": "clip2.mp4"}, "upload": {"content": {"title": "Clip 2"}}}
-  ]
-}
-```
-
-The service applies `overrides` to each selected job's override object, then
-merges `global (app.yml) → per-job overrides` before calling
-`service.create_job`, using the same merge function the CLI uses. Single-job
-and multi-job creation share this route; list, get, update, delete, and resume
-remain job operations. The response includes created jobs and skipped/failed
-source records; resumability belongs to the individual job manifests. Single
-source of truth in
-`clipmorph/config.py`.
+For each source, both surfaces resolve `merge(app.yml:job_defaults,
+job_overrides)`, validate it, persist finalized effective `job.yml`, and create
+one manifest. The bulk response reports created/skipped/failed outcomes per
+source; successful jobs are not rolled back because another source fails.
+Job edits update only that job's effective config, never `app.yml`; changed app
+defaults affect future jobs only. Updates use the checkpoint/config hash and
+reopen rules below. Resume never silently re-merges newer app defaults.
 
 ## Job Manifest And Checkpoints
 
-Bump `MANIFEST_SCHEMA_VERSION` and store enough to reconstruct the merge for
-resume/audit. No migration or dual-read path for older manifests is needed —
-per repo convention, internal schemas do not carry backward compatibility:
+The manifest is the source of truth for lifecycle and audit state; `job.yml`
+is the source of truth for the job's current effective configuration. Bump the
+manifest schema for this contract. No migration or dual-read path is needed.
+Persist timestamps as UTC ISO-8601 values, hashes as lowercase SHA-256 hex, and
+errors without credentials or secret values.
 
-```python
-configuration: dict[str, Any]            # effective (merged) configuration
-configuration_sources: dict[str, Any]     # {"global": {...}}; no override patch is retained
-checkpoint: str                           # transcript | conversion | upload | completed
+```json
+{
+  "schema_version": 2,
+  "status": "awaiting_review",
+  "current_checkpoint": "transcript",
+  "current_configuration_hash": "<sha256 of canonical effective job.yml>",
+  "configuration": {"general": {"source": "clip.mp4"}, "conversion": {}, "upload": {}},
+  "configuration_sources": {"global_defaults": {"general": {}, "conversion": {}, "upload": {}}},
+  "checkpoints": {
+    "transcript": {
+      "status": "awaiting_review",
+      "revision": 1,
+      "configuration_hash": "<sha256 of transcription dependency projection>",
+      "artifact_hash": "<sha256 of transcript session file>",
+      "session": {"revision": 1, "path": "transcripts/revision-0001.json"},
+      "created_at": "<UTC timestamp>",
+      "started_at": "<UTC timestamp>",
+      "updated_at": "<UTC timestamp>",
+      "completed_at": null,
+      "invalidation_reason": null,
+      "error": null
+    },
+    "conversion": {"status": "pending", "revision": 0},
+    "upload": {"status": "pending", "revision": 0}
+  },
+  "current_artifact_id": null,
+  "artifacts": {},
+  "upload_attempts": []
+}
 ```
 
-Multi-job creation creates valid jobs and reports skipped or failed sources
-without discarding successfully created jobs. Jobs are per-source; no separate
-multi-group manifest is required. Each job exposes review
-checkpoints:
+Each checkpoint record has `status`, monotonic `revision`, dependency
+`configuration_hash`, nullable `artifact_hash`, `created_at`, `started_at`,
+`updated_at`, nullable `completed_at`, nullable `invalidation_reason`, and
+nullable structured `error`. `error` contains a stable code, safe message,
+occurrence timestamp, attempt id, and retryable flag. Stage-local fields such
+as transcript-session reference, conversion-artifact reference, or per-platform
+results are persisted alongside these common fields. `current_configuration_hash`
+hashes the entire canonical effective job configuration; each checkpoint's
+`configuration_hash` hashes only the normalized inputs that determine that
+stage's output. `current_checkpoint` is the earliest required stage that is
+pending, stale, failed, or awaiting review; it is null when all required stages
+are complete. Top-level `status` is derived as `created`, `queued`, `running`,
+`awaiting_review`, `partial_failure`, `failed`, `cancelled`, or `completed`; it
+is not an independent source of truth.
 
-1. After transcription: review text, timing, and caption typography.
-2. After conversion: review and update composition settings, then rerender.
-3. Before upload: update title, description, tags, schedule, and platform
-  settings; upload and artifact APIs must support update and deletion.
+Checkpoint statuses are `pending`, `running`, `awaiting_review`, `completed`,
+`partial_failure`, `skipped`, `failed`, `cancelled`, and `stale`.
+`partial_failure` is valid only for upload, where per-platform attempt results
+remain individually visible and successful platforms are not repeated by a
+targeted retry. Legal flow is:
 
-Changing transcript text, timing, or typography makes the converted artifact
-stale because captions are burned into the video; rerender before a new upload.
-Existing remote uploads remain historical results for the previous artifact.
-Changing composition likewise makes the local artifact stale. Changing upload
-content invalidates only the pending upload step.
+| Checkpoint | Legal progression |
+| --- | --- |
+| Transcript | `pending → running → awaiting_review → completed` |
+| Conversion | `pending → running → awaiting_review → completed` |
+| Upload | `pending → awaiting_review → running → completed` or `partial_failure`; a targeted retry returns it to `running` and appends results |
+| Retry/edit | `failed` or `cancelled → pending`; changed inputs make a completed checkpoint `stale → pending` |
+| Optional stage | `pending → skipped`; a configuration change may make it required again |
+
+An invalid transition returns a conflict and does not change the manifest.
+Transcript and conversion checkpoints stop for review after producing their
+candidate outputs. The upload checkpoint stops for review after conversion is
+accepted and before any remote upload. Accepting a review completes that
+checkpoint and makes the next required checkpoint actionable. `job resume`
+continues execution only; it does not accept or bypass a review. It returns a
+review-required result when the next checkpoint is awaiting review. Overall
+`completed` means every required checkpoint for the current effective
+configuration is completed; skipped optional stages do not block completion.
+
+### Transcript Session And Effective Configuration
+
+Store each transcript session in the job directory as an immutable revision,
+for example `transcripts/revision-0001.json`. It contains the source hash,
+media duration, original generated segments, edited segments, and stable
+segment ids. Each edited segment may carry its own typography override. The
+manifest links the active session revision and its file hash. Saving a review
+creates a new session revision; it never overwrites the original or a prior
+accepted review. The session file is canonical for transcript text, timing,
+and per-segment typography.
+
+On transcript acceptance, generated segments are materialized into the
+explicitly selected `conversion.layout.captions.overlay.items` or
+`conversion.layout.captions.stacked.items`. Generated items carry an internal
+`transcript_segment_id` marker. Re-materialization replaces only items carrying
+that marker and preserves authored items and their order. The transcript
+session remains authoritative; the generated items in effective `job.yml` are
+a derived copy for rendering. The selected renderer is never inferred from
+which collection happens to exist.
+
+Behavioral checkpoint edits update only that job's finalized effective
+`job.yml`, its configuration hash, and the relevant manifest checkpoint. They
+do not mutate `app.yml` or re-save a reusable layout preset. A transcript edit
+updates the session revision and regenerates the marked items in `job.yml`; a
+composition or upload-review edit updates its corresponding effective config
+fields. Writes use temporary files and atomic replacement; the manifest points
+at the new revision only after the referenced files are durable.
+
+### Artifact And Upload History
+
+Every successful render creates a new immutable conversion revision and a
+unique artifact id. A manifest artifact entry contains its id, revision, kind,
+relative or normalized path, SHA-256, conversion configuration hash,
+transcript revision (when used), creation timestamp, and state. The manifest's
+`current_artifact_id` points to the latest render; it may point to a stale
+artifact while a rerender is required. A rerender never overwrites an existing
+artifact. The previous artifact is marked `superseded`; configuration edits
+before rerender mark it `stale`. Both remain on disk by default. Only explicit
+artifact deletion removes local bytes, and deletion leaves an audit tombstone
+and all upload references intact.
+
+Each upload attempt is append-only and records attempt id, platform, artifact
+id and SHA-256, the upload-content/platform/schedule configuration snapshot and
+hash, start/completion timestamps, outcome, and safe response/error details.
+An attempt is never rewritten to point at a newer artifact or new content.
+Partial platform success remains visible per attempt and platform. Remote
+uploads are historical results; local edits never silently update or delete
+them.
+
+### Invalidation And Retry Rules
+
+Checkpoint input hashes are derived from these dependencies:
+
+| Change | Invalidated state | Retained history |
+| --- | --- | --- |
+| Transcript text, timing, segment typography, transcript generation settings, or source identity | Transcript and downstream conversion/upload work; converted artifact becomes stale | Prior transcript sessions, artifacts, and upload attempts |
+| Crop, captions/layout, subtitle/rendering, or composition settings | Conversion and pending upload work; converted artifact becomes stale | Prior artifacts and upload attempts |
+| Title, description, tags, schedule, or platform options | Upload draft/current upload checkpoint only; conversion remains valid | All prior upload attempts and remote results |
+| No dependency hash changes | Nothing | All state unchanged |
+
+Source identity is fixed for a job; changing the source requires creating a new
+job. Editing `app.yml` defaults does not change an existing job. `job update`
+applies a validated deep-merge patch to that job's effective configuration
+(lists replace), recomputes the affected hashes, and marks the earliest changed
+checkpoint stale with a structured reason. It marks downstream work pending
+only when that work can be repeated from the new inputs. Upload-only edits do
+not discard a valid conversion artifact.
+
+After transcription failure, retry transcription with current transcript
+settings; preserve prior failed-attempt details and any prior transcript
+revision. After conversion failure, retry from the latest accepted transcript
+and current composition config; create a new artifact only on success. After
+upload failure, retrying an attempt uses that attempt's exact artifact and
+frozen upload settings and appends a new attempt record. To use edited upload
+settings, create a new upload submission from the upload review checkpoint.
+Retry is limited to failed platforms unless the user explicitly selects more.
+
+Upload retry names the failed `attempt_id` and reuses that attempt's artifact
+and frozen upload settings. If its artifact is no longer current, the retry
+must also provide the matching `artifact_id` and
+`confirm_historical_artifact: true`. A new submission targeting an older
+artifact requires the same explicit id and confirmation. A missing or locally
+deleted artifact cannot be uploaded.
+Failed transcription/conversion attempts are retryable after returning to
+`pending`; retries never delete prior transcript sessions or artifact files.
+
+A completed job can be reopened only through an explicit review/edit or update
+with confirmation (`--reopen` in non-interactive CLI use, or `reopen: true` in
+the API). Only the affected checkpoint and its downstream dependencies reopen.
+Previously successful remote uploads remain immutable history, even when a new
+artifact or upload attempt is created.
+
+### CLI And Web Checkpoint Contract
+
+CLI review, accept, update, retry, artifact, upload, and resume operations use
+the same `JobService` transitions as the web API. The web contract is:
+
+| Operation | Route | Contract |
+| --- | --- | --- |
+| Read job/checkpoints | `GET /api/v1/jobs/{id}` | Return aggregate status, all checkpoint revisions, active transcript session, artifact pointers, and upload history references |
+| Update job config | `PATCH /api/v1/jobs/{id}/configuration` | Accept a patch, `expected_configuration_hash`, and optional `reopen`; validate and update only that job's `job.yml` |
+| Read/save transcript | `GET/PUT /api/v1/jobs/{id}/transcript` | Validate source hash and expected transcript revision; save a new immutable session revision and invalidate conversion when accepted edits change |
+| Accept transcript/conversion review | `POST /api/v1/jobs/{id}/checkpoints/{transcript\|conversion}/accept` | Require the current checkpoint revision; return conflict on stale review input |
+| Review/update upload draft | `GET/PUT/DELETE /api/v1/jobs/{id}/checkpoints/upload` | Update or discard only the pending draft; never modify prior upload attempts |
+| Resume/retry | `POST /api/v1/jobs/{id}/resume`; `POST /api/v1/jobs/{id}/checkpoints/{stage}/retry` | Resume earliest executable checkpoint; return conflict if review is required; retries append attempt/error history |
+| Artifacts | `GET/PATCH/DELETE /api/v1/jobs/{id}/artifacts/{artifact_id}` | Patch display metadata only; delete local bytes after confirmation and retain a tombstone |
+| Upload history/start/retry | `GET /api/v1/jobs/{id}/uploads`; `POST /api/v1/jobs/{id}/upload`; `POST /api/v1/jobs/{id}/uploads/{platform}/retry` | Retry requires `attempt_id`; if its artifact is no longer current, require matching `artifact_id` and `confirm_historical_artifact: true` |
+
+Mutations accept an expected checkpoint/configuration revision and return
+`409 Conflict` on concurrent edits or illegal transitions. Validation failures
+return `422`; missing jobs or revisions return `404`. The CLI exposes the same
+operations and reports the same checkpoint names, revisions, invalidation
+reasons, and per-platform outcomes. Batch-form values are expanded into
+individual job override objects before either caller invokes the shared
+configuration resolver.
 
 ## Open items intentionally left unspecified
 
