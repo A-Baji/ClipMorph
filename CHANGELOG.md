@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added `clipmorph/platforms.py` as the single source of truth for the supported platform set, per-platform upload defaults, and `upload.platforms` include/exclude resolution; CLI, workflow, service, configuration, and web surfaces consume it.
 - Added `scripts/check_docs.py` and CI documentation health checks for broken relative links, encoding mojibake, and duplicated doc passages.
-- Added ruff (E9,F), typed mypy (0 issues across `clipmorph/`), and coverage reporting as CI gates, a `dev` package extra for the tooling, and CI runs on `dev` pushes.
+- Added ruff (E9,F), typed mypy (0 issues across `clipmorph/`), and coverage reporting as CI gates, a `dev` package extra for the tooling, and a workflow concurrency group that cancels superseded runs.
 - Added the authentication setup guide `docs/AUTHENTICATION.md` with step-by-step credential generation for every provider section of `auth.yaml`.
 
 ### Changed

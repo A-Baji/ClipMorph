@@ -3,8 +3,6 @@ name: Tests
 on:
   pull_request:
     branches: [main]
-  push:
-    branches: [dev]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -132,9 +130,6 @@ jobs:
   e2e:
     name: Packaged browser E2E (desktop + mobile)
     runs-on: ubuntu-24.04
-    # Full browser E2E is the PR merge gate; dev pushes get the fast
-    # lint/type/unit path without re-paying the Playwright install.
-    if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v5
 
