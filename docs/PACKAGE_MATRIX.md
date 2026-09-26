@@ -20,7 +20,7 @@ building the Svelte dashboard assets that get baked into the UI artifacts.
 
 - `.github/workflows/tests.yml`: builds the frontend, installs `.[web]`, runs the full
   unit test suite (including `tests/test_ui_launcher.py`), runs CLI smoke tests
-  (`--help`, `init`, dry-run, resume, `--data-dir`, ordinary startup), runs the
+  (`--help`, `init`, job-create dry-run, job inspection, upload-review resume gate), runs the
   packaged browser E2E suite (`tests/test_e2e_dashboard.py`) at desktop and mobile
   viewport sizes, and greps workflow files to reject `npm publish` steps.
 - `.github/workflows/release.yml`: builds six PyInstaller artifacts (`cli`/`ui` ×
@@ -28,7 +28,7 @@ building the Svelte dashboard assets that get baked into the UI artifacts.
   respectively, and fails the build if a `cli` artifact contains
   `web_assets/index.html` or a `ui` artifact is missing it. Before creating the
   GitHub Release it verifies all six expected asset names exist, that
-  `clipmorph/__version__.py` matches the release tag, and that no workflow
+  `[project].version` in `pyproject.toml` matches the release tag, and that no workflow
   contains an npm distribution step. Python users install the base package or
   its `web` extra directly from the tagged GitHub repository URL.
 

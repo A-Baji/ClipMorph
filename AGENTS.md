@@ -59,7 +59,7 @@ The dependency set includes large media and ML packages. Prefer focused unit tes
 
 For Python or test changes, run the focused tests first, then the full unittest command and compile check when practical. For CLI or packaging changes, also run the help/init smoke tests and wheel build. Keep test cases deterministic and avoid changing unrelated behavior.
 
-A release version is stored in `clipmorph/__version__.py`. Do not change it as part of ordinary feature work. Releases are run through the manually dispatched `Build and Release` workflow described in `docs/RELEASE.md`; the workflow updates the version, builds platform artifacts, and creates the tag only after builds succeed.
+The release version is stored in `[project].version` in `pyproject.toml`. Update it and the matching changelog section in a commit merged to `main` before dispatching the `Build and Release` workflow. The workflow reads that committed version, builds the same commit, and creates its version tag only after all builds succeed; see `docs/RELEASE.md`.
 
 ## Harness maintenance
 
