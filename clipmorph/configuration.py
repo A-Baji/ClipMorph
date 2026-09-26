@@ -150,16 +150,44 @@ def _load_sidecar(path: Path) -> dict[str, Any]:
     return value
 
 
+def _load_matching_sidecar(directory: str | Path, source_name: str) -> dict[str, Any]:
+    root = Path(directory)
+    if not root.is_dir():
+        return {}
+
+    matches = []
+    sidecar_paths = sorted(
+        (path for path in root.iterdir()
+         if path.is_file() and path.suffix.lower() in {".yml", ".yaml"}),
+        key=lambda path: (path.name.casefold(), path.name))
+    for path in sidecar_paths:
+        sidecar = _load_sidecar(path)
+        if not sidecar:
+            continue
+        general = sidecar.get("general")
+        if not isinstance(general, dict) or not isinstance(general.get("source"), str):
+            raise ValueError(f"Job sidecar {path} requires general.source")
+        sidecar_source = validate_source_name(general["source"])
+        if sidecar_source == source_name:
+            matches.append((path, sidecar))
+
+    if len(matches) > 1:
+        paths = ", ".join(str(path) for path, _ in matches)
+        raise ValueError(
+            f"Multiple job sidecars target source {source_name}: {paths}")
+    return matches[0][1] if matches else {}
+
+
 def merge_source_configurations(
         source_name: str, records: list[Any],
         explicit_config_dir: str | Path | None,
         source_dir: str | Path) -> dict[str, Any]:
-    """Merge sidecars and the matching full job record in priority order."""
+    """Merge source-keyed sidecars and a matching full job record by priority."""
     source_name = validate_source_name(source_name)
-    result = _load_sidecar(Path(source_dir) / f"{source_name}.yml")
+    result = _load_matching_sidecar(source_dir, source_name)
     if explicit_config_dir is not None:
-        explicit_sidecar = _load_sidecar(
-            Path(explicit_config_dir) / f"{source_name}.yml")
+        explicit_sidecar = _load_matching_sidecar(
+            explicit_config_dir, source_name)
         result = merge_configuration(result, explicit_sidecar)
     matches = []
     for record in records:

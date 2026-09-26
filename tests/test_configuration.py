@@ -229,11 +229,14 @@ class MultiSourceConfigurationTests(unittest.TestCase):
                 '{"general":{"source":"clip.mp4"},'
                 '"upload":{"content":{"title":"record"}}}\n',
                 encoding="utf-8")
-            (source_dir / "clip.mp4.yml").write_text(
-                "upload:\n  content:\n    description: source-sidecar\n",
+            (source_dir / "source-settings.yml").write_text(
+                "general:\n  source: clip.mp4\nupload:\n  content:\n    description: source-sidecar\n",
                 encoding="utf-8")
-            (explicit_dir / "clip.mp4.yml").write_text(
-                "upload:\n  content:\n    title: explicit-sidecar\n",
+            (source_dir / "another-source.yaml").write_text(
+                "general:\n  source: clip.mov\nupload:\n  content:\n    description: mov-sidecar\n",
+                encoding="utf-8")
+            (explicit_dir / "explicit-settings.yml").write_text(
+                "general:\n  source: clip.mp4\nupload:\n  content:\n    title: explicit-sidecar\n",
                 encoding="utf-8")
 
             records = load_job_records(records_path)
@@ -242,12 +245,26 @@ class MultiSourceConfigurationTests(unittest.TestCase):
 
             self.assertEqual(merged["upload"]["content"], {
                 "title": "record", "description": "source-sidecar"})
+            merged_mov = merge_source_configurations(
+                "clip.mov", [], explicit_dir, source_dir)
+            self.assertEqual(
+                merged_mov["upload"]["content"]["description"], "mov-sidecar")
 
             yaml_path = root / "jobs.yaml"
             yaml_path.write_text(
                 "- general:\n    source: clip.mp4\n  upload:\n    skip: true\n",
                 encoding="utf-8")
             self.assertEqual(load_job_records(yaml_path)[0]["upload"]["skip"], True)
+
+    def test_sidecars_reject_multiple_records_for_the_same_source(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_dir = Path(temp_dir)
+            for filename in ("first.yml", "second.yaml"):
+                (config_dir / filename).write_text(
+                    "general:\n  source: clip.mp4\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "Multiple job sidecars.*clip.mp4"):
+                merge_source_configurations("clip.mp4", [], config_dir, config_dir)
 
     def test_source_discovery_is_root_only_and_deterministic(self):
         with tempfile.TemporaryDirectory() as temp_dir:

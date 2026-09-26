@@ -442,11 +442,16 @@ default must keep it `null`, and every created job must resolve it to an
 existing supported file under the configured source directory.
 
 Configuration input priority is explicit per-job JSONL/YAML, then an explicit
-config directory containing `clip.mp4.yml` sidecars, then `clip.mp4.yml`
-sidecars in `app.yml:source_dir`. Explicit records override matching files but
-do not change selection: every supported root-level clip is still processed.
-If no override source is provided, every job uses only
-`app.yml:job_defaults`.
+config-directory sidecar, then a source-directory sidecar, then
+`app.yml:job_defaults`. Each immediate `.yml` or `.yaml` sidecar is one job
+configuration object and must declare its root-level `general.source`. The
+filename is not semantic; sidecars are matched by the exact source filename in
+that field. Thus `clip.mp4` and `clip.mov` are distinct keys even though they
+share a stem. Each directory may contain at most one sidecar for a given
+`general.source`; duplicates are rejected as ambiguous. Explicit records
+override matching sidecars but do not change selection: every supported
+root-level clip is still processed. If no override source is provided, every
+job uses only `app.yml:job_defaults`.
 
 Single-job and multi-job creation use the same `job` service and merge
 `app.yml:job_defaults` with each record. `job list`, `job
