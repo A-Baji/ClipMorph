@@ -15,10 +15,16 @@ python -m pip install -e .
 
 ```bash
 clipmorph init
-clipmorph input/video.mp4 --title "My clip" --dry-run
-clipmorph input/video.mp4 --title "My clip" --no-upload
+clipmorph job create sources/video.mp4 --dry-run
+clipmorph job create sources/video.mp4
 clipmorph web
 ```
+
+`app.yml` defaults to the ClipMorph data directory. Configure `source_dir`,
+`output_dir`, `job_defaults`, and named layouts there. Job configuration is
+resolved from `app.yml:job_defaults` plus one per-job override object; finalized
+jobs live in `jobs/<job_id>/job.yml` with state in `manifest.json`. A source must
+be an immediate file under `source_dir`.
 
 ### Local dashboard
 
@@ -30,9 +36,9 @@ service with `Ctrl+C`.
 
 ## Authentication and secrets
 
-Running `clipmorph init` creates both `clipmorph.yaml` and an adjacent
-`auth.yaml` in the same directory. Use `--data-dir <path>` to choose a custom
-local data directory for the same pattern. See
+Running `clipmorph init` creates both `app.yml` and an adjacent `auth.yaml`.
+Use `--data-dir <path>` to choose a custom local data directory, or
+`--app-config <path>` to select an app configuration file. See
 [Authentication Setup](docs/AUTHENTICATION.md) for instructions on obtaining
 every value and filling in the provider sections. For example:
 
@@ -70,20 +76,19 @@ the user access and refresh tokens. The requested scopes are `tweet.read`,
 
 ## Configuration precedence
 
-ClipMorph resolves configuration in this order:
-
-1. CLI flags or JSON overrides passed at runtime
-2. Values from the YAML/JSON config file supplied through `--config`
-3. Canonical built-in defaults defined in the runtime config schema
-
-The default platform values are centralized in the runtime config and reused by example templates and dry-run output so example settings stay consistent with actual execution.
+ClipMorph deep-merges `app.yml:job_defaults` with one per-job configuration
+object. Dictionaries merge recursively; lists and scalars in the job object
+replace their defaults. Multi-source inputs may provide a direct job object in
+JSONL/YAML or a `<source filename>.yml` sidecar. See
+[Layered configuration](docs/CONFIG_LAYERS.md) for the schema and resolution
+rules.
 
 ## Supported media and workflow constraints
 
 - Input formats: commonly MP4/MOV/MKV/AVI/WebM files
 - Preferred output target: vertical 9:16 content with validated crop geometry
 - Uploads: support partial failures without dropping platform state in the job manifest
-- Dry runs: validate config, credentials, and media before conversion or upload
+- Dry runs: validate source selection, config, layout, and media without creating jobs
 - Retry handling: pipeline retries and partial-failure reporting are available for uploads
 - Cleanup: use `--clean` to remove generated artifacts after a successful run
 

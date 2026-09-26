@@ -40,14 +40,14 @@ keep media imports lazy.
 | Command | Contract |
 | --- | --- |
 | `clipmorph --help`; `clipmorph init [--config-path PATH]` | Lightweight help; init writes app.yml and adjacent auth.yaml, no media work. |
-| `clipmorph web [--host HOST] [--port PORT]` | Start API/dashboard using selected app config/data directory. |
+| `clipmorph web [--host HOST] [--port PORT]` | Start API/dashboard; global `--data-dir` and `--app-config` precede the command. |
 | `clipmorph auth status`; `auth set PLATFORM`; `auth twitter` | Status only; secure prompt + auth.yaml update; existing Twitter/X OAuth flow. Never print secrets. |
-| `clipmorph job create SOURCE [--job-configs FILE] [--config-dir DIR] [--dry-run] [--yes]` | File creates one job; directory discovers supported root clips, one job per unique source. JSONL object-per-line, YAML list. Dry-run writes nothing. |
+| `clipmorph job create SOURCE [--job-configs FILE] [--config-dir DIR] [--dry-run] [--yes]` | SOURCE is a supported root-level file beneath `app.yml:source_dir` or that directory. Directory creation fans out over immediate files; JSONL is object-per-line, YAML is a list. Dry-run writes no job or manifest. |
 | `clipmorph job list [--status STATUS]`; `job get ID` | List/show manifest, effective config, checkpoint, artifacts and platform results; redact secrets. |
 | `clipmorph job update ID --patch FILE [--reopen]`; `job resume ID`; `job cancel ID`; `job delete ID --yes` | Apply a validated per-job patch using the current config hash; persist finalized job.yml and apply #180 invalidation. Reopen completed work only with confirmation; source identity is immutable. |
-| `clipmorph job review ID CHECKPOINT [--edits FILE]`; `job render ID` | Review transcript/composition/pre-upload; edits match API; shared accept and rerender. |
-| `clipmorph job upload ID [--platform ...]`; `job upload retry ID PLATFORM` | Submit after review; retry one failed platform. |
-| `clipmorph job artifacts list/preview/download/rename/delete ...` | Registered artifact operations; delete requires confirmation. |
+| `clipmorph job review ID CHECKPOINT [--edits FILE]`; `job render ID` | `--edits` supplies a complete transcript edit-session YAML/JSON object. Review acceptance uses the current manifest revision; render creates a new immutable artifact. |
+| `clipmorph job upload ID [--platform PLATFORM]`; `job upload retry ID PLATFORM [--attempt-id ID]` | Submit the accepted upload draft or retry one failed attempt. Retries use frozen artifact/settings; historical use requires explicit ID and confirmation. |
+| `clipmorph job artifacts list ID`; `preview ID ARTIFACT_ID`; `download ID ARTIFACT_ID --destination PATH`; `rename ID ARTIFACT_ID --name NAME`; `delete ID ARTIFACT_ID --yes` | Operate on registered artifact IDs; rename changes display metadata only, delete trashes local bytes and retains a manifest tombstone. |
 | `clipmorph layout list/create/get/delete ...` | CRUD validated global `{id,name,layout}` records; create reads YAML/JSON. |
 
 Map CLI controls to CONFIG_LAYERS.md: no-confirm -> `general.no_confirm`, clean
@@ -75,23 +75,42 @@ root-level names under `source_dir`; validate before queueing.
 | `GET/POST /sources` | List root-level supported files; multipart upload sanitizes basename, validates media, uniquifies collision, returns `201 {name,source}`. |
 | `GET/POST /layouts`; `GET/PATCH/DELETE /layouts/{id}` | Validated `{id,name,layout}` in app.yml. Delete requires `confirm=true`; materialized jobs remain valid. |
 | `GET /jobs?status=...`; `GET /jobs/{id}` | List/get source, status/checkpoint, timestamps, config, artifacts, platform results. Missing ID `404`. |
-| `POST /jobs/validate` | Single/multi shape; `200 {valid,created,skipped,failed,effective_configurations,warnings}`, no writes; malformed request `422`. |
-| `POST /jobs` | Single `{source,configuration}`; persist job.yml/manifest and queue; `202 {job,status_url}`. |
-| `POST /jobs/bulk` | `{source_names:null|[...],job_configs:[<job objects>],overrides:<job object>}`. Null selects all root clips; explicit names select only those. Direct job records key on `general.source`; copy shared overrides per job. Return per-source created/skipped/failed arrays; no group ID. |
+| `POST /jobs/validate` | Single `{source,configuration}` or bulk `{source_names,job_configs,overrides}`; `200 {valid,created,skipped,failed,effective_configurations,warnings}`, no writes; malformed request `422`. |
+| `POST /jobs` | Single `{source,configuration}`; persist finalized job.yml/manifest and queue; `202 {job_id,job,status_url}`. |
+| `POST /jobs/bulk` | `{source_names:null|[...],job_configs:[<job objects>],overrides:<job object>,config_dir?:PATH}`. Null selects all immediate source-root files; explicit names select only those. Direct job records key on `general.source`; shared overrides are copied per source before resolution. Return `{created,skipped,failed,summary,effective_configurations}`; no group ID. |
 | `PATCH /jobs/{id}/configuration`; `DELETE /jobs/{id}?confirm=true` | PATCH accepts `{patch,expected_configuration_hash,reopen?}`, validates/applies to effective config, saves job.yml, applies #180; source immutable. Hash mismatch `409`, invalid patch `422`. DELETE trashes local data/output only. |
 | `POST /jobs/{id}/resume`; `POST /jobs/{id}/cancel`; `POST /jobs/{id}/checkpoints/{stage}/retry`; `POST /jobs/{id}/render`; `GET /jobs/{id}/events` | Resume only executable work (`409` if review is required); cancel needs `{confirm:true}`; retry appends attempt history; render creates new artifact revision (`202`). SSE ends terminal. |
-| `GET/PUT /jobs/{id}/transcript` | Source-bound immutable session; PUT requires matching source hash and expected revision, validates edits, saves a new revision. Conflict `409`; invalid edits `422`. |
+| `GET/PUT /jobs/{id}/transcript` | GET returns the active source-bound session. PUT body includes `source_sha256`, `expected_revision`, optional `expected_checkpoint_revision`, duration and original/edited segments; it validates edits and saves a new immutable revision. Conflict `409`; invalid edits `422`. |
 | `POST /jobs/{id}/checkpoints/transcript/accept`; `POST /jobs/{id}/checkpoints/conversion/accept` | Accept current review with expected checkpoint revision; stale input/illegal transition `409`. State contract is [#180](https://github.com/A-Baji/ClipMorph/issues/180). |
-| `GET/PUT/DELETE /jobs/{id}/checkpoints/upload` | Read, update, or discard only the pending upload draft; mutations require expected revision and do not change prior attempts. |
+| `GET/PUT/DELETE /jobs/{id}/checkpoints/upload` | GET returns `{upload,checkpoint}`; PUT body `{expected_revision,upload,reopen?}` updates only the pending draft; DELETE query `expected_revision` resets it to frozen global defaults. Mutations do not change prior attempts. |
 | `GET /jobs/{id}/uploads`; `POST /jobs/{id}/upload` | Read append-only history; submit pending draft after review against current artifact; accepted work `202`. |
 | `POST /jobs/{id}/uploads/{platform}/retry` | Body names failed `attempt_id`; reuse frozen settings/artifact. Historical retry requires matching `artifact_id` and `confirm_historical_artifact:true`. |
-| `GET /jobs/{id}/artifacts`; `GET /jobs/{id}/artifacts/{artifact_id}/preview`; `GET .../download` | List immutable revisions; safely stream inline/attachment; missing/deleted bytes `404`; no arbitrary paths. |
-| `GET/PATCH/DELETE /jobs/{id}/artifacts/{artifact_id}` | PATCH display metadata only. Confirmed deletion removes local bytes but retains tombstone/upload references; IDs/revisions are immutable. |
+| `GET /jobs/{id}/artifacts`; `GET /jobs/{id}/artifacts/{artifact_id}/preview`; `GET .../download` | List immutable revisions without local paths; stream registered bytes; missing/deleted bytes or paths outside allowed roots return `404`. |
+| `GET/PATCH/DELETE /jobs/{id}/artifacts/{artifact_id}` | PATCH body `{display_name}` changes display metadata only. DELETE requires `confirm=true`, removes local bytes but retains a manifest tombstone/upload references; source artifacts cannot be deleted. |
 
 Explicit records override matching sidecars but never narrow all-source
 discovery; only `source_names` filters API selection. Unknown record sources
 fail without escaping root. `upload.schedule` location is fixed; schedule
 schema, queue, timezone, states, dedup and history belong to [#100](https://github.com/A-Baji/ClipMorph/issues/100). #179 defines no scheduler API.
+
+### Response And Validation Boundaries
+
+- Validation failures use `{error:{code,message}}`; `404` is a missing resource,
+  `409` is a stale revision, illegal transition, immutable source, review gate,
+  or unavailable/historical artifact conflict, and `422` is malformed input.
+- Each bulk outcome carries `source`, `record_index`, `status`, `code`,
+  `message`, `job_id`, and `status_url`; inapplicable values are null. The
+  summary counts created, skipped, and failed records independently.
+- CLI exits `0` for success/valid dry-run, `1` for a source/runtime failure,
+  `2` for usage or configuration input errors, and `130` for interruption.
+- Source validation occurs at `JobService.resolve_job`; root containment,
+  extension, schema, layout, and title checks are shared by validation and
+  creation. `job.yml` stores the effective normalized object; `manifest.json`
+  stores source identity, the global-default snapshot, checkpoints, artifact
+  revisions, safe errors, and append-only upload attempts.
+- Focused implementation tests live in `tests/test_configuration.py`,
+  `tests/test_layout.py`, `tests/test_layout_rendering.py`,
+  `tests/test_transcript.py`, `tests/test_cli.py`, and `tests/test_web.py`.
 
 ## Discovery and Results
 

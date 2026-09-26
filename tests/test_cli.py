@@ -9,7 +9,8 @@ from unittest.mock import MagicMock, patch
 
 from clipmorph.__main__ import main
 from clipmorph.batch import BatchProcessor
-from clipmorph.cli import build_platform_default_config, summarize_runtime_configuration
+from clipmorph.cli import build_platform_default_config, run_cli
+from clipmorph.cli import summarize_runtime_configuration
 from clipmorph.workflow import execute_job
 from clipmorph.job import default_data_dir
 from clipmorph.preflight import PreflightError, PreflightValidator
@@ -37,23 +38,20 @@ class FakeFFmpegRunner:
 
 
 class CliInitializationTests(unittest.TestCase):
-    def test_init_uses_data_dir_by_default(self):
+    def test_init_writes_app_yaml_and_auth_in_selected_data_directory(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            expected_dir = Path(temp_dir)
-            expected_config = expected_dir / "clipmorph.yaml"
-            expected_auth = expected_dir / "auth.yaml"
+            data_dir = Path(temp_dir) / "data"
 
-            with patch.object(sys, "argv", ["clipmorph", "init"]), \
-                    patch("clipmorph.__main__.default_data_dir",
-                          return_value=expected_dir):
+            with patch.object(sys, "argv", [
+                    "clipmorph", "--data-dir", str(data_dir), "init"]):
                 main()
 
-            self.assertTrue(expected_config.exists())
-            self.assertTrue(expected_auth.exists())
+            self.assertTrue((data_dir / "app.yml").exists())
+            self.assertTrue((data_dir / "auth.yaml").exists())
 
-    def test_init_subcommand_creates_auth_template_next_to_config(self):
+    def test_init_config_path_writes_adjacent_auth_template(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            config_path = Path(temp_dir) / "clipmorph.yaml"
+            config_path = Path(temp_dir) / "app.yml"
             with patch.object(sys, "argv", [
                     "clipmorph", "init", "--config-path", str(config_path)
             ]):
@@ -62,197 +60,64 @@ class CliInitializationTests(unittest.TestCase):
             self.assertTrue(config_path.exists())
             self.assertTrue((Path(temp_dir) / "auth.yaml").exists())
 
-    def test_init_creates_template_without_configuring_ffmpeg(self):
+    def test_init_does_not_replace_existing_app_config(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            config_path = Path(temp_dir) / "clipmorph.yaml"
-            with patch.object(sys, "argv", [
-                    "clipmorph", "init", "--config-path", str(config_path)
-            ]), patch("clipmorph.__main__.configure_ffmpeg") as configure:
-                main()
-
-            self.assertTrue(config_path.exists())
-            self.assertIn("general:", config_path.read_text(encoding="utf-8"))
-            self.assertTrue((Path(temp_dir) / "auth.yaml").exists())
-            configure.assert_not_called()
-
-    def test_data_dir_is_available_as_a_runtime_override(self):
-        with patch.object(sys, "argv", [
-                "clipmorph", "--no-upload", "--data-dir", "custom-data",
-                "input.mp4"
-        ]):
-            from clipmorph.cli import parse_args_with_parser
-            with patch("clipmorph.cli._load_config_data", return_value={}):
-                with patch("pathlib.Path.exists", return_value=True):
-                    args, _ = parse_args_with_parser()
-        self.assertEqual(args.data_dir, "custom-data")
-
-    def test_default_data_dir_config_is_loaded_for_cli_runs(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            data_dir = Path(temp_dir)
-            config_path = data_dir / "clipmorph.yaml"
-            config_path.write_text(
-                "platforms:\n  tiktok:\n    privacy_level: SELF_ONLY\n",
-                encoding="utf-8")
-
-            with patch.object(sys, "argv", [
-                    "clipmorph", "--no-upload", "input.mp4"
-            ]), patch("clipmorph.cli.default_data_dir", return_value=data_dir):
-                from clipmorph.cli import parse_args_with_parser
-                args, _ = parse_args_with_parser()
-
-        self.assertEqual(args.config, str(config_path))
-        self.assertEqual(args.tiktok_privacy_level, "SELF_ONLY")
-
-    def test_init_backs_up_existing_template(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            config_path = Path(temp_dir) / "clipmorph.yaml"
-            config_path.write_text("old: true\n", encoding="utf-8")
-
+            config_path = Path(temp_dir) / "app.yml"
+            config_path.write_text("existing: true\n", encoding="utf-8")
             with patch.object(sys, "argv", [
                     "clipmorph", "init", "--config-path", str(config_path)
             ]):
                 main()
 
-            backup_path = Path(f"{config_path}.backup")
-            self.assertEqual(backup_path.read_text(encoding="utf-8"),
-                             "old: true\n")
-            self.assertIn("general:", config_path.read_text(encoding="utf-8"))
-
-    def test_init_numbers_existing_backup_files(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            config_path = Path(temp_dir) / "clipmorph.yaml"
-            config_path.write_text("old: true\n", encoding="utf-8")
-            backup_path = Path(f"{config_path}.backup")
-            backup_path.write_text("previous: backup\n", encoding="utf-8")
-            Path(f"{config_path}.backup1").write_text("older: backup\n",
-                                                      encoding="utf-8")
-
-            with patch.object(sys, "argv", [
-                    "clipmorph", "init", "--config-path", str(config_path)
-            ]):
-                main()
-
-            self.assertEqual(backup_path.read_text(encoding="utf-8"),
-                             "old: true\n")
-            self.assertEqual(
-                Path(f"{config_path}.backup1").read_text(encoding="utf-8"),
-                "previous: backup\n")
-            self.assertEqual(
-                Path(f"{config_path}.backup2").read_text(encoding="utf-8"),
-                "older: backup\n")
-            self.assertIn("general:", config_path.read_text(encoding="utf-8"))
+            self.assertEqual(config_path.read_text(encoding="utf-8"), "existing: true\n")
 
 
-class SharedWorkflowRegressionTests(unittest.TestCase):
-    def test_empty_upload_list_uses_all_platforms_in_shared_workflow(self):
-        class FakeManifest:
-            job_id = "job"
-            source_path = "input.mp4"
-            configuration = {"no_conversion": True, "no_upload": False, "upload_to": []}
-
-            def set_step(self, *_args, **_kwargs):
-                pass
-
-            def set_artifact(self, *_args, **_kwargs):
-                pass
-
-            def record_platform(self, *_args, **_kwargs):
-                pass
-
-        with patch("clipmorph.workflow.configure_ffmpeg"), \
-                patch("clipmorph.workflow.FFmpegRunner") as runner_type, \
-                patch("clipmorph.workflow.PreflightValidator") as validator_type, \
-                patch("clipmorph.upload_pipeline.UploadPipeline") as pipeline_type:
-            runner_type.return_value.get_video_info.return_value = {
-                "streams": [{"codec_type": "video", "width": 1920, "height": 1080}],
-                "format": {"duration": 10},
-            }
-            validator_type.return_value.validate.return_value = []
-            pipeline_type.return_value.run.return_value = {}
-            execute_job(FakeManifest(), CancellationToken(), "jobs")
-
-        self.assertEqual(
-            pipeline_type.call_args.kwargs,
-            {"youtube": True, "instagram": True, "tiktok": True, "twitter": True},
-        )
-
+class JobCommandPersistenceTests(unittest.TestCase):
     def test_cli_data_dir_persists_updated_manifest_state(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            source = Path(temp_dir) / "input.mp4"
-            source.write_bytes(b"video")
             data_dir = Path(temp_dir) / "custom-data"
+            source_dir = data_dir / "sources"
+            source_dir.mkdir(parents=True)
+            source = source_dir / "input.mp4"
+            source.write_bytes(b"video")
 
             with patch.object(sys, "argv", [
                     "clipmorph", "--data-dir", str(data_dir),
-                    "--no-conversion", "--no-upload", str(source)
-            ]), patch("clipmorph.__main__._run_preflight", return_value=[]), \
-                    patch("clipmorph.__main__.configure_ffmpeg"), \
-                    patch("clipmorph.ffmpeg.FFmpegRunner"):
+                "job", "create", str(source)
+            ]), patch("clipmorph.workflow.execute_job"):
                 main()
 
             manifests = list((data_dir / "jobs").glob("*/manifest.json"))
             self.assertEqual(len(manifests), 1)
             loaded = JobManifest.load(manifests[0].parent.name, str(data_dir / "jobs"))
-            self.assertEqual(loaded.status, "completed")
-            self.assertEqual(loaded.artifact_path, str(source))
+            self.assertEqual(loaded.status, "queued")
+            self.assertEqual(loaded.configuration["general"]["source"], "input.mp4")
 
 
-class SharedWorkflowRegressionTests(unittest.TestCase):
-    def test_empty_upload_list_uses_all_platforms_in_shared_workflow(self):
-        class FakeManifest:
-            job_id = "job"
-            source_path = "input.mp4"
-            configuration = {"no_conversion": True, "no_upload": False, "upload_to": []}
-
-            def set_step(self, *_args, **_kwargs):
-                pass
-
-            def set_artifact(self, *_args, **_kwargs):
-                pass
-
-            def record_platform(self, *_args, **_kwargs):
-                pass
-
-        with patch("clipmorph.workflow.configure_ffmpeg"), \
-                patch("clipmorph.workflow.FFmpegRunner") as runner_type, \
-                patch("clipmorph.workflow.PreflightValidator") as validator_type, \
-                patch("clipmorph.upload_pipeline.UploadPipeline") as pipeline_type:
-            runner_type.return_value.get_video_info.return_value = {
-                "streams": [{"codec_type": "video", "width": 1920, "height": 1080}],
-                "format": {"duration": 10},
-            }
-            validator_type.return_value.validate.return_value = []
-            pipeline_type.return_value.run.return_value = {}
-            execute_job(FakeManifest(), CancellationToken(), "jobs")
-
-        self.assertEqual(
-            pipeline_type.call_args.kwargs,
-            {"youtube": True, "instagram": True, "tiktok": True, "twitter": True},
-        )
-
+class JobCommandPersistenceTests(unittest.TestCase):
     def test_cli_data_dir_persists_updated_manifest_state(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            source = Path(temp_dir) / "input.mp4"
-            source.write_bytes(b"video")
             data_dir = Path(temp_dir) / "custom-data"
+            source_dir = data_dir / "sources"
+            source_dir.mkdir(parents=True)
+            source = source_dir / "input.mp4"
+            source.write_bytes(b"video")
 
             with patch.object(sys, "argv", [
                     "clipmorph", "--data-dir", str(data_dir),
-                    "--no-conversion", "--no-upload", str(source)
-            ]), patch("clipmorph.__main__._run_preflight", return_value=[]), \
-                    patch("clipmorph.__main__.configure_ffmpeg"), \
-                    patch("clipmorph.ffmpeg.FFmpegRunner"):
+                "job", "create", str(source)
+            ]), patch("clipmorph.workflow.execute_job"):
                 main()
 
             manifests = list((data_dir / "jobs").glob("*/manifest.json"))
             self.assertEqual(len(manifests), 1)
             loaded = JobManifest.load(manifests[0].parent.name, str(data_dir / "jobs"))
-            self.assertEqual(loaded.status, "completed")
-            self.assertEqual(loaded.artifact_path, str(source))
+            self.assertEqual(loaded.status, "queued")
+            self.assertEqual(loaded.configuration["general"]["source"], "input.mp4")
 
 
 class PreflightTests(unittest.TestCase):
-    def test_rejects_camera_crop_outside_source(self):
+    def test_rejects_layout_crop_outside_source(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             input_path = Path(temp_dir) / "input.mp4"
             input_path.write_bytes(b"video")
@@ -260,15 +125,17 @@ class PreflightTests(unittest.TestCase):
                 PreflightValidator(FakeFFmpegRunner()).validate(
                     input_path=str(input_path),
                     output_dir=temp_dir,
-                    no_conversion=False,
-                    no_upload=True,
+                    conversion={"skip": False},
+                    upload={"skip": True},
                     enabled_platforms=[],
-                    title=None,
-                    cam_x=1800,
-                    cam_y=0,
-                    cam_width=480,
-                    cam_height=270,
-                    platform_overrides=None)
+                    title="clip",
+                    layout={"crop": {
+                        "enabled": True,
+                        "source": {"x": 1800, "y": 0,
+                                   "width": 320, "height": 240},
+                        "sizing": {"mode": "native"},
+                        "composition": {"mode": "overlay", "placement": "top"},
+                    }})
 
     def test_returns_credential_warnings_without_uploading(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -281,15 +148,11 @@ class PreflightTests(unittest.TestCase):
                 warnings = PreflightValidator(FakeFFmpegRunner()).validate(
                     input_path=str(input_path),
                     output_dir=temp_dir,
-                    no_conversion=True,
-                    no_upload=False,
+                    conversion={"skip": True},
+                    upload={"skip": False},
                     enabled_platforms=["youtube"],
                     title="A title",
-                    cam_x=0,
-                    cam_y=0,
-                    cam_width=1,
-                    cam_height=1,
-                    platform_overrides=None)
+                    layout={})
             self.assertTrue(any("youtube" in warning for warning in warnings))
 
 
@@ -608,7 +471,7 @@ class ArtifactIsolationTests(unittest.TestCase):
             manifest.record_platform("YouTube", {"success": True},
                                     str(jobs_dir))
             loaded = JobManifest.load(manifest.job_id, str(jobs_dir))
-            self.assertEqual(loaded.schema_version, 1)
+            self.assertEqual(loaded.schema_version, 2)
             self.assertEqual(loaded.source_sha256, manifest.source_sha256)
             self.assertTrue(loaded.platforms["YouTube"]["success"])
 
@@ -623,21 +486,53 @@ class ArtifactIsolationTests(unittest.TestCase):
             loaded = JobManifest.load(manifest.job_id, temp_dir)
 
             self.assertEqual(loaded.steps["conversion"]["status"], "running")
-            self.assertEqual(loaded.artifacts["primary"]["source_sha256"],
-                             manifest.source_sha256)
+            artifact = loaded.artifacts[loaded.current_artifact_id]
+            self.assertEqual(artifact["source_sha256"], manifest.source_sha256)
+
+    def test_rerender_artifacts_are_immutable_revisions(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "input.mp4"
+            source.write_bytes(b"video")
+            first = Path(temp_dir) / "first.mp4"
+            second = Path(temp_dir) / "second.mp4"
+            first.write_bytes(b"first revision")
+            second.write_bytes(b"second revision")
+            manifest = JobManifest.create(str(source), {}, temp_dir)
+
+            manifest.set_artifact(str(first), temp_dir)
+            first_id = manifest.current_artifact_id
+            manifest.set_artifact(str(second), temp_dir)
+            loaded = JobManifest.load(manifest.job_id, temp_dir)
+
+            self.assertEqual(len(loaded.artifacts), 2)
+            self.assertEqual(loaded.artifacts[first_id]["state"], "superseded")
+            self.assertEqual(loaded.artifacts[loaded.current_artifact_id]["state"], "current")
+            self.assertNotEqual(loaded.artifacts[first_id]["sha256"],
+                                loaded.artifacts[loaded.current_artifact_id]["sha256"])
 
 
 class JobServiceTests(unittest.TestCase):
     def test_service_persists_completed_job(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            source = Path(temp_dir) / "input.mp4"
+            source_dir = Path(temp_dir) / "data" / "sources"
+            source_dir.mkdir(parents=True)
+            source = source_dir / "input.mp4"
             source.write_bytes(b"video")
             service = JobService(Path(temp_dir) / "data")
+
+            def complete_job(job, _token):
+                for stage in ("transcript", "conversion", "upload"):
+                    checkpoint = job.checkpoints[stage]
+                    if checkpoint["status"] == "skipped":
+                        continue
+                    checkpoint = job.transition_checkpoint(
+                        stage, "running", checkpoint["revision"], service.jobs_dir)
+                    job.transition_checkpoint(
+                        stage, "completed", checkpoint["revision"], service.jobs_dir)
+
             try:
                 manifest = service.create_job(
-                    str(source), {},
-                    lambda job, token: job.set_step(
-                        "conversion", "completed", service.jobs_dir))
+                    str(source), {}, complete_job)
                 service._futures[manifest.job_id].result(timeout=2)
                 self.assertEqual(service.get_job(manifest.job_id).status,
                                  "completed")
@@ -646,7 +541,9 @@ class JobServiceTests(unittest.TestCase):
 
     def test_service_cancels_queued_job(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            source = Path(temp_dir) / "input.mp4"
+            source_dir = Path(temp_dir) / "data" / "sources"
+            source_dir.mkdir(parents=True)
+            source = source_dir / "input.mp4"
             source.write_bytes(b"video")
             service = JobService(Path(temp_dir) / "data")
             try:
@@ -685,6 +582,60 @@ class ConfigDefaultsTests(unittest.TestCase):
         self.assertEqual(summary["tiktok"]["privacy_level"], "SELF_ONLY")
 
 
+class JobCommandTests(unittest.TestCase):
+    def test_init_writes_app_yaml_and_auth_template(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            result = run_cli(["--data-dir", str(data_dir), "init"])
+
+            self.assertEqual(result, 0)
+            self.assertTrue((data_dir / "app.yml").exists())
+            self.assertTrue((data_dir / "auth.yaml").exists())
+            self.assertFalse((data_dir / "clipmorph.yaml").exists())
+
+    def test_job_create_dry_run_uses_service_and_writes_no_manifest(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            source_dir = data_dir / "sources"
+            source_dir.mkdir(parents=True)
+            (source_dir / "A clip.mp4").write_bytes(b"video")
+
+            result = run_cli([
+                "--data-dir", str(data_dir), "job", "create", str(source_dir),
+                "--dry-run",
+            ])
+
+            self.assertEqual(result, 0)
+            self.assertFalse((data_dir / "jobs").exists())
+
+    def test_upload_review_edits_update_the_pending_draft(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            (data_dir / "sources").mkdir()
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"video")
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {})
+            checkpoint = manifest.checkpoints["upload"]
+            manifest.transition_checkpoint(
+                "upload", "awaiting_review", checkpoint["revision"], service.jobs_dir)
+            service.close()
+            edit_path = Path(temp_dir) / "upload.yml"
+            edit_path.write_text(
+                "content:\n  title: Reviewed title\n", encoding="utf-8")
+
+            result = run_cli([
+                "--data-dir", str(data_dir), "job", "review", manifest.job_id,
+                "upload", "--edits", str(edit_path),
+            ])
+
+            self.assertEqual(result, 0)
+            saved = JobManifest.load(manifest.job_id, data_dir / "jobs")
+            self.assertEqual(
+                saved.configuration["upload"]["content"]["title"],
+                "Reviewed title")
+
+
 class TranscriptionConfigTests(unittest.TestCase):
     def test_conversion_does_not_forward_transcription_options_to_editor(self):
         runner = SimpleNamespace(
@@ -696,7 +647,7 @@ class TranscriptionConfigTests(unittest.TestCase):
         editor.return_value.run.return_value = "output.mp4"
         pipeline = ConversionPipeline(
             "input.mp4",
-            no_subs=True,
+            skip_subtitles=True,
             transcription_language="fr",
         )
         pipeline.ffmpeg_runner = runner
@@ -706,9 +657,12 @@ class TranscriptionConfigTests(unittest.TestCase):
                            ConversionPipeline,
                            "_validate_output",
                            return_value=1024,
-                       ):
+                       ), patch(
+                           "clipmorph.conversion_pipeline.convert.TranscriptionPipeline"
+                       ) as transcription_type:
             self.assertEqual(pipeline.run(), "output.mp4")
 
+        transcription_type.assert_not_called()
         self.assertNotIn("transcription_language",
                          editor.call_args.kwargs)
 

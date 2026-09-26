@@ -15,10 +15,10 @@ from clipmorph.transcript import load_edit_session
 
 class ConversionPipeline:
 
-    def __init__(self, input_path, no_subs=False, no_confirm=False,
+    def __init__(self, input_path, skip_subtitles=False, no_confirm=False,
                  strict=False, **kwargs):
         self.input_path = input_path
-        self.no_subs = no_subs
+        self.skip_subtitles = skip_subtitles
         self.no_confirm = no_confirm
         self.strict = strict
         self.kwargs = kwargs
@@ -251,7 +251,7 @@ class ConversionPipeline:
                 if intervals:
                     muted_audio_path = self._mute_audio(intervals, audio_path)
                 use_subtitles = True
-            elif not self.no_subs:
+            elif not self.skip_subtitles:
                 logging.info("Transcribing audio...")
                 try:
                     self.segments = TranscriptionPipeline(
@@ -313,18 +313,12 @@ class ConversionPipeline:
                         raise
                     segments = []
             else:
-                logging.info("Skipping transcription (--no-subs flag)")
+                logging.info("Skipping transcription (conversion.subtitles.skip)")
 
             logging.info("Editing video...")
 
             editing_option_names = {
                 "output_dir",
-                "include_cam",
-                "cam_x",
-                "cam_y",
-                "cam_width",
-                "cam_height",
-                "clip_height",
                 "layout",
             }
             editing_options = {
@@ -336,7 +330,7 @@ class ConversionPipeline:
             final_output = EditingPipeline(
                 input_path=self.input_path,
                 muted_audio=muted_audio_path,
-                segments=self.segments if use_subtitles else [],
+                segments=[],
                 ffmpeg_runner=self.ffmpeg_runner,
                 **editing_options).run()
 

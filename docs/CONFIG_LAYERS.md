@@ -293,6 +293,8 @@ All caption and subtitle typography objects use the same keys: `size`,
 to the conversion pipeline's automatic color selection; declaring an explicit
 color overrides that selection. Placement, panel geometry, padding, and
 spacing remain renderer-specific layout settings.
+An explicit `font_file` selects that exact face; to use bold or italic with a
+custom font, point it to the corresponding styled font file.
 
 Generated subtitle items and authored caption items share the same renderer
 collections. Generated items are appended after authored items, preserving
@@ -685,21 +687,15 @@ configuration resolver.
 - Whether multi-job groups ever become save-able presets later is deferred;
   today they are ephemeral execution groups.
 
-## Implementation phases (once this design is approved)
+## Implementation Boundaries
 
-1. Extract a shared `merge_configuration(global, job)` helper (new
-   `clipmorph/config.py` or added to `cli.py`) and unit tests.
-2. Add CLI `job` CRUD commands plus JSONL/YAML per-job override parsing,
-  repurposing `clipmorph/batch.py` for multi-source creation.
-3. Align the web `job` CRUD API with the CLI and expand UI form changes into
-  per-job overrides before using the shared two-source merge helper.
-4. Bump `JobManifest` schema and add `configuration_sources`.
-5. Remove `no_cam`/`camera`/`cam_*` from the CLI parser, `cli.py` config
-   flattening, `workflow.py`, `preflight.py`, and `edit.py`'s constructor;
-   route camera use through `layout.crop` instead. Extend
-   `clipmorph.layout.validate_layout` to validate the new `subtitles`
-   object. Reconcile `edit.py`'s fixed camera-stack pipeline with the
-   generic `_apply_layout` crop/caption/subtitles pipeline into one
-   implementation.
-6. Update `docs/CLI_WEB_PARITY.md` and frontend batch/layout UI to expose
-   batch vs. per-clip fields and the new `subtitles` styling controls.
+The shared resolver and app.yml persistence live in `clipmorph/configuration.py`.
+Per-source fan-out, checkpoint transitions, transcript revision persistence,
+artifact history, and upload attempts are owned by `clipmorph/service.py` and
+`clipmorph/job.py`. `clipmorph/cli.py` and `clipmorph/web.py` are command/route
+adapters over those shared operations. The conversion renderer consumes
+`conversion.layout`; it does not expose a parallel camera-feed configuration.
+
+The API/CLI route syntax and focused test matrix are maintained in
+[CLI_WEB_PARITY.md](CLI_WEB_PARITY.md). There is no persisted batch tier or
+group manifest.
