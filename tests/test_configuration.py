@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import yaml
 
+from clipmorph.configuration import APP_CONFIG_VERSION
 from clipmorph.configuration import load_app_configuration
 from clipmorph.configuration import load_job_records
 from clipmorph.configuration import merge_source_configurations
@@ -202,9 +203,67 @@ class AppConfigurationTests(unittest.TestCase):
     def test_app_configuration_rejects_unknown_top_level_fields(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "app.yml"
-            path.write_text("legacy_config: true\n", encoding="utf-8")
+            path.write_text(
+                f"config_version: {APP_CONFIG_VERSION}\nlegacy_config: true\n",
+                encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "Unknown app configuration"):
                 load_app_configuration(path)
+
+    def test_app_configuration_requires_the_current_version_stamp(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "app.yml"
+            path.write_text("source_dir: sources\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "config_version must be 1"):
+                load_app_configuration(path)
+
+            path.write_text("config_version: 99\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "config_version must be 1"):
+                load_app_configuration(path)
+
+    def test_app_configuration_stamps_the_version_on_write(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "app.yml"
+
+            save_app_configuration(path, {"source_dir": "clips"})
+
+            self.assertEqual(load_app_configuration(path)["config_version"],
+                             APP_CONFIG_VERSION)
+            self.assertEqual(
+                yaml.safe_load(path.read_text(encoding="utf-8"))["config_version"],
+                APP_CONFIG_VERSION)
+
+    def test_app_configuration_rejects_a_stale_stamp_on_save(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "app.yml"
+
+            with self.assertRaisesRegex(ValueError, "config_version must be 1"):
+                save_app_configuration(path, {"config_version": 99})
+            self.assertFalse(path.exists())
+
+    def test_app_configuration_validates_retention_knobs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "app.yml"
+
+            save_app_configuration(path, {"retention": {
+                "artifacts": {"max_age_days": 90, "max_bytes": 5_000_000_000},
+                "backups": {"keep_n": 3},
+            }})
+            retention = load_app_configuration(path)["retention"]
+            self.assertEqual(retention["artifacts"]["max_age_days"], 90)
+            self.assertEqual(retention["backups"]["keep_n"], 3)
+
+            for invalid in ({"artifacts": {"max_age_days": 0}},
+                            {"artifacts": {"max_bytes": "big"}},
+                            {"artifacts": {"max_age_days": 1.5}},
+                            {"artifacts": {"max_age_days": True}},
+                            {"backups": {"keep_n": -1}},
+                            {"backups": {"keep_n": None, "keep_all": True}},
+                            {"artifacts": "90 days"},
+                            {"never_delete": {"max_age_days": 1}}):
+                with self.subTest(invalid=invalid):
+                    with self.assertRaisesRegex(ValueError, "retention"):
+                        save_app_configuration(path, {"retention": invalid})
 
     def test_app_configuration_validates_layout_registry_records(self):
         with tempfile.TemporaryDirectory() as temp_dir:

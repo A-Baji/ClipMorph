@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import logging
 from pathlib import Path
-from threading import Event, Lock
+from threading import Event, Lock, Timer
 from typing import Any, Callable
 import uuid
 
@@ -23,6 +24,28 @@ from clipmorph.job import safe_error_message
 from clipmorph.job import source_sha256
 from clipmorph.platforms import enabled_platforms
 from clipmorph.platforms import SUPPORTED_PLATFORMS_SET
+
+
+logger = logging.getLogger(__name__)
+
+# Emitted when a checkpoint was still running in a manifest found at startup,
+# meaning the process that owned it never finished or reported.
+INTERRUPTED_ERROR = {
+    "code": "interrupted_by_restart",
+    "message": "Job step did not finish; the service restarted.",
+    "retryable": True,
+}
+
+# A publish_at closer than this is treated as "now" rather than deferred.
+SCHEDULE_MINIMUM_DELAY_SECONDS = 1.0
+
+
+def _parse_utc_timestamp(value: str) -> datetime:
+    """Parse one ISO-8601 stamp as an aware UTC datetime."""
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _stage_skipped(configuration: dict[str, Any], stage: str) -> bool:
@@ -63,6 +86,189 @@ class JobService:
         self._lock = Lock()
         self._tokens: dict[str, CancellationToken] = {}
         self._futures: dict[str, Future] = {}
+        self._scheduled_timers: dict[str, list[Timer]] = {}
+        # Order matters: reconciliation must settle stalled checkpoints first so
+        # that only genuinely scheduled uploads survive into the re-arm scan.
+        self._reconcile_interrupted_jobs()
+        self._rearm_scheduled_attempts()
+
+    def _manifest_paths(self) -> list[Path]:
+        """Return every job manifest path, tolerating an absent jobs tree."""
+        if not self.jobs_dir.exists():
+            return []
+        try:
+            return sorted(self.jobs_dir.glob("*/manifest.json"))
+        except OSError as error:  # pragma: no cover - unreadable jobs tree
+            logger.warning("Unable to scan %s: %s", self.jobs_dir, error)
+            return []
+
+    def _load_startup_manifest(self, path: Path) -> JobManifest | None:
+        """Load one manifest for a startup pass, skipping unusable files."""
+        try:
+            return JobManifest.load(path.parent.name, self.jobs_dir)
+        except (ValueError, TypeError, OSError) as error:
+            logger.warning("Skipping unusable job manifest %s: %s", path, error)
+            return None
+
+    def _reconcile_interrupted_jobs(self) -> None:
+        """Fail checkpoints left running by a process that never returned.
+
+        Runs on every service construction, so the CLI and the web API both
+        heal phantom queue entries on first touch. It is idempotent: a healed
+        manifest is already terminal for the next scan. Two long-running
+        instances of the service may still mark each other's live jobs failed at
+        the exact moment a process starts; the review checkpoint flow is the
+        user-facing guard for that documented limitation.
+        """
+        for path in self._manifest_paths():
+            manifest = self._load_startup_manifest(path)
+            if manifest is None:
+                continue
+            self._reconcile_manifest(manifest)
+
+    def _reconcile_manifest(self, manifest: JobManifest) -> None:
+        """Apply the interrupted-work rules to one loaded manifest."""
+        if manifest.status != "running":
+            # queued manifests hold all-pending checkpoints, which is not
+            # evidence of a crash: no started stage exists to reconcile.
+            return
+        for stage in ("transcript", "conversion"):
+            if manifest.checkpoints.get(stage, {}).get("status") == "running":
+                self._fail_interrupted_checkpoint(manifest, stage)
+        upload = manifest.checkpoints.get("upload", {})
+        if (upload.get("status") == "running"
+                and not self._upload_awaits_schedule(manifest)):
+            self._fail_interrupted_checkpoint(manifest, "upload")
+        if manifest.status == "running" and not any(
+                checkpoint.get("status") == "running"
+                for checkpoint in manifest.checkpoints.values()):
+            # Status drift only: every checkpoint is terminal.
+            manifest._derive_status()
+            manifest.save(self.jobs_dir)
+
+    def _fail_interrupted_checkpoint(self, manifest: JobManifest,
+                                     stage: str) -> None:
+        """Move one running checkpoint to failed with the structured reason."""
+        checkpoint = manifest.checkpoints[stage]
+        try:
+            manifest.transition_checkpoint(
+                stage, "failed", checkpoint["revision"], self.jobs_dir,
+                error=dict(INTERRUPTED_ERROR))
+        except ValueError as error:
+            logger.warning("Could not fail interrupted %s checkpoint of %s: %s",
+                           stage, manifest.job_id, error)
+
+    def _upload_awaits_schedule(self, manifest: JobManifest) -> bool:
+        """Report whether every pending attempt waits on a future publish_at."""
+        now = datetime.now(timezone.utc)
+        scheduled: list[dict[str, Any]] = []
+        for attempt in manifest.upload_attempts:
+            if attempt.get("status") != "pending":
+                continue
+            scheduled.append(attempt)
+            stamp = attempt.get("scheduled_publish_at")
+            if not attempt.get("scheduled") or not isinstance(stamp, str):
+                return False
+            try:
+                if _parse_utc_timestamp(stamp) <= now:
+                    return False
+            except ValueError:
+                return False
+        return bool(scheduled)
+
+    def _rearm_scheduled_attempts(self) -> None:
+        """Re-arm timers for scheduled upload attempts left pending by a restart."""
+        now = datetime.now(timezone.utc)
+        for path in self._manifest_paths():
+            manifest = self._load_startup_manifest(path)
+            if manifest is None:
+                continue
+            if manifest.checkpoints.get("upload", {}).get("status") != "running":
+                continue
+            if not self._upload_awaits_schedule(manifest):
+                continue
+            groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+            for attempt in manifest.upload_attempts:
+                if attempt.get("status") != "pending" or not attempt.get("scheduled"):
+                    continue
+                stamp = attempt.get("scheduled_publish_at")
+                if not isinstance(stamp, str):
+                    continue
+                try:
+                    publish_at = _parse_utc_timestamp(stamp)
+                except ValueError:
+                    continue
+                if publish_at <= now:
+                    continue
+                key = (str(attempt.get("artifact_id")),
+                       str(attempt.get("configuration_hash")), stamp)
+                groups.setdefault(key, []).append(attempt)
+            for (artifact_id, _hash, stamp), group in groups.items():
+                artifact = manifest.artifacts.get(artifact_id)
+                snapshot = group[0].get("configuration_snapshot")
+                if artifact is None or not isinstance(snapshot, dict):
+                    logger.warning(
+                        "Skipping re-arm for %s: artifact %s or its upload "
+                        "snapshot is missing", manifest.job_id, artifact_id)
+                    continue
+                self._schedule_attempts(
+                    manifest.job_id, [item["attempt_id"] for item in group],
+                    str(artifact["path"]), snapshot,
+                    [item["platform"] for item in group],
+                    _parse_utc_timestamp(stamp))
+
+    def _schedule_attempts(self, job_id: str, attempt_ids: list[str],
+                           artifact_path: str, upload_config: dict[str, Any],
+                           platforms: list[str], publish_at: datetime) -> Timer:
+        """Run one upload attempt group at publish_at on a daemon timer."""
+        delay = max(
+            0.0,
+            (publish_at - datetime.now(timezone.utc)).total_seconds())
+        handle = Timer(delay, self._run_upload_attempts,
+                       args=(job_id, list(attempt_ids), str(artifact_path),
+                             deepcopy(upload_config), list(platforms)))
+        handle.daemon = True
+        with self._lock:
+            self._scheduled_timers.setdefault(
+                f"upload:{job_id}", []).append(handle)
+        handle.start()
+        logger.info("Scheduled %d upload attempt(s) of %s in %.1fs",
+                    len(attempt_ids), job_id, delay)
+        return handle
+
+    def _discard_scheduled_uploads_locked(self, manifest: JobManifest) -> int:
+        """Disarm one job's scheduled uploads. Caller holds ``self._lock``.
+
+        Cancels the armed timers and unmarks their still-pending attempts, so
+        neither this process nor a later startup re-arms a configuration the user
+        has since replaced. The attempt records stay ``pending``: their real
+        fate is unknown, exactly as when a stalled upload is failed. Returns the
+        number of attempts unmarked.
+        """
+        for timer in self._scheduled_timers.pop(
+                f"upload:{manifest.job_id}", []):
+            timer.cancel()
+        unmarked = 0
+        for attempt in manifest.upload_attempts:
+            if attempt.get("status") == "pending" and attempt.get("scheduled"):
+                attempt["scheduled"] = False
+                attempt.pop("scheduled_publish_at", None)
+                unmarked += 1
+        return unmarked
+
+    def discard_scheduled_uploads(self, job_id: str) -> int:
+        """Disarm a job's scheduled uploads and persist the unmarked attempts.
+
+        Used where the accepted upload is superseded without a draft edit, such
+        as a rerender invalidating the upload checkpoint. Persists only when a
+        schedule was actually pending.
+        """
+        with self._lock:
+            manifest = self.get_job(job_id)
+            unmarked = self._discard_scheduled_uploads_locked(manifest)
+            if unmarked:
+                manifest.save(self.jobs_dir)
+            return unmarked
 
     def create_job(self, source_path: str, configuration: dict[str, Any],
                    runner: Callable[[JobManifest, CancellationToken], None] | None = None
@@ -497,6 +703,11 @@ class JobService:
             if checkpoint["started_at"] is None:
                 checkpoint["started_at"] = checkpoint["updated_at"]
             manifest._derive_status()
+            # The draft accepted here is what the next submission uploads, so a
+            # schedule armed by an earlier submission is dropped rather than
+            # firing later with the superseded configuration. Done last, so a
+            # rejected edit above leaves both the timer and the manifest intact.
+            self._discard_scheduled_uploads_locked(manifest)
             manifest.save(self.jobs_dir)
             return manifest
 
@@ -512,7 +723,8 @@ class JobService:
                       artifact_id: str | None = None,
                       confirm_historical_artifact: bool = False,
                       configuration_snapshot: dict[str, Any] | None = None,
-                      retry_of: str | None = None) -> dict[str, Any]:
+                      retry_of: str | None = None,
+                      honor_schedule: bool = True) -> dict[str, Any]:
         with self._lock:
             manifest = self.get_job(job_id)
             checkpoint = manifest.checkpoints["upload"]
@@ -546,6 +758,8 @@ class JobService:
             if len(set(selected)) != len(selected):
                 raise ValueError("upload platforms must not contain duplicates")
 
+            scheduled_for = self._resolve_publish_at(
+                upload_config, honor_schedule)
             upload_hash = configuration_sha256(upload_config)
             now = datetime.now(timezone.utc).isoformat()
             attempts: list[dict[str, Any]] = []
@@ -565,6 +779,9 @@ class JobService:
                 }
                 if retry_of is not None:
                     attempt["retry_of"] = retry_of
+                if scheduled_for is not None:
+                    attempt["scheduled"] = True
+                    attempt["scheduled_publish_at"] = scheduled_for.isoformat()
                 attempts.append(attempt)
                 manifest.upload_attempts.append(attempt)
             checkpoint["artifact_hash"] = artifact.get("sha256")
@@ -574,14 +791,44 @@ class JobService:
             manifest.transition_checkpoint(
                 "upload", "running", checkpoint["revision"], self.jobs_dir)
 
-        future = self.executor.submit(
-            self._run_upload_attempts, job_id,
-            [attempt["attempt_id"] for attempt in attempts],
-            str(artifact_path), upload_config, selected)
-        with self._lock:
-            self._futures[f"upload:{job_id}"] = future
+        attempt_ids = [attempt["attempt_id"] for attempt in attempts]
+        if scheduled_for is not None:
+            self._schedule_attempts(
+                job_id, attempt_ids, str(artifact_path), upload_config,
+                selected, scheduled_for)
+        else:
+            future = self.executor.submit(
+                self._run_upload_attempts, job_id, attempt_ids,
+                str(artifact_path), upload_config, selected)
+            with self._lock:
+                self._futures[f"upload:{job_id}"] = future
         return {"job_id": job_id, "attempts": attempts,
+                "scheduled": scheduled_for is not None,
                 "status_url": f"/api/v1/jobs/{job_id}"}
+
+    @staticmethod
+    def _resolve_publish_at(upload_config: dict[str, Any],
+                            honor_schedule: bool) -> datetime | None:
+        """Return the future publish_at to defer to, or None to run now."""
+        if not honor_schedule:
+            # A retry is an explicit immediate user action.
+            return None
+        schedule = upload_config.get("schedule") or {}
+        if not isinstance(schedule, dict):
+            raise ValueError("upload.schedule must be an object")
+        publish_at = schedule.get("publish_at")
+        if publish_at is None or not isinstance(publish_at, str) or not publish_at.strip():
+            return None
+        try:
+            parsed = _parse_utc_timestamp(publish_at)
+        except ValueError as error:
+            raise ValueError(
+                f"upload.schedule.publish_at is not an ISO-8601 timestamp: {error}"
+            ) from error
+        if parsed <= (datetime.now(timezone.utc)
+                      + timedelta(seconds=SCHEDULE_MINIMUM_DELAY_SECONDS)):
+            return None
+        return parsed
 
     def _run_upload_attempts(self, job_id: str, attempt_ids: list[str],
                              artifact_path: str, upload_config: dict[str, Any],
@@ -680,8 +927,88 @@ class JobService:
             job_id, [platform], target_artifact_id,
             confirm_historical_artifact=confirm_historical_artifact,
             configuration_snapshot=previous["configuration_snapshot"],
-            retry_of=attempt_id)
+            retry_of=attempt_id, honor_schedule=False)
         return retry_result
+
+    def enforce_retention(self, job_id: str) -> dict[str, Any]:
+        """Prune superseded artifacts per the app.yml retention policy.
+
+        Candidates are non-source artifacts in the `superseded` state, aged from
+        `superseded_at` (falling back to `created_at`). `current` and `stale`
+        artifacts are never touched, so a rerender target always survives. Every
+        knob defaults to null, which makes this a no-op until a policy is set.
+        """
+        policy = load_app_configuration(
+            self.app_config_path).get("retention", {}).get("artifacts", {})
+        max_age_days = policy.get("max_age_days")
+        max_bytes = policy.get("max_bytes")
+        manifest = self.get_job(job_id)
+        if max_age_days is None and max_bytes is None:
+            return {"pruned": []}
+
+        now = datetime.now(timezone.utc)
+        total_bytes = 0
+        obsolete: list[tuple[str, datetime, int]] = []
+        for artifact_id, artifact in manifest.artifacts.items():
+            size = _artifact_size(artifact)
+            if artifact.get("state") != "deleted":
+                total_bytes += size
+            if (artifact.get("state") != "superseded"
+                    or artifact.get("kind") == "source"):
+                continue
+            stamp = artifact.get("superseded_at") or artifact.get("created_at")
+            try:
+                obsolete_at = _parse_utc_timestamp(stamp) if isinstance(
+                    stamp, str) else now
+            except ValueError:
+                obsolete_at = now
+            obsolete.append((artifact_id, obsolete_at, size))
+        obsolete.sort(key=lambda item: (item[1], item[0]))
+
+        selected: set[str] = set()
+        if max_age_days is not None:
+            cutoff = now - timedelta(days=max_age_days)
+            selected.update(artifact_id for artifact_id, obsolete_at, _size
+                            in obsolete if obsolete_at <= cutoff)
+        if max_bytes is not None:
+            remaining = total_bytes - sum(
+                size for artifact_id, _at, size in obsolete
+                if artifact_id in selected)
+            for artifact_id, _obsolete_at, size in obsolete:
+                if artifact_id in selected or remaining <= max_bytes:
+                    continue
+                selected.add(artifact_id)
+                remaining -= size
+
+        pruned: list[str] = []
+        bytes_freed = 0
+        if selected:
+            from send2trash import send2trash
+            now_iso = now.isoformat()
+            for artifact_id, _obsolete_at, size in obsolete:
+                if artifact_id not in selected:
+                    continue
+                artifact = manifest.artifacts[artifact_id]
+                path = Path(artifact["path"])
+                if path.exists():
+                    send2trash(str(path))
+                    bytes_freed += size
+                artifact["state"] = "deleted"
+                artifact["deleted_at"] = now_iso
+                pruned.append(artifact_id)
+            if manifest.current_artifact_id in set(pruned):
+                manifest.artifact_path = None
+            manifest.save(self.jobs_dir)
+        return {"pruned": pruned, "bytes_freed": bytes_freed}
+
+    def _enforce_retention_quietly(self, job_id: str) -> None:
+        """Apply retention after a run, never failing the job over cleanup."""
+        try:
+            self.enforce_retention(job_id)
+        except Exception as error:  # cleanup must not mask job results
+            logger.warning("Retention enforcement failed for %s: %s",
+                           job_id, error)
+
     def _run(self, job_id: str, runner: Callable,
              token: CancellationToken) -> None:
         manifest = JobManifest.load(job_id, self.jobs_dir)
@@ -701,6 +1028,10 @@ class JobService:
             else:
                 manifest._derive_status()
                 manifest.save(self.jobs_dir)
+            if not token.is_cancelled:
+                # The conversion flow records its artifact during execute_job, so
+                # this is the one post-run point where obsolete bytes are known.
+                self._enforce_retention_quietly(job_id)
         except Exception as error:
             manifest = self.get_job(job_id)
             message = safe_error_message(error)
@@ -773,4 +1104,22 @@ class JobService:
         return manifest
 
     def close(self) -> None:
+        # Unlike discard_scheduled_uploads, a clean shutdown leaves the attempts
+        # marked: the next startup re-arms them instead of losing the schedule.
+        with self._lock:
+            timers = [timer for group in self._scheduled_timers.values()
+                      for timer in group]
+            self._scheduled_timers.clear()
+        for timer in timers:
+            timer.cancel()
         self.executor.shutdown(wait=True, cancel_futures=False)
+
+
+def _artifact_size(artifact: dict[str, Any]) -> int:
+    """Return an artifact's on-disk size, or 0 when its bytes are gone."""
+    path = Path(str(artifact.get("path", "")))
+    try:
+        return path.stat().st_size if path.is_file() else 0
+    except OSError:
+        return 0
+

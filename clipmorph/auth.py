@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-import shutil
 from typing import Any
 
 import yaml
 
+from clipmorph.configuration import resolve_backup_keep_n, rotate_backup
 from clipmorph.job import default_data_dir
 
 
@@ -36,9 +36,7 @@ AUTH_ENVIRONMENT_KEYS = {
     "tiktok": {
         "client_key": "TIKTOK_CLIENT_KEY",
         "client_secret": "TIKTOK_CLIENT_SECRET",
-        "access_token": "TIKTOK_ACCESS_TOKEN",
         "refresh_token": "TIKTOK_REFRESH_TOKEN",
-        "open_id": "TIKTOK_OPEN_ID",
     },
     "twitter": {
         "client_id": "TWITTER_CLIENT_ID",
@@ -72,9 +70,7 @@ instagram:
 tiktok:
     client_key: ""
     client_secret: ""
-    access_token: ""
     refresh_token: ""
-    open_id: ""
 twitter:
     client_id: ""
     client_secret: ""
@@ -97,22 +93,9 @@ def active_auth_file_path() -> Path:
     return _active_auth_path or auth_file_path()
 
 
-def _rotate_backup_files(path: Path) -> Path:
-    """Shift older backups to numbered names and leave the newest slot free."""
-    backup_path = path.with_suffix(path.suffix + ".backup")
-    highest_index = 0
-    while backup_path.parent.joinpath(f"{backup_path.name}{highest_index + 1}").exists():
-        highest_index += 1
-
-    for index in range(highest_index, 0, -1):
-        source = backup_path.with_name(f"{backup_path.name}{index}")
-        target = backup_path.with_name(f"{backup_path.name}{index + 1}")
-        if source.exists():
-            source.rename(target)
-
-    if backup_path.exists():
-        backup_path.rename(backup_path.with_name(f"{backup_path.name}1"))
-    return backup_path
+def _backup_existing_file(path: Path) -> Path:
+    """Copy path into the newest backup slot, honouring app.yml keep_n."""
+    return rotate_backup(path, resolve_backup_keep_n(path.parent / "app.yml"))
 
 
 def create_auth_template(data_dir: str | Path | None = None) -> Path:
@@ -120,8 +103,7 @@ def create_auth_template(data_dir: str | Path | None = None) -> Path:
     path = auth_file_path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
-        backup_path = _rotate_backup_files(path)
-        shutil.copy2(path, backup_path)
+        backup_path = _backup_existing_file(path)
         print(f"Existing auth file backed up to: {backup_path}")
     path.write_text(AUTH_TEMPLATE, encoding="utf-8")
     print(f"Created auth template at: {path}")
@@ -192,8 +174,7 @@ def persist_auth_credentials(platform: str, values: dict[str, str],
     section.update(values)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
-        backup_path = _rotate_backup_files(path)
-        shutil.copy2(path, backup_path)
+        _backup_existing_file(path)
     temporary_path = path.with_suffix(path.suffix + ".tmp")
     temporary_path.write_text(yaml.safe_dump(loaded, sort_keys=False), encoding="utf-8")
     os.replace(temporary_path, path)

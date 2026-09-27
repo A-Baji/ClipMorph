@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
+from clipmorph.auth import AUTH_ENVIRONMENT_KEYS
 from clipmorph.auth import auth_file_path, create_auth_template, load_auth_config
 from clipmorph.auth import persist_auth_credential
 from clipmorph.twitter_auth import TWITTER_REDIRECT_URI, authorize_twitter
@@ -57,10 +58,14 @@ class AuthConfigTests(unittest.TestCase):
             self.assertIn("refresh_token:", content)
             self.assertIn("gcs_bucket_name:", content)
             self.assertIn("gcp_private_key:", content)
-            self.assertIn("open_id:", content)
+            self.assertIn("client_key:", content)
             self.assertIn("client_id:", content)
             self.assertIn("hugging_face:", content)
             self.assertIn("twitter:", content)
+            # Only consumed TikTok fields are offered.
+            self.assertNotIn("open_id", content)
+            self.assertNotIn("access_token", content.split("tiktok:")[1]
+                             .split("twitter:")[0])
 
     def test_existing_auth_file_is_backed_up_before_template_regeneration(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -148,8 +153,7 @@ class AuthConfigTests(unittest.TestCase):
             data_dir = Path(temp_dir)
             (data_dir / "auth.yaml").write_text(
                 "tiktok:\n"
-                "  access_token: tiktok-access\n"
-                "  open_id: tiktok-open\n"
+                "  refresh_token: tiktok-refresh\n"
                 "twitter:\n"
                 "  client_id: twitter-id\n"
                 "  client_secret: twitter-secret\n"
@@ -163,9 +167,8 @@ class AuthConfigTests(unittest.TestCase):
             with patch.dict(os.environ, {}, clear=True):
                 load_auth_config(data_dir)
 
-                self.assertEqual(os.environ["TIKTOK_ACCESS_TOKEN"],
-                                 "tiktok-access")
-                self.assertEqual(os.environ["TIKTOK_OPEN_ID"], "tiktok-open")
+                self.assertEqual(os.environ["TIKTOK_REFRESH_TOKEN"],
+                                 "tiktok-refresh")
                 self.assertEqual(os.environ["TWITTER_CLIENT_ID"], "twitter-id")
                 self.assertEqual(os.environ["TWITTER_CLIENT_SECRET"],
                                  "twitter-secret")
@@ -177,6 +180,34 @@ class AuthConfigTests(unittest.TestCase):
                                  "1234567890")
                 self.assertEqual(os.environ["HUGGING_FACE_ACCESS_TOKEN"],
                                  "hf-token")
+
+    def test_auth_schema_exposes_only_consumed_credentials(self):
+        package_root = Path(__file__).resolve().parent.parent / "clipmorph"
+        sources = {
+            path: path.read_text(encoding="utf-8")
+            for path in package_root.rglob("*.py")
+            if path.name != "auth.py"
+        }
+        self.assertTrue(sources, "no ClipMorph sources were discovered")
+
+        unused = []
+        for platform, fields in AUTH_ENVIRONMENT_KEYS.items():
+            for field, environment_key in fields.items():
+                if not any(environment_key in text for text in sources.values()):
+                    unused.append(f"{platform}.{field} ({environment_key})")
+        # Twitter/X v1.1 consumer keys and bearer tokens are deliberately absent:
+        # the adapters only use OAuth 2.0.
+        self.assertEqual(unused, [])
+
+    def test_unverified_tiktok_and_twitter_v1_fields_stay_out_of_the_schema(self):
+        package_root = Path(__file__).resolve().parent.parent / "clipmorph"
+        text = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in package_root.rglob("*.py"))
+        for retired in ("TIKTOK_ACCESS_TOKEN", "TIKTOK_OPEN_ID",
+                        "TWITTER_CONSUMER_KEY", "TWITTER_CONSUMER_SECRET",
+                        "TWITTER_BEARER_TOKEN"):
+            self.assertNotIn(retired, text)
 
     def test_existing_environment_credentials_take_precedence(self):
         with tempfile.TemporaryDirectory() as temp_dir:

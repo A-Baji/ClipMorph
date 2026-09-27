@@ -103,6 +103,9 @@ def _build_command_parser() -> argparse.ArgumentParser:
         elif name == "delete":
             command.add_argument("--yes", action="store_true")
 
+    artifact_prune = artifact_commands.add_parser("prune")
+    artifact_prune.add_argument("job_id")
+
     layout = commands.add_parser("layout", help="Manage the global layout registry.")
     layout_commands = layout.add_subparsers(dest="layout_command", required=True)
     layout_commands.add_parser("list")
@@ -360,6 +363,9 @@ def run_cli(argv: list[str] | None = None) -> int:
                 if args.artifact_command == "list":
                     _print_json([{key: value for key, value in item.items() if key != "path"}
                                  for item in manifest.artifacts.values()])
+                    return 0
+                if args.artifact_command == "prune":
+                    _print_json(service.enforce_retention(args.job_id))
                     return 0
                 artifact = manifest.artifacts.get(args.artifact_id)
                 if artifact is None:

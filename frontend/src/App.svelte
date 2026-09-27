@@ -30,7 +30,7 @@
     crop_width: 320, crop_height: 240, sizing: 'fit', composition: 'overlay',
     placement: 'top', renderer: 'overlay', caption: true, caption_text: '',
   };
-  let uploadDraft = { title: '', description: '', tags: '' };
+  let uploadDraft = { title: '', description: '', tags: '', publishAt: '' };
   let uploadPlatforms = [...platforms];
 
   $: selectedJob = jobs.find((job) => job.job_id === selectedJobId) || jobs[0];
@@ -56,6 +56,28 @@
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+
+  // `datetime-local` speaks wall-clock time with no offset, so the stored UTC
+  // timestamp is shifted before it reaches the input and read back the same way.
+  function toLocalInput(value) {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    return new Date(date.getTime() - date.getTimezoneOffset() * 60000)
+      .toISOString().slice(0, 16);
+  }
+
+  function toUtcTimestamp(value) {
+    if (!value) return null;
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  }
+
+  function scheduleLabel(attempt) {
+    if (!attempt.scheduled || !attempt.scheduled_publish_at) return '';
+    return `Scheduled for ${new Date(attempt.scheduled_publish_at)
+      .toLocaleString()}`;
+  }
 
   async function loadWorkspace() {
     try {
@@ -89,6 +111,7 @@
       title: job.configuration?.upload?.content?.title || '',
       description: job.configuration?.upload?.content?.description || '',
       tags: (job.configuration?.upload?.content?.tags || []).join(', '),
+      publishAt: toLocalInput(job.configuration?.upload?.schedule?.publish_at),
     };
     compositionJson = JSON.stringify(job.configuration?.conversion?.layout || {}, null, 2);
   }
@@ -308,6 +331,9 @@
           .split(',').map((tag) => tag.trim()).filter(Boolean),
       };
       upload.platforms = { ...(upload.platforms || {}), include: uploadPlatforms };
+      const publishAt = toUtcTimestamp(uploadDraft.publishAt);
+      if (publishAt) upload.schedule = { ...(upload.schedule || {}), publish_at: publishAt };
+      else delete upload.schedule;
       await api(`/api/v1/jobs/${selectedJob.job_id}/checkpoints/upload`,
         jsonOptions('PUT', { expected_revision: checkpoint.revision, upload }));
       await loadWorkspace();
@@ -320,10 +346,12 @@
     try {
       await saveUploadDraft();
       await loadWorkspace();
-      await api(`/api/v1/jobs/${selectedJob.job_id}/upload`,
+      const submitted = await api(`/api/v1/jobs/${selectedJob.job_id}/upload`,
         jsonOptions('POST', { platforms: uploadPlatforms }));
       await loadWorkspace();
-      flash('Upload attempts started');
+      flash(submitted.scheduled
+        ? `Upload attempts scheduled for ${toLocalInput(uploadDraft.publishAt).replace('T', ' ')}`
+        : 'Upload attempts started');
     } catch (error) { errors = [error.message]; }
   }
 
@@ -555,10 +583,10 @@
 
     {:else if activeView === 'Uploads'}
       <section class="form-page"><div class="section-heading"><div><span class="section-kicker">Pre-upload checkpoint</span><h2>Content and artifact</h2></div><div class="top-actions"><button class="secondary-action" onclick={saveUploadDraft}>Save draft</button><button class="primary-action" onclick={submitUpload}>Submit upload</button></div></div>
-        {#if !selectedJob}<div class="empty-view"><h2>Select a job first</h2></div>{:else}<div class="upload-layout"><div class="form-card upload-draft-fields"><span class="card-index">UPLOAD DRAFT</span><label class="field-label">Title<input aria-label="Upload title" bind:value={uploadDraft.title} /></label><label class="field-label">Description<textarea aria-label="Upload description" rows="4" bind:value={uploadDraft.description}></textarea></label><label class="field-label">Tags<input aria-label="Upload tags" bind:value={uploadDraft.tags} placeholder="tag one, tag two" /></label>
+        {#if !selectedJob}<div class="empty-view"><h2>Select a job first</h2></div>{:else}<div class="upload-layout"><div class="form-card upload-draft-fields"><span class="card-index">UPLOAD DRAFT</span><label class="field-label">Title<input aria-label="Upload title" bind:value={uploadDraft.title} /></label><label class="field-label">Description<textarea aria-label="Upload description" rows="4" bind:value={uploadDraft.description}></textarea></label><label class="field-label">Tags<input aria-label="Upload tags" bind:value={uploadDraft.tags} placeholder="tag one, tag two" /></label><label class="field-label">Schedule for<input aria-label="Upload schedule for" type="datetime-local" bind:value={uploadDraft.publishAt} /><small>Leave empty to upload as soon as you submit. A future time defers every selected platform; a retry always runs immediately.</small></label>
           {#each platforms as platform}<label><input type="checkbox" checked={uploadPlatforms.includes(platform)} onchange={(event) => uploadPlatforms = event.currentTarget.checked ? [...uploadPlatforms, platform] : uploadPlatforms.filter((item) => item !== platform)} /> {platform}</label>{/each}
           <span class="card-index">ARTIFACTS</span>{#each artifacts as artifact}<div class="saved-row"><div><b>{artifact.display_name || artifact.kind} · r{artifact.revision}</b><small>{artifact.state} · {artifact.sha256 || 'unavailable'}</small></div><a class="text-button" href={`/api/v1/jobs/${selectedJob.job_id}/artifacts/${artifact.id}/preview`} target="_blank">Preview</a><a class="text-button" href={`/api/v1/jobs/${selectedJob.job_id}/artifacts/${artifact.id}/download`}>Download</a><button class="quiet-action" onclick={() => renameArtifact(artifact)} aria-label="Rename artifact">✎</button><button class="quiet-action" onclick={() => deleteArtifact(artifact)} aria-label="Delete artifact">×</button></div>{/each}
-        </div><div class="form-card"><span class="card-index">ATTEMPT HISTORY</span>{#each uploadAttempts as attempt}<div class="saved-row"><div><b>{attempt.platform} · {attempt.status}</b><small>{attempt.configuration_snapshot?.content?.title} · {attempt.artifact_hash}</small></div>{#if attempt.status === 'failed'}<button class="text-button" onclick={() => retryUpload(attempt)}>Retry</button>{/if}</div>{/each}</div></div>{/if}
+        </div><div class="form-card"><span class="card-index">ATTEMPT HISTORY</span>{#each uploadAttempts as attempt}<div class="saved-row"><div><b>{attempt.platform} · {attempt.status}</b><small>{attempt.configuration_snapshot?.content?.title} · {attempt.artifact_hash}</small>{#if scheduleLabel(attempt)}<small class="schedule-note">{scheduleLabel(attempt)}</small>{/if}</div>{#if attempt.status === 'failed'}<button class="text-button" onclick={() => retryUpload(attempt)}>Retry</button>{/if}</div>{/each}</div></div>{/if}
       </section>
 
     {:else if activeView === 'Settings'}
