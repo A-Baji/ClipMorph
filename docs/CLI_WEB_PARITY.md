@@ -36,22 +36,30 @@ artifacts, and platform results.
 
 ## CLI Contract
 
-Global `--data-dir DIR` and `--app-config PATH` apply to all commands; default
-app config is `<data-dir>/app.yml`. Help/init/config inspection/web startup
-keep media imports lazy.
+Global `--data-dir DIR` and `--app-config PATH` apply to all commands and are
+accepted before a command group and after the command itself; default app config
+is `<data-dir>/app.yml`. Help/init/config inspection/web startup keep media
+imports lazy.
+
+Commands that report records render a rich table for humans and print the
+machine-readable JSON payload when `--json` is passed; colour is dropped
+automatically when output is not a terminal. Every `[--json]` below reproduces
+the previous JSON payload unchanged. Process statuses are `0` success, `1` a
+source/runtime failure, `2` a usage or configuration failure, and `130` an
+interruption.
 
 | Command | Contract |
 | --- | --- |
 | `clipmorph --help`; `clipmorph init [--config-path PATH]` | Lightweight help; init writes app.yml and adjacent auth.yaml, no media work. |
 | `clipmorph web [--host HOST] [--port PORT]` | Start API/dashboard; global `--data-dir` and `--app-config` precede the command. |
-| `clipmorph auth status`; `auth set PLATFORM`; `auth twitter` | Status only; secure prompt + auth.yaml update; existing Twitter/X OAuth flow. Never print secrets. |
-| `clipmorph job create SOURCE [--job-configs FILE] [--config-dir DIR] [--dry-run] [--yes]` | SOURCE is a supported root-level file beneath `app.yml:source_dir` or that directory. Directory creation fans out over immediate files; JSONL is object-per-line, YAML is a list. Dry-run writes no job or manifest. |
-| `clipmorph job list [--status STATUS]`; `job get ID` | List/show manifest, effective config, checkpoint, artifacts and platform results; redact secrets. |
-| `clipmorph job update ID --patch FILE [--reopen]`; `job resume ID`; `job cancel ID`; `job delete ID --yes` | Apply a validated per-job patch using the current config hash; persist finalized job.yml and apply #180 invalidation. Reopen completed work only with confirmation; source identity is immutable. |
-| `clipmorph job review ID CHECKPOINT [--edits FILE]`; `job render ID` | `--edits` supplies a complete transcript edit-session YAML/JSON object. Review acceptance uses the current manifest revision; render creates a new immutable artifact. |
-| `clipmorph job upload ID [--platform PLATFORM]`; `job upload retry ID PLATFORM [--attempt-id ID]` | Submit the accepted upload draft or retry one failed attempt. Retries use frozen artifact/settings and upload immediately; historical use requires explicit ID and confirmation. |
-| `clipmorph job artifacts list ID`; `preview ID ARTIFACT_ID`; `download ID ARTIFACT_ID --destination PATH`; `rename ID ARTIFACT_ID --name NAME`; `delete ID ARTIFACT_ID --yes`; `prune ID` | Operate on registered artifact IDs; rename changes display metadata only, delete trashes local bytes and retains a manifest tombstone. `prune` applies `app.yml:retention.artifacts` and prints `{pruned,bytes_freed}`. |
-| `clipmorph layout list/create/get/delete ...` | CRUD validated global `{id,name,layout}` records; create reads YAML/JSON. |
+| `clipmorph auth status [--json]`; `auth set PLATFORM`; `auth twitter` | Status only; secure prompt + auth.yaml update; existing Twitter/X OAuth flow. Never print secrets. |
+| `clipmorph job create SOURCE [--job-configs FILE] [--config-dir DIR] [--dry-run] [--yes] [--json]` | SOURCE is a supported root-level file beneath `app.yml:source_dir` or that directory. Directory creation fans out over immediate files; JSONL is object-per-line, YAML is a list. Dry-run writes no job or manifest. |
+| `clipmorph job list [--status STATUS] [--json]`; `job get ID [--json]` | List/show manifest, effective config, checkpoint, artifacts and platform results; redact secrets. |
+| `clipmorph job update ID --patch FILE [--reopen] [--json]`; `job resume ID`; `job cancel ID --yes [--json]`; `job delete ID --yes` | Apply a validated per-job patch using the current config hash; persist finalized job.yml and apply #180 invalidation. Reopen completed work only with confirmation; source identity is immutable. |
+| `clipmorph job review ID CHECKPOINT [--edits FILE] [--accept] [--json]`; `job render ID` | `--edits` supplies a complete transcript edit-session YAML/JSON object. Review acceptance uses the current manifest revision; render creates a new immutable artifact. |
+| `clipmorph job upload ID [--platform PLATFORM] [--json]`; `job upload retry ID PLATFORM [--attempt-id ID]` | Submit the accepted upload draft or retry one failed attempt. Retries use frozen artifact/settings and upload immediately; historical use requires explicit ID and confirmation. |
+| `clipmorph job artifacts list ID [--json]`; `preview ID ARTIFACT_ID`; `download ID ARTIFACT_ID --destination PATH`; `rename ID ARTIFACT_ID --name NAME`; `delete ID ARTIFACT_ID --yes`; `prune ID [--json]` | Operate on registered artifact IDs; rename changes display metadata only, delete trashes local bytes and retains a manifest tombstone. `prune` applies `app.yml:retention.artifacts` and prints `{pruned,bytes_freed}`. |
+| `clipmorph layout list/create/get [--json]`, `layout delete ID --yes` | CRUD validated global `{id,name,layout}` records; create reads YAML/JSON. |
 
 Map CLI controls to CONFIG_LAYERS.md: no-confirm -> `general.no_confirm`, clean
 -> `general.clean`, no-conversion/no-subs/no-upload -> `conversion.skip`/
@@ -134,7 +142,8 @@ without an explicit user action.
   `tests/test_upload_platforms.py`, `tests/test_oauth.py`,
   `tests/test_reconciliation.py`, `tests/test_retention.py`,
   `tests/test_service.py`, `tests/test_job_manifest.py`,
-  `tests/test_auth.py`, `tests/test_cli.py`, and `tests/test_web.py`.
+  `tests/test_auth.py`, `tests/test_cli.py`, `tests/test_cli_surface.py`, and
+  `tests/test_web.py`.
 
 ## Discovery and Results
 

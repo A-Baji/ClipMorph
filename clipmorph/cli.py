@@ -1,21 +1,68 @@
-"""Command-line parsing and shared service command handlers."""
+"""Command-line surface: typer application, rich rendering, and command handlers.
+
+``run_cli`` stays the public entry point and keeps the documented process
+statuses: ``0`` success, ``1`` a source/runtime failure, ``2`` a usage or
+configuration failure, and ``130`` an interruption. Human output is rendered
+with rich, which mutes colour on its own when stdout is not a terminal. Every
+command that used to print JSON keeps a ``--json`` flag that reproduces the
+previous payload unchanged, so machine consumers pass ``--json`` explicitly.
+"""
 
 from __future__ import annotations
 
-import argparse
-from dataclasses import asdict
+from contextlib import closing
+from dataclasses import asdict, dataclass
+import getpass
 import json
 from pathlib import Path
 import shutil
 import sys
-from typing import Any
+from typing import Annotated, Any, Literal, Optional
 import uuid
 import webbrowser
 
+import click
+from rich.console import Console
+from rich.table import Table
+from rich.text import Text
+import typer
 import yaml
 
 from clipmorph.job import default_data_dir
 from clipmorph.platforms import build_platform_default_config
+
+PROG_NAME = "clipmorph"
+
+# The three manifest checkpoints, in pipeline order.
+CHECKPOINT_STAGES = ("transcript", "conversion", "upload")
+
+# Severity colours per status word. rich drops colour on non-terminal stdout,
+# so these only add emphasis for humans and never change machine output.
+STATUS_STYLES = {
+    "completed": "green", "published": "green", "created": "green",
+    "ok": "green", "succeeded": "green", "current": "green",
+    "running": "cyan", "queued": "cyan",
+    "awaiting_review": "yellow", "partial_failure": "red", "failed": "red",
+    "creation_failed": "red", "invalid_config": "red", "invalid_record": "red",
+    "stale": "yellow", "cancelled": "magenta", "skipped": "dim",
+    "pending": "dim", "superseded": "dim", "deleted": "dim",
+    "validated": "green",
+}
+
+# Global options are declared once here and reused by every command so the
+# accepted flag names, help text, and positions stay a single source of truth.
+DataDirOption = Annotated[
+    Optional[Path], typer.Option(
+        "--data-dir", help="ClipMorph data directory; defaults to the platform "
+        "ClipMorph directory.")]
+AppConfigOption = Annotated[
+    Optional[Path], typer.Option(
+        "--app-config", help="App configuration file; defaults to "
+        "<data-dir>/app.yml.")]
+JsonOption = Annotated[
+    bool, typer.Option(
+        "--json", help="Print the machine-readable JSON payload instead of the "
+        "rendered table.")]
 
 
 def summarize_runtime_configuration(runtime_values=None):
@@ -26,97 +73,6 @@ def summarize_runtime_configuration(runtime_values=None):
             if isinstance(key, str) and key.startswith(prefix):
                 defaults[platform][key[len(prefix):]] = value
     return defaults
-
-
-def _build_command_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="clipmorph", description="Create and manage ClipMorph jobs.")
-    parser.add_argument("--data-dir", type=Path, default=default_data_dir())
-    parser.add_argument("--app-config", type=Path)
-    commands = parser.add_subparsers(dest="command", required=True)
-
-    init = commands.add_parser("init", help="Create app.yml and auth.yaml templates.")
-    init.add_argument("--config-path", type=Path)
-
-    web = commands.add_parser("web", help="Start the local API and dashboard.")
-    web.add_argument("--host", default="127.0.0.1")
-    web.add_argument("--port", type=int, default=8000)
-
-    auth = commands.add_parser("auth", help="Manage platform credentials.")
-    auth_commands = auth.add_subparsers(dest="auth_command", required=True)
-    auth_commands.add_parser("status")
-    auth_set = auth_commands.add_parser("set")
-    auth_set.add_argument("platform")
-    auth_commands.add_parser("twitter")
-
-    job = commands.add_parser("job", help="Create and manage per-source jobs.")
-    job_commands = job.add_subparsers(dest="job_command", required=True)
-    create = job_commands.add_parser("create")
-    create.add_argument("source", type=Path)
-    create.add_argument("--job-configs", type=Path)
-    create.add_argument("--config-dir", type=Path)
-    create.add_argument("--dry-run", action="store_true")
-    create.add_argument("--yes", action="store_true")
-    listing = job_commands.add_parser("list")
-    listing.add_argument("--status")
-    get = job_commands.add_parser("get")
-    get.add_argument("job_id")
-    update = job_commands.add_parser("update")
-    update.add_argument("job_id")
-    update.add_argument("--patch", type=Path, required=True)
-    update.add_argument("--reopen", action="store_true")
-    delete = job_commands.add_parser("delete")
-    delete.add_argument("job_id")
-    delete.add_argument("--yes", action="store_true")
-    resume = job_commands.add_parser("resume")
-    resume.add_argument("job_id")
-    cancel = job_commands.add_parser("cancel")
-    cancel.add_argument("job_id")
-    cancel.add_argument("--yes", action="store_true")
-    review = job_commands.add_parser("review")
-    review.add_argument("job_id")
-    review.add_argument("checkpoint", choices=["transcript", "conversion", "upload"])
-    review.add_argument("--edits", type=Path)
-    review.add_argument("--accept", action="store_true")
-    review.add_argument("--reopen", action="store_true")
-    render = job_commands.add_parser("render")
-    render.add_argument("job_id")
-    upload = job_commands.add_parser("upload")
-    upload.add_argument("upload_args", nargs="+")
-    upload.add_argument("--platform", action="append")
-    upload.add_argument("--attempt-id")
-    upload.add_argument("--artifact-id")
-    upload.add_argument("--confirm-historical-artifact", action="store_true")
-
-    artifacts = job_commands.add_parser("artifacts")
-    artifact_commands = artifacts.add_subparsers(dest="artifact_command", required=True)
-    artifact_list = artifact_commands.add_parser("list")
-    artifact_list.add_argument("job_id")
-    for name in ("preview", "download", "rename", "delete"):
-        command = artifact_commands.add_parser(name)
-        command.add_argument("job_id")
-        command.add_argument("artifact_id")
-        if name == "download":
-            command.add_argument("--destination", type=Path, required=True)
-        elif name == "rename":
-            command.add_argument("--name", required=True)
-        elif name == "delete":
-            command.add_argument("--yes", action="store_true")
-
-    artifact_prune = artifact_commands.add_parser("prune")
-    artifact_prune.add_argument("job_id")
-
-    layout = commands.add_parser("layout", help="Manage the global layout registry.")
-    layout_commands = layout.add_subparsers(dest="layout_command", required=True)
-    layout_commands.add_parser("list")
-    layout_create = layout_commands.add_parser("create")
-    layout_create.add_argument("configuration", type=Path)
-    layout_get = layout_commands.add_parser("get")
-    layout_get.add_argument("layout_id")
-    layout_delete = layout_commands.add_parser("delete")
-    layout_delete.add_argument("layout_id")
-    layout_delete.add_argument("--yes", action="store_true")
-    return parser
 
 
 def _read_structured_file(path: Path) -> dict[str, Any]:
@@ -134,271 +90,975 @@ def _print_json(value: Any) -> None:
     print(json.dumps(value, indent=2, default=str))
 
 
-def run_cli(argv: list[str] | None = None) -> int:
-    """Execute one public command, returning the documented process status."""
-    import getpass
+def _console() -> Console:
+    """Return a console for the current stdout.
 
-    from clipmorph.auth import AUTH_ENVIRONMENT_KEYS
-    from clipmorph.auth import create_auth_template
-    from clipmorph.auth import credential_status
-    from clipmorph.auth import persist_auth_credentials
-    from clipmorph.configuration import DEFAULT_APP_CONFIGURATION
-    from clipmorph.configuration import load_app_configuration
-    from clipmorph.configuration import load_job_records
-    from clipmorph.configuration import save_app_configuration
+    One console per render keeps redirected or patched ``sys.stdout``
+    authoritative; rich strips markup tags and colour when the stream is not a
+    terminal, which is what mutes the human view for pipes and log files.
+    """
+    return Console(highlight=False)
+
+
+def _cell(value: Any, style: str = "") -> Text:
+    """Format one value as text rich never re-reads as markup."""
+    if isinstance(value, Text):
+        return value
+    if value is None:
+        return Text("-", style=style or "dim")
+    if isinstance(value, bool):
+        return Text("yes" if value else "no", style=style)
+    if isinstance(value, (list, tuple, dict)):
+        return Text(json.dumps(value, default=str, sort_keys=True), style=style)
+    return Text(str(value), style=style)
+
+
+def _status(value: Any) -> Text:
+    """Format a status word with its severity colour."""
+    word = str(value)
+    return _cell(word, STATUS_STYLES.get(word, ""))
+
+
+def _column_label(column: str) -> str:
+    return column.replace("_", " ").capitalize()
+
+
+def _print_table(title: str, rows: list[dict[str, Any]], columns: list[str],
+                 nowrap: tuple[str, ...] = ()) -> None:
+    """Render one row per record, with a column per requested key.
+
+    Values fold onto the next line instead of being dropped, and identifier
+    columns stay on one line so a copied job or artifact ID is never mangled.
+    """
+    table = Table(title=title, title_justify="left", header_style="bold")
+    for column in columns:
+        table.add_column(_column_label(column), overflow="fold",
+                         no_wrap=column in nowrap)
+    for row in rows:
+        table.add_row(*[_cell(row.get(column)) for column in columns])
+    _console().print(table)
+    if not rows:
+        _console().print(Text("(no entries)", style="dim"))
+
+
+def _print_fields(title: str, fields: list[tuple[str, Any]]) -> None:
+    """Render a labelled record as a key/value grid."""
+    _print_table(title, [{"Field": label, "Value": value} for label, value in fields],
+                 ["Field", "Value"])
+
+
+def _print_summary(lines: list[str]) -> None:
+    """Print plain result lines through the same console as the tables."""
+    console = _console()
+    for line in lines:
+        console.print(_cell(line))
+
+
+def _yes_no(value: Any) -> str:
+    return "yes" if value else "no"
+
+
+def _short_hash(value: Any) -> Any:
+    return value[:12] if isinstance(value, str) and value else value
+
+
+def _checkpoint_summary(record: dict[str, Any]) -> Text:
+    """Summarize every checkpoint as ``stage=status`` pairs."""
+    checkpoints = record.get("checkpoints") or {}
+    text = Text(" ")
+    for index, stage in enumerate(CHECKPOINT_STAGES):
+        if index:
+            text.append("  ")
+        status = str((checkpoints.get(stage) or {}).get("status", "-"))
+        text.append(f"{stage}=", style="dim")
+        text.append(status, style=STATUS_STYLES.get(status, ""))
+    return text
+
+
+def _platform_summary(platforms: dict[str, Any]) -> Text:
+    """Summarize recorded per-platform results as ``platform=state`` pairs."""
+    if not platforms:
+        return _cell(None)
+    text = Text(" ")
+    for index, (platform, result) in enumerate(sorted(platforms.items())):
+        if index:
+            text.append("  ")
+        succeeded = bool(result.get("success")) if isinstance(result, dict) else False
+        text.append(f"{platform}=", style="dim")
+        text.append("ok" if succeeded else "failed",
+                    style="green" if succeeded else "red")
+    return text
+
+
+def _current_checkpoint(record: dict[str, Any]) -> Text:
+    """Summarize the checkpoint a job is currently at, with its status."""
+    stage = record.get("current_checkpoint")
+    if not stage:
+        return _cell("complete", "green")
+    status = str((record.get("checkpoints") or {}).get(stage, {}).get("status", "-"))
+    text = Text(f"{stage} ")
+    text.append(status, style=STATUS_STYLES.get(status, ""))
+    return text
+
+
+def _job_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for record in records:
+        content = ((record.get("configuration") or {}).get("upload") or {}).get("content") or {}
+        rows.append({
+            "job_id": record.get("job_id"),
+            "source": (record.get("configuration") or {}).get("general", {}).get("source")
+            or Path(record.get("source_path") or "").name,
+            "title": content.get("title") or None,
+            "status": _status(record.get("status")),
+            "checkpoint": _current_checkpoint(record),
+        })
+    return rows
+
+
+def _job_fields(record: dict[str, Any]) -> list[tuple[str, Any]]:
+    """Build the key/value grid shown for one job."""
+    artifacts = record.get("artifacts") or {}
+    fields: list[tuple[str, Any]] = [
+        ("Job ID", record.get("job_id")),
+        ("Source", (record.get("configuration") or {}).get("general", {}).get("source")),
+        ("Source path", record.get("source_path")),
+        ("Title", ((record.get("configuration") or {}).get("upload") or {})
+         .get("content", {}).get("title") or None),
+        ("Status", _status(record.get("status"))),
+        ("Checkpoint", record.get("current_checkpoint")),
+        ("Checkpoints", _checkpoint_summary(record)),
+        ("Artifacts", f"{len(artifacts)} registered"
+         + (f", current {record['current_artifact_id']}"
+            if record.get("current_artifact_id") else "")),
+        ("Platforms", _platform_summary(record.get("platforms") or {})),
+        ("Configuration hash", _short_hash(record.get("current_configuration_hash"))),
+        ("Updated at", record.get("updated_at")),
+    ]
+    warnings = record.get("warnings") or []
+    if warnings:
+        fields.append(("Warnings", _cell(
+            "; ".join(str(item) for item in warnings), "yellow")))
+    platform_errors = [f"{platform}: {result.get('error')}"
+                       for platform, result in sorted((record.get("platforms") or {}).items())
+                       if isinstance(result, dict) and not result.get("success")]
+    if platform_errors:
+        fields.append(("Platform errors", _cell("; ".join(platform_errors), "red")))
+    errors = [error for error in (record.get("errors") or [])
+              if isinstance(error, dict)]
+    if errors:
+        fields.append(("Errors", _cell("; ".join(
+            f"{error.get('code', 'error')}: {error.get('message', '')}"
+            for error in errors), "red")))
+    return fields
+
+
+def _crop_summary(crop: dict[str, Any]) -> str:
+    if not crop.get("enabled"):
+        return "disabled"
+    composition = crop.get("composition") or {}
+    sizing = crop.get("sizing") or {}
+    return " ".join(part for part in (
+        "enabled",
+        str(composition.get("mode") or "overlay"),
+        f"placement={composition['placement']}" if composition.get("placement") else "",
+        f"mode={sizing['mode']}" if sizing.get("mode") else "",
+    ) if part)
+
+
+def _captions_summary(captions: dict[str, Any]) -> str:
+    parts = [f"{section}={len(captions[section]['items'])} items"
+             for section in ("overlay", "stacked")
+             if isinstance(captions.get(section), dict)
+             and captions[section].get("items")]
+    return " ".join(parts) or "none"
+
+
+def _layout_rows(layouts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{
+        "id": record.get("id"),
+        "name": record.get("name"),
+        "crop": _crop_summary((record.get("layout") or {}).get("crop") or {}),
+        "captions": _captions_summary((record.get("layout") or {}).get("captions") or {}),
+    } for record in layouts]
+
+
+def _print_creation_result(result: dict[str, Any], json_output: bool) -> None:
+    """Render a fan-out result as one outcome row per source plus counts."""
+    if json_output:
+        _print_json(result)
+        return
+    outcomes = [*(result.get("created") or []), *(result.get("skipped") or []),
+                *(result.get("failed") or [])]
+    _print_table("Sources", [{
+        "source": item.get("source"),
+        "status": _status(item.get("status")),
+        "code": item.get("code"),
+        "message": item.get("message"),
+        "job_id": item.get("job_id"),
+    } for item in outcomes], ["source", "status", "code", "message", "job_id"],
+        nowrap=("job_id",))
+    summary = result.get("summary") or {}
+    _print_summary([f"created: {summary.get('created', 0)}",
+                    f"skipped: {summary.get('skipped', 0)}",
+                    f"failed: {summary.get('failed', 0)}",
+                    f"total: {summary.get('total', 0)}"])
+
+
+def _print_upload_result(result: dict[str, Any], json_output: bool) -> None:
+    """Render an accepted submission or retry as attempt rows plus a summary."""
+    if json_output:
+        _print_json(result)
+        return
+    _print_table("Upload attempts", [{
+        "platform": attempt.get("platform"),
+        "attempt_id": attempt.get("attempt_id"),
+        "status": _status(attempt.get("status")),
+        "scheduled": _cell(_yes_no(attempt.get("scheduled"))),
+    } for attempt in (result.get("attempts") or [])],
+        ["platform", "attempt_id", "status", "scheduled"], nowrap=("attempt_id",))
+    _print_summary([f"job: {result.get('job_id')}",
+                    f"scheduled: {_yes_no(result.get('scheduled'))}",
+                    f"status_url: {result.get('status_url')}"])
+
+
+@dataclass(frozen=True)
+class _GlobalOptions:
+    """Global options collected by the root callback for subcommands."""
+
+    data_dir: Path | None = None
+    app_config: Path | None = None
+
+
+def _resolve_paths(ctx: typer.Context, data_dir: Path | None,
+                   app_config: Path | None) -> tuple[Path, Path]:
+    """Return the data directory and app.yml path selected for one command.
+
+    Global options are accepted both before and after the subcommand, so a
+    value given on the command itself wins over the inherited one.
+    """
+    inherited = ctx.obj if isinstance(ctx.obj, _GlobalOptions) else _GlobalOptions()
+    selected_data_dir = Path(data_dir or inherited.data_dir or default_data_dir())
+    selected_config = app_config or inherited.app_config
+    return (selected_data_dir,
+            Path(selected_config) if selected_config else selected_data_dir / "app.yml")
+
+
+app = typer.Typer(add_completion=False, no_args_is_help=False,
+                  help="Create and manage ClipMorph jobs.")
+auth_app = typer.Typer(no_args_is_help=False, help="Manage platform credentials.")
+job_app = typer.Typer(no_args_is_help=False, help="Create and manage per-source jobs.")
+artifact_app = typer.Typer(no_args_is_help=False,
+                           help="Manage registered artifact revisions.")
+layout_app = typer.Typer(no_args_is_help=False,
+                         help="Manage the global layout registry.")
+
+
+def _registered_artifact(manifest: Any, artifact_id: str) -> dict[str, Any]:
+    """Return one registered artifact record or report a missing one."""
+    artifact = manifest.artifacts.get(artifact_id)
+    if artifact is None:
+        raise FileNotFoundError("artifact not found")
+    return artifact
+
+
+def _artifact_path(ctx: typer.Context, job_id: str, artifact_id: str,
+                   data_dir: Path | None, app_config: Path | None) -> Path:
+    """Return the local path of one registered artifact."""
     from clipmorph.service import JobService
 
-    args = _build_command_parser().parse_args(argv)
-    data_dir = args.data_dir
-    app_config_path = args.app_config or data_dir / "app.yml"
+    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    with closing(JobService(selected_data_dir,
+                           app_config_path=selected_config)) as service:
+        manifest = service.get_job(job_id)
+        return Path(_registered_artifact(manifest, artifact_id)["path"])
+
+
+@app.callback()
+def main_callback(ctx: typer.Context, data_dir: DataDirOption = None,
+                  app_config: AppConfigOption = None) -> None:
+    """Create and manage ClipMorph jobs."""
+    ctx.obj = _GlobalOptions(data_dir=data_dir, app_config=app_config)
+
+
+@app.command("init")
+def init_command(
+        ctx: typer.Context,
+        config_path: Annotated[Optional[Path], typer.Option(
+            "--config-path", help="Write the app configuration template here.")] = None,
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """Create app.yml and auth.yaml templates."""
+    from clipmorph.auth import create_auth_template
+    from clipmorph.configuration import DEFAULT_APP_CONFIGURATION
+    from clipmorph.configuration import save_app_configuration
+
+    _, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    target = config_path or selected_config
+    if not target.exists():
+        save_app_configuration(target, DEFAULT_APP_CONFIGURATION)
+    create_auth_template(target.parent)
+    _print_summary([f"Initialized {target}"])
+
+
+@app.command("web")
+def web_command(
+        ctx: typer.Context,
+        host: Annotated[str, typer.Option(
+            "--host", help="Interface the local service binds to.")] = "127.0.0.1",
+        port: Annotated[int, typer.Option(
+            "--port", help="Port the local service binds to.")] = 8000,
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """Start the local API and dashboard."""
+    import uvicorn
+
+    from clipmorph.web import create_app
+
+    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    uvicorn.run(create_app(selected_data_dir, selected_config), host=host, port=port)
+
+
+@auth_app.command("status")
+def auth_status_command(ctx: typer.Context, json_output: JsonOption = False,
+                        data_dir: DataDirOption = None,
+                        app_config: AppConfigOption = None) -> None:
+    """Show which platforms have at least one configured credential."""
+    from clipmorph.auth import credential_status
+
+    status = credential_status()
+    if json_output:
+        _print_json(status)
+        return
+    _print_table("Credentials",
+                 [{"platform": platform, "configured": _cell(value)}
+                  for platform, value in status.items()],
+                 ["platform", "configured"])
+
+
+@auth_app.command("set")
+def auth_set_command(
+        ctx: typer.Context,
+        platform: Annotated[str, typer.Argument(
+            help="Platform whose credentials are updated.")],
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """Prompt for platform credentials and store them in auth.yaml."""
+    from clipmorph.auth import AUTH_ENVIRONMENT_KEYS
+    from clipmorph.auth import persist_auth_credentials
+
+    selected_data_dir, _ = _resolve_paths(ctx, data_dir, app_config)
+    fields = AUTH_ENVIRONMENT_KEYS.get(platform)
+    if fields is None:
+        raise ValueError(f"Unsupported auth platform: {platform}")
+    values = {field: value for field in fields
+              if (value := getpass.getpass(f"{platform} {field}: "))}
+    if not values:
+        raise ValueError("No credential values were entered")
+    persist_auth_credentials(platform, values, selected_data_dir)
+    _print_summary([f"Updated {platform} credentials"])
+
+
+@auth_app.command("twitter")
+def auth_twitter_command(ctx: typer.Context, data_dir: DataDirOption = None,
+                         app_config: AppConfigOption = None) -> None:
+    """Run the existing Twitter/X OAuth2 authorization flow."""
+    from clipmorph.twitter_auth import authorize_twitter
+
+    selected_data_dir, _ = _resolve_paths(ctx, data_dir, app_config)
+    saved_to = authorize_twitter(selected_data_dir)
+    _print_summary([f"Twitter OAuth2 credentials saved to {saved_to}"])
+
+
+@layout_app.command("list")
+def layout_list_command(ctx: typer.Context, json_output: JsonOption = False,
+                        data_dir: DataDirOption = None,
+                        app_config: AppConfigOption = None) -> None:
+    """List the global layout registry."""
+    from clipmorph.configuration import load_app_configuration
+
+    _, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    layouts = load_app_configuration(selected_config)["layouts"]
+    if json_output:
+        _print_json(layouts)
+        return
+    _print_table("Layouts", _layout_rows(layouts), ["id", "name", "crop", "captions"])
+
+
+@layout_app.command("create")
+def layout_create_command(
+        ctx: typer.Context,
+        configuration: Annotated[Path, typer.Argument(
+            help="YAML/JSON file holding a name and layout object.")],
+        json_output: JsonOption = False,
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """Register a layout from a YAML/JSON file."""
+    from clipmorph.configuration import load_app_configuration
+    from clipmorph.configuration import save_app_configuration
+    from clipmorph.layout import validate_layout
+
+    _, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    app_configuration = load_app_configuration(selected_config)
+    layout_spec = _read_structured_file(configuration)
+    name, layout_value = layout_spec.get("name"), layout_spec.get("layout")
+    if not isinstance(name, str) or not name.strip() or not isinstance(layout_value, dict):
+        raise ValueError("layout config requires name and layout object")
+    validate_layout(layout_value)
+    record = {"id": uuid.uuid4().hex, "name": name.strip(), "layout": layout_value}
+    app_configuration["layouts"] = [*app_configuration["layouts"], record]
+    save_app_configuration(selected_config, app_configuration)
+    if json_output:
+        _print_json(record)
+        return
+    _print_fields(f"Layout {record['name']}", [("id", record["id"]),
+                                               ("name", record["name"]),
+                                               ("layout", record["layout"])])
+
+
+@layout_app.command("get")
+def layout_get_command(
+        ctx: typer.Context,
+        layout_id: Annotated[str, typer.Argument(help="Registry layout ID.")],
+        json_output: JsonOption = False,
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """Show one registry layout."""
+    from clipmorph.configuration import load_app_configuration
+
+    _, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    layouts = load_app_configuration(selected_config)["layouts"]
+    matching = [item for item in layouts if item["id"] == layout_id]
+    if not matching:
+        raise FileNotFoundError("layout not found")
+    record = matching[0]
+    if json_output:
+        _print_json(record)
+        return
+    _print_fields(f"Layout {record.get('name')}", [("id", record.get("id")),
+                                                    ("name", record.get("name")),
+                                                    ("layout", record.get("layout"))])
+
+
+@layout_app.command("delete")
+def layout_delete_command(
+        ctx: typer.Context,
+        layout_id: Annotated[str, typer.Argument(help="Registry layout ID.")],
+        yes: Annotated[bool, typer.Option(
+            "--yes", help="Confirm the deletion.")] = False,
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """Delete one registry layout."""
+    from clipmorph.configuration import load_app_configuration
+    from clipmorph.configuration import save_app_configuration
+
+    _, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    app_configuration = load_app_configuration(selected_config)
+    if not yes:
+        raise ValueError("layout delete requires --yes")
+    layouts = app_configuration["layouts"]
+    remaining = [item for item in layouts if item["id"] != layout_id]
+    if len(remaining) == len(layouts):
+        raise FileNotFoundError("layout not found")
+    app_configuration["layouts"] = remaining
+    save_app_configuration(selected_config, app_configuration)
+
+
+@job_app.command("create")
+def job_create_command(
+        ctx: typer.Context,
+        source: Annotated[Path, typer.Argument(
+            help="Source file, or the source_dir itself to fan out over it.")],
+        job_configs: Annotated[Optional[Path], typer.Option(
+            "--job-configs", help="JSONL or YAML per-source job records.")] = None,
+        config_dir: Annotated[Optional[Path], typer.Option(
+            "--config-dir", help="Directory holding per-source sidecars.")] = None,
+        dry_run: Annotated[bool, typer.Option(
+            "--dry-run", help="Validate sources and configuration without "
+            "writing jobs or manifests.")] = False,
+        yes: Annotated[bool, typer.Option(
+            "--yes", help="Accept confirmations; job creation never prompts.")] = False,
+        json_output: JsonOption = False,
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """Create one job, or fan out over every source in the source directory."""
+    from clipmorph.configuration import load_app_configuration
+    from clipmorph.configuration import load_job_records
+    from clipmorph.service import JobService
+
+    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    with closing(JobService(selected_data_dir,
+                           app_config_path=selected_config)) as service:
+        app_configuration = load_app_configuration(selected_config)
+        source_root = Path(app_configuration["source_dir"])
+        if not source_root.is_absolute():
+            source_root = selected_config.parent / source_root
+        if source.is_dir():
+            if source.resolve() != source_root.resolve():
+                raise ValueError("source directory must match app.yml source_dir")
+            source_names = None
+        else:
+            source_names = [source.name]
+        records = load_job_records(job_configs) if job_configs else []
+        runner = None
+        if not dry_run:
+            from clipmorph.workflow import execute_job
+            runner = lambda job, token: execute_job(
+                job, token, service.jobs_dir, service.app_config_path)
+        result = service.create_jobs(
+            source_names=source_names, job_configs=records,
+            config_dir=config_dir, runner=runner, dry_run=dry_run)
+    _print_creation_result(result, json_output)
+    if result["failed"]:
+        raise typer.Exit(1)
+
+
+@job_app.command("list")
+def job_list_command(
+        ctx: typer.Context,
+        status: Annotated[Optional[str], typer.Option(
+            "--status", help="Keep only jobs in this status.")] = None,
+        json_output: JsonOption = False,
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """List jobs with their status, title, and current checkpoint."""
+    from clipmorph.service import JobService
+
+    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    with closing(JobService(selected_data_dir,
+                           app_config_path=selected_config)) as service:
+        jobs = service.list_jobs()
+    if status:
+        jobs = [item for item in jobs if item.status == status]
+    records = [asdict(item) for item in jobs]
+    if json_output:
+        _print_json(records)
+        return
+    _print_table("Jobs", _job_rows(records),
+                 ["job_id", "source", "title", "status", "checkpoint"],
+                 nowrap=("job_id",))
+
+
+@job_app.command("get")
+def job_get_command(
+        ctx: typer.Context,
+        job_id: Annotated[str, typer.Argument(help="Job ID.")],
+        json_output: JsonOption = False,
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """Show one job manifest with its checkpoints, artifacts, and platforms."""
+    from clipmorph.service import JobService
+
+    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    with closing(JobService(selected_data_dir,
+                           app_config_path=selected_config)) as service:
+        record = asdict(service.get_job(job_id))
+    if json_output:
+        _print_json(record)
+        return
+    _print_fields(f"Job {job_id}", _job_fields(record))
+
+
+@job_app.command("update")
+def job_update_command(
+        ctx: typer.Context,
+        job_id: Annotated[str, typer.Argument(help="Job ID.")],
+        patch: Annotated[Path, typer.Option(
+            "--patch", help="YAML/JSON per-job configuration patch.")],
+        reopen: Annotated[bool, typer.Option(
+            "--reopen", help="Reopen completed work for the changed inputs.")] = False,
+        json_output: JsonOption = False,
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """Apply a validated per-job configuration patch against the current hash."""
+    from clipmorph.service import JobService
+
+    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    with closing(JobService(selected_data_dir,
+                           app_config_path=selected_config)) as service:
+        manifest = service.get_job(job_id)
+        updated = service.update_job_configuration(
+            job_id, _read_structured_file(patch),
+            manifest.current_configuration_hash, reopen)
+    record = asdict(updated)
+    if json_output:
+        _print_json(record)
+        return
+    _print_fields(f"Job {job_id}", _job_fields(record))
+
+
+@job_app.command("delete")
+def job_delete_command(
+        ctx: typer.Context,
+        job_id: Annotated[str, typer.Argument(help="Job ID.")],
+        yes: Annotated[bool, typer.Option(
+            "--yes", help="Confirm the deletion.")] = False,
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """Trash a job's local directory and output."""
+    from send2trash import send2trash
+
+    from clipmorph.configuration import load_app_configuration
+    from clipmorph.service import JobService
+
+    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    with closing(JobService(selected_data_dir,
+                           app_config_path=selected_config)) as service:
+        if not yes:
+            raise ValueError("job delete requires --yes")
+        manifest = service.get_job(job_id)
+        job_dir = service.jobs_dir / job_id
+        if job_dir.exists():
+            send2trash(str(job_dir))
+        output_dir = Path(load_app_configuration(selected_config)["output_dir"])
+        if not output_dir.is_absolute():
+            output_dir = selected_config.parent / output_dir
+        output_job = output_dir / job_id
+        if output_job.exists():
+            send2trash(str(output_job))
+    _print_summary([manifest.job_id])
+
+
+@job_app.command("cancel")
+def job_cancel_command(
+        ctx: typer.Context,
+        job_id: Annotated[str, typer.Argument(help="Job ID.")],
+        yes: Annotated[bool, typer.Option(
+            "--yes", help="Confirm the cancellation.")] = False,
+        json_output: JsonOption = False,
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """Cancel queued or running work for a job."""
+    from clipmorph.service import JobService
+
+    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    with closing(JobService(selected_data_dir,
+                           app_config_path=selected_config)) as service:
+        if not yes:
+            raise ValueError("job cancel requires --yes")
+        record = asdict(service.cancel_job(job_id))
+    if json_output:
+        _print_json(record)
+        return
+    _print_fields(f"Job {job_id}", _job_fields(record))
+
+
+@job_app.command("resume")
+def job_resume_command(
+        ctx: typer.Context,
+        job_id: Annotated[str, typer.Argument(help="Job ID.")],
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """Resume the next executable checkpoint of a job."""
+    from clipmorph.service import JobService
+    from clipmorph.workflow import execute_job
+
+    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    with closing(JobService(selected_data_dir,
+                           app_config_path=selected_config)) as service:
+        service.resume_job(job_id, lambda job, token: execute_job(
+            job, token, service.jobs_dir, service.app_config_path))
+
+
+@job_app.command("review")
+def job_review_command(
+        ctx: typer.Context,
+        job_id: Annotated[str, typer.Argument(help="Job ID.")],
+        checkpoint: Annotated[Literal["transcript", "conversion", "upload"],
+                              typer.Argument(help="Checkpoint to review.")],
+        edits: Annotated[Optional[Path], typer.Option(
+            "--edits", help="YAML/JSON edit object for the checkpoint.")] = None,
+        accept: Annotated[bool, typer.Option(
+            "--accept", help="Accept the current checkpoint revision.")] = False,
+        reopen: Annotated[bool, typer.Option(
+            "--reopen", help="Reopen the checkpoint for the changed inputs.")] = False,
+        json_output: JsonOption = False,
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """Apply checkpoint edits and optionally accept the review gate."""
+    from clipmorph.service import JobService
+
+    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    with closing(JobService(selected_data_dir,
+                           app_config_path=selected_config)) as service:
+        manifest = service.get_job(job_id)
+        if edits:
+            edit_values = _read_structured_file(edits)
+            if checkpoint == "transcript":
+                active_revision = (manifest.active_transcript or {}).get("revision", 0)
+                service.save_transcript_session(
+                    job_id, edit_values, active_revision,
+                    manifest.checkpoints["transcript"]["revision"], reopen)
+            elif checkpoint == "upload":
+                upload_draft = edit_values.get("upload", edit_values)
+                service.update_upload_draft(
+                    job_id, upload_draft,
+                    manifest.checkpoints["upload"]["revision"], reopen)
+            elif checkpoint == "conversion":
+                service.update_job_configuration(
+                    job_id, edit_values.get("patch", edit_values),
+                    manifest.current_configuration_hash, reopen)
+            manifest = service.get_job(job_id)
+        if accept:
+            manifest = service.accept_checkpoint(
+                job_id, checkpoint, manifest.checkpoints[checkpoint]["revision"])
+    record = asdict(manifest)
+    if json_output:
+        _print_json(record)
+        return
+    _print_fields(f"Job {job_id}", _job_fields(record))
+
+
+@job_app.command("render")
+def job_render_command(
+        ctx: typer.Context,
+        job_id: Annotated[str, typer.Argument(help="Job ID.")],
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """Rerender the accepted composition as a new immutable artifact."""
+    from clipmorph.service import JobService
+    from clipmorph.workflow import execute_job
+
+    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    with closing(JobService(selected_data_dir,
+                           app_config_path=selected_config)) as service:
+        manifest = service.get_job(job_id)
+        conversion = manifest.checkpoints["conversion"]
+        if conversion["status"] in {"failed", "cancelled", "stale"}:
+            manifest.transition_checkpoint(
+                "conversion", "pending", conversion["revision"], service.jobs_dir)
+        elif conversion["status"] == "completed":
+            manifest.transition_checkpoint(
+                "conversion", "stale", conversion["revision"], service.jobs_dir)
+            manifest = service.get_job(job_id)
+            manifest.transition_checkpoint(
+                "conversion", "pending",
+                manifest.checkpoints["conversion"]["revision"], service.jobs_dir)
+        service.resume_job(job_id, lambda job, token: execute_job(
+            job, token, service.jobs_dir, service.app_config_path))
+
+
+@job_app.command("upload")
+def job_upload_command(
+        ctx: typer.Context,
+        upload_args: Annotated[Optional[list[str]], typer.Argument(
+            metavar="ID | RETRY ID PLATFORM",
+            help="Job ID, or retry with a job ID and platform.")] = None,
+        platform: Annotated[Optional[list[str]], typer.Option(
+            "--platform", help="Limit the submission to this platform; repeatable."
+        )] = None,
+        attempt_id: Annotated[Optional[str], typer.Option(
+            "--attempt-id", help="Failed attempt ID to retry.")] = None,
+        artifact_id: Annotated[Optional[str], typer.Option(
+            "--artifact-id", help="Artifact ID for a historical retry.")] = None,
+        confirm_historical_artifact: Annotated[bool, typer.Option(
+            "--confirm-historical-artifact",
+            help="Confirm retrying an artifact other than the current one.")] = False,
+        json_output: JsonOption = False,
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """Submit the accepted upload draft, or retry one failed attempt."""
+    from clipmorph.service import JobService
+
+    if not upload_args:
+        raise ValueError("syntax: job upload ID")
+    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    with closing(JobService(selected_data_dir,
+                           app_config_path=selected_config)) as service:
+        if upload_args[0] == "retry":
+            if len(upload_args) != 3:
+                raise ValueError("syntax: job upload retry ID PLATFORM")
+            _, job_id, retry_platform = upload_args
+            manifest = service.get_job(job_id)
+            selected_attempt = attempt_id
+            if selected_attempt is None:
+                attempt = next((item for item in reversed(manifest.upload_attempts)
+                                if item["platform"] == retry_platform
+                                and item["status"] == "failed"), None)
+                if attempt is None:
+                    raise ValueError("no failed upload attempt for that platform")
+                selected_attempt = attempt["attempt_id"]
+            result = service.retry_upload(
+                job_id, retry_platform, selected_attempt, artifact_id,
+                confirm_historical_artifact)
+        else:
+            if len(upload_args) != 1:
+                raise ValueError("syntax: job upload ID")
+            result = service.submit_upload(
+                upload_args[0], platform, artifact_id,
+                confirm_historical_artifact)
+    _print_upload_result(result, json_output)
+
+
+@artifact_app.command("list")
+def artifacts_list_command(
+        ctx: typer.Context,
+        job_id: Annotated[str, typer.Argument(help="Job ID.")],
+        json_output: JsonOption = False,
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """List registered artifact revisions without their local paths."""
+    from clipmorph.service import JobService
+
+    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    with closing(JobService(selected_data_dir,
+                           app_config_path=selected_config)) as service:
+        manifest = service.get_job(job_id)
+        records = [{key: value for key, value in item.items() if key != "path"}
+                   for item in manifest.artifacts.values()]
+    if json_output:
+        _print_json(records)
+        return
+    _print_table(f"Artifacts for job {job_id}", [{
+        "artifact_id": item.get("id"),
+        "revision": item.get("revision"),
+        "kind": item.get("kind"),
+        "display_name": item.get("display_name"),
+        "state": _status(item.get("state")),
+        "created_at": item.get("created_at"),
+        "sha256": _short_hash(item.get("sha256")),
+    } for item in records],
+        ["artifact_id", "revision", "kind", "display_name", "state", "created_at",
+         "sha256"], nowrap=("artifact_id",))
+
+
+@artifact_app.command("preview")
+def artifacts_preview_command(
+        ctx: typer.Context,
+        job_id: Annotated[str, typer.Argument(help="Job ID.")],
+        artifact_id: Annotated[str, typer.Argument(help="Registered artifact ID.")],
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """Open a registered artifact in the default browser."""
+    path = _artifact_path(ctx, job_id, artifact_id, data_dir, app_config)
+    if not path.is_file():
+        raise FileNotFoundError("artifact bytes are unavailable")
+    webbrowser.open(path.resolve().as_uri())
+
+
+@artifact_app.command("download")
+def artifacts_download_command(
+        ctx: typer.Context,
+        job_id: Annotated[str, typer.Argument(help="Job ID.")],
+        artifact_id: Annotated[str, typer.Argument(help="Registered artifact ID.")],
+        destination: Annotated[Path, typer.Option(
+            "--destination", help="Local path the artifact is copied to.")],
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """Copy a registered artifact to a local path."""
+    path = _artifact_path(ctx, job_id, artifact_id, data_dir, app_config)
+    shutil.copy2(path, destination)
+    _print_summary([str(destination)])
+
+
+@artifact_app.command("rename")
+def artifacts_rename_command(
+        ctx: typer.Context,
+        job_id: Annotated[str, typer.Argument(help="Job ID.")],
+        artifact_id: Annotated[str, typer.Argument(help="Registered artifact ID.")],
+        name: Annotated[str, typer.Option(
+            "--name", help="New artifact display name.")],
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """Change artifact display metadata without touching its bytes."""
+    from clipmorph.service import JobService
+
+    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    if "/" in name or "\\" in name:
+        raise ValueError("artifact display name must be a filename")
+    with closing(JobService(selected_data_dir,
+                           app_config_path=selected_config)) as service:
+        manifest = service.get_job(job_id)
+        _registered_artifact(manifest, artifact_id)["display_name"] = name
+        manifest.save(service.jobs_dir)
+
+
+@artifact_app.command("delete")
+def artifacts_delete_command(
+        ctx: typer.Context,
+        job_id: Annotated[str, typer.Argument(help="Job ID.")],
+        artifact_id: Annotated[str, typer.Argument(help="Registered artifact ID.")],
+        yes: Annotated[bool, typer.Option(
+            "--yes", help="Confirm the deletion.")] = False,
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """Trash local artifact bytes and keep a manifest tombstone."""
+    from send2trash import send2trash
+
+    from clipmorph.service import JobService
+
+    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    with closing(JobService(selected_data_dir,
+                           app_config_path=selected_config)) as service:
+        manifest = service.get_job(job_id)
+        artifact = _registered_artifact(manifest, artifact_id)
+        path = Path(artifact["path"])
+        if not yes:
+            raise ValueError("artifact delete requires --yes")
+        if path.exists():
+            send2trash(str(path))
+        artifact["state"] = "deleted"
+        if manifest.current_artifact_id == artifact_id:
+            manifest.artifact_path = None
+        manifest.save(service.jobs_dir)
+
+
+@artifact_app.command("prune")
+def artifacts_prune_command(
+        ctx: typer.Context,
+        job_id: Annotated[str, typer.Argument(help="Job ID.")],
+        json_output: JsonOption = False,
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """Apply the app.yml retention policy to superseded artifacts."""
+    from clipmorph.service import JobService
+
+    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    with closing(JobService(selected_data_dir,
+                           app_config_path=selected_config)) as service:
+        result = service.enforce_retention(job_id)
+    if json_output:
+        _print_json(result)
+        return
+    _print_fields(f"Retention for job {job_id}",
+                  [("pruned", result.get("pruned")),
+                   ("bytes_freed", result.get("bytes_freed"))])
+
+
+app.add_typer(auth_app, name="auth")
+app.add_typer(job_app, name="job")
+app.add_typer(layout_app, name="layout")
+job_app.add_typer(artifact_app, name="artifacts")
+
+_command: click.Command | None = None
+
+
+def _cli_command() -> click.Command:
+    """Return the click command tree for the typer app, built once per process."""
+    global _command
+    if _command is None:
+        _command = typer.main.get_command(app)
+    return _command
+
+
+def run_cli(argv: list[str] | None = None) -> int:
+    """Execute one public command, returning the documented process status."""
+    args = list(argv) if argv is not None else None
     try:
-        if args.command == "init":
-            target = args.config_path or app_config_path
-            if not target.exists():
-                save_app_configuration(target, DEFAULT_APP_CONFIGURATION)
-            create_auth_template(target.parent)
-            print(f"Initialized {target}")
-            return 0
-
-        if args.command == "web":
-            import uvicorn
-            from clipmorph.web import create_app
-            uvicorn.run(create_app(data_dir, app_config_path),
-                        host=args.host, port=args.port)
-            return 0
-
-        if args.command == "auth":
-            if args.auth_command == "status":
-                _print_json(credential_status())
-                return 0
-            if args.auth_command == "twitter":
-                from clipmorph.twitter_auth import authorize_twitter
-                print(f"Twitter OAuth2 credentials saved to {authorize_twitter(data_dir)}")
-                return 0
-            fields = AUTH_ENVIRONMENT_KEYS.get(args.platform)
-            if fields is None:
-                raise ValueError(f"Unsupported auth platform: {args.platform}")
-            values = {field: value for field in fields
-                      if (value := getpass.getpass(f"{args.platform} {field}: "))}
-            if not values:
-                raise ValueError("No credential values were entered")
-            persist_auth_credentials(args.platform, values, data_dir)
-            print(f"Updated {args.platform} credentials")
-            return 0
-
-        if args.command == "layout":
-            configuration = load_app_configuration(app_config_path)
-            layouts = configuration["layouts"]
-            if args.layout_command == "list":
-                _print_json(layouts)
-                return 0
-            if args.layout_command == "create":
-                layout_spec = _read_structured_file(args.configuration)
-                from clipmorph.layout import validate_layout
-                name, layout_value = layout_spec.get("name"), layout_spec.get("layout")
-                if not isinstance(name, str) or not name.strip() or not isinstance(layout_value, dict):
-                    raise ValueError("layout config requires name and layout object")
-                validate_layout(layout_value)
-                record = {"id": uuid.uuid4().hex, "name": name.strip(),
-                          "layout": layout_value}
-                configuration["layouts"] = [*layouts, record]
-                save_app_configuration(app_config_path, configuration)
-                _print_json(record)
-                return 0
-            if args.layout_command == "get":
-                matching = [item for item in layouts
-                            if item["id"] == args.layout_id]
-                layout_record = matching[0] if matching else None
-                if layout_record is None:
-                    raise FileNotFoundError("layout not found")
-                _print_json(layout_record)
-                return 0
-            if not args.yes:
-                raise ValueError("layout delete requires --yes")
-            remaining = [item for item in layouts if item["id"] != args.layout_id]
-            if len(remaining) == len(layouts):
-                raise FileNotFoundError("layout not found")
-            configuration["layouts"] = remaining
-            save_app_configuration(app_config_path, configuration)
-            return 0
-
-        service = JobService(data_dir, app_config_path=app_config_path)
-        try:
-            if args.command != "job":
-                raise ValueError("unsupported command")
-            if args.job_command == "create":
-                app_configuration = load_app_configuration(app_config_path)
-                source_root = Path(app_configuration["source_dir"])
-                if not source_root.is_absolute():
-                    source_root = app_config_path.parent / source_root
-                if args.source.is_dir():
-                    if args.source.resolve() != source_root.resolve():
-                        raise ValueError("source directory must match app.yml source_dir")
-                    source_names = None
-                else:
-                    source_names = [args.source.name]
-                records = load_job_records(args.job_configs) if args.job_configs else []
-                runner = None
-                if not args.dry_run:
-                    from clipmorph.workflow import execute_job
-                    runner = lambda job, token: execute_job(
-                        job, token, service.jobs_dir, service.app_config_path)
-                result = service.create_jobs(
-                    source_names=source_names, job_configs=records,
-                    config_dir=args.config_dir, runner=runner, dry_run=args.dry_run)
-                _print_json(result)
-                return 1 if result["failed"] else 0
-            if args.job_command == "list":
-                jobs = service.list_jobs()
-                if args.status:
-                    jobs = [item for item in jobs if item.status == args.status]
-                _print_json([asdict(item) for item in jobs])
-                return 0
-            if args.job_command == "get":
-                _print_json(asdict(service.get_job(args.job_id)))
-                return 0
-            if args.job_command == "update":
-                manifest = service.get_job(args.job_id)
-                updated = service.update_job_configuration(
-                    args.job_id, _read_structured_file(args.patch),
-                    manifest.current_configuration_hash, args.reopen)
-                _print_json(asdict(updated))
-                return 0
-            if args.job_command == "delete":
-                if not args.yes:
-                    raise ValueError("job delete requires --yes")
-                manifest = service.get_job(args.job_id)
-                from send2trash import send2trash
-                job_dir = service.jobs_dir / args.job_id
-                if job_dir.exists():
-                    send2trash(str(job_dir))
-                output_dir = Path(load_app_configuration(app_config_path)["output_dir"])
-                if not output_dir.is_absolute():
-                    output_dir = app_config_path.parent / output_dir
-                output_job = output_dir / args.job_id
-                if output_job.exists():
-                    send2trash(str(output_job))
-                print(manifest.job_id)
-                return 0
-            if args.job_command == "cancel":
-                if not args.yes:
-                    raise ValueError("job cancel requires --yes")
-                _print_json(asdict(service.cancel_job(args.job_id)))
-                return 0
-            if args.job_command == "resume":
-                from clipmorph.workflow import execute_job
-                service.resume_job(args.job_id, lambda job, token: execute_job(
-                    job, token, service.jobs_dir, service.app_config_path))
-                return 0
-            if args.job_command == "review":
-                manifest = service.get_job(args.job_id)
-                if args.edits:
-                    edits = _read_structured_file(args.edits)
-                    if args.checkpoint == "transcript":
-                        active_revision = (manifest.active_transcript or {}).get("revision", 0)
-                        service.save_transcript_session(
-                            args.job_id, edits, active_revision,
-                            manifest.checkpoints["transcript"]["revision"], args.reopen)
-                    elif args.checkpoint == "upload":
-                        upload_draft = edits.get("upload", edits)
-                        service.update_upload_draft(
-                            args.job_id, upload_draft,
-                            manifest.checkpoints["upload"]["revision"], args.reopen)
-                    elif args.checkpoint == "conversion":
-                        patch = edits.get("patch", edits)
-                        service.update_job_configuration(
-                            args.job_id, patch,
-                            manifest.current_configuration_hash, args.reopen)
-                    manifest = service.get_job(args.job_id)
-                if args.accept:
-                    manifest = service.accept_checkpoint(
-                        args.job_id, args.checkpoint,
-                        manifest.checkpoints[args.checkpoint]["revision"])
-                _print_json(asdict(manifest))
-                return 0
-            if args.job_command == "render":
-                manifest = service.get_job(args.job_id)
-                checkpoint = manifest.checkpoints["conversion"]
-                if checkpoint["status"] in {"failed", "cancelled", "stale"}:
-                    manifest.transition_checkpoint(
-                        "conversion", "pending", checkpoint["revision"], service.jobs_dir)
-                elif checkpoint["status"] == "completed":
-                    manifest.transition_checkpoint(
-                        "conversion", "stale", checkpoint["revision"], service.jobs_dir)
-                    manifest = service.get_job(args.job_id)
-                    manifest.transition_checkpoint(
-                        "conversion", "pending",
-                        manifest.checkpoints["conversion"]["revision"], service.jobs_dir)
-                from clipmorph.workflow import execute_job
-                service.resume_job(args.job_id, lambda job, token: execute_job(
-                    job, token, service.jobs_dir, service.app_config_path))
-                return 0
-            if args.job_command == "upload":
-                if args.upload_args[0] == "retry":
-                    if len(args.upload_args) != 3:
-                        raise ValueError("syntax: job upload retry ID PLATFORM")
-                    _, job_id, platform = args.upload_args
-                    manifest = service.get_job(job_id)
-                    attempt_id = args.attempt_id
-                    if attempt_id is None:
-                        attempt = next((item for item in reversed(manifest.upload_attempts)
-                                        if item["platform"] == platform
-                                        and item["status"] == "failed"), None)
-                        if attempt is None:
-                            raise ValueError("no failed upload attempt for that platform")
-                        attempt_id = attempt["attempt_id"]
-                    result = service.retry_upload(
-                        job_id, platform, attempt_id, args.artifact_id,
-                        args.confirm_historical_artifact)
-                else:
-                    if len(args.upload_args) != 1:
-                        raise ValueError("syntax: job upload ID")
-                    result = service.submit_upload(
-                        args.upload_args[0], args.platform, args.artifact_id,
-                        args.confirm_historical_artifact)
-                _print_json(result)
-                return 0
-            if args.job_command == "artifacts":
-                manifest = service.get_job(args.job_id)
-                if args.artifact_command == "list":
-                    _print_json([{key: value for key, value in item.items() if key != "path"}
-                                 for item in manifest.artifacts.values()])
-                    return 0
-                if args.artifact_command == "prune":
-                    _print_json(service.enforce_retention(args.job_id))
-                    return 0
-                artifact = manifest.artifacts.get(args.artifact_id)
-                if artifact is None:
-                    raise FileNotFoundError("artifact not found")
-                path = Path(artifact["path"])
-                if args.artifact_command == "preview":
-                    if not path.is_file():
-                        raise FileNotFoundError("artifact bytes are unavailable")
-                    webbrowser.open(path.resolve().as_uri())
-                    return 0
-                if args.artifact_command == "download":
-                    shutil.copy2(path, args.destination)
-                    print(str(args.destination))
-                    return 0
-                if args.artifact_command == "rename":
-                    if "/" in args.name or "\\" in args.name:
-                        raise ValueError("artifact display name must be a filename")
-                    artifact["display_name"] = args.name
-                    manifest.save(service.jobs_dir)
-                    return 0
-                if not args.yes:
-                    raise ValueError("artifact delete requires --yes")
-                from send2trash import send2trash
-                if path.exists():
-                    send2trash(str(path))
-                artifact["state"] = "deleted"
-                if manifest.current_artifact_id == args.artifact_id:
-                    manifest.artifact_path = None
-                manifest.save(service.jobs_dir)
-                return 0
-            raise ValueError("unsupported job operation")
-        finally:
-            service.close()
+        return _cli_command().main(args=args, prog_name=PROG_NAME,
+                                   standalone_mode=False) or 0
+    except typer.Exit as error:  # typer.Exit is a click Exit subclass.
+        return error.exit_code or 0
+    except click.exceptions.Exit as error:
+        return error.exit_code or 0
+    except click.exceptions.UsageError as error:
+        print(str(error) or "usage error", file=sys.stderr)
+        return 2
+    except click.exceptions.ClickException as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    except click.exceptions.Abort:
+        return 130
     except KeyboardInterrupt:
         return 130
     except FileNotFoundError as error:

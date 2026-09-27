@@ -92,9 +92,9 @@ jobs:
           python -m clipmorph --data-dir "$DATA_DIR" job create "$SAMPLE" \
             --job-configs "$RUNNER_TEMP/job.yml" --dry-run
           JOB_RESULT=$(python -m clipmorph --data-dir "$DATA_DIR" job create \
-            "$SAMPLE" --job-configs "$RUNNER_TEMP/job.yml")
+            "$SAMPLE" --job-configs "$RUNNER_TEMP/job.yml" --json)
           JOB_ID=$(python -c 'import json,sys; print(json.load(sys.stdin)["created"][0]["job_id"])' <<<"$JOB_RESULT")
-          python -m clipmorph --data-dir "$DATA_DIR" job get "$JOB_ID" > "$RUNNER_TEMP/job.json"
+          python -m clipmorph --data-dir "$DATA_DIR" job get "$JOB_ID" --json > "$RUNNER_TEMP/job.json"
           python -c 'import json,pathlib; job=json.loads(pathlib.Path("'$RUNNER_TEMP'/job.json").read_text()); assert job["checkpoints"]["upload"]["status"] == "awaiting_review"'
 
           if python -m clipmorph --data-dir "$DATA_DIR" job resume "$JOB_ID" \
