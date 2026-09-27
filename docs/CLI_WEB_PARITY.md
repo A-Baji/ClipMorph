@@ -82,22 +82,26 @@ root-level names under `source_dir`; validate before queueing.
 | `POST /jobs` | Single `{source,configuration}`; persist finalized job.yml/manifest and queue; `202 {job_id,job,status_url}`. |
 | `POST /jobs/bulk` | `{source_names:null|[...],job_configs:[<job objects>],overrides:<job object>,config_dir?:PATH}`. Null selects all immediate source-root files; explicit names select only those. Direct job records key on `general.source`; shared overrides are copied per source before resolution. Return `{created,skipped,failed,summary,effective_configurations}`; no group ID. |
 | `PATCH /jobs/{id}/configuration`; `DELETE /jobs/{id}?confirm=true` | PATCH accepts `{patch,expected_configuration_hash,reopen?}`, validates/applies to effective config, saves job.yml, applies #180; source immutable. Hash mismatch `409`, invalid patch `422`. DELETE trashes local data/output only. |
-| `POST /jobs/{id}/resume`; `POST /jobs/{id}/cancel`; `POST /jobs/{id}/checkpoints/{stage}/retry`; `POST /jobs/{id}/render`; `GET /jobs/{id}/events` | Resume only executable work (`409` if review is required); cancel needs `{confirm:true}`; retry appends attempt history; render creates new artifact revision (`202`). SSE ends terminal. |
+| `POST /jobs/{id}/resume`; `POST /jobs/{id}/cancel`; `POST /jobs/{id}/checkpoints/{stage}/retry`; `POST /jobs/{id}/render`; `GET /jobs/{id}/events` | Resume only executable work (`409` if review is required); cancel needs `{confirm:true}`; retry appends attempt history; render creates new artifact revision (`202`) and discards a schedule the new artifact supersedes. SSE ends terminal. |
 | `GET/PUT /jobs/{id}/transcript` | GET returns the active source-bound session. PUT body includes `source_sha256`, `expected_revision`, optional `expected_checkpoint_revision`, duration and original/edited segments; it validates edits and saves a new immutable revision. Conflict `409`; invalid edits `422`. |
 | `POST /jobs/{id}/checkpoints/transcript/accept`; `POST /jobs/{id}/checkpoints/conversion/accept` | Accept current review with expected checkpoint revision; stale input/illegal transition `409`. State contract is [#180](https://github.com/A-Baji/ClipMorph/issues/180). |
-| `GET/PUT/DELETE /jobs/{id}/checkpoints/upload` | GET returns `{upload,checkpoint}`; PUT body `{expected_revision,upload,reopen?}` updates only the pending draft; DELETE query `expected_revision` resets it to frozen global defaults. Mutations do not change prior attempts. |
+| `GET/PUT/DELETE /jobs/{id}/checkpoints/upload` | GET returns `{upload,checkpoint}`; PUT body `{expected_revision,upload,reopen?}` updates only the pending draft; DELETE query `expected_revision` resets it to frozen global defaults. Mutations do not change prior attempts. A draft change also discards a schedule armed by an earlier submission: its timers are cancelled and its pending attempts are unmarked, so only the next submission uploads. |
 | `GET /jobs/{id}/uploads`; `POST /jobs/{id}/upload` | Read append-only history; submit pending draft after review against current artifact; accepted work `202 {job_id,attempts,scheduled,status_url}`. A snapshot whose `upload.schedule.publish_at` is in the future returns `scheduled: true` and leaves the attempts `pending` for a later timer. |
 | `POST /jobs/{id}/uploads/{platform}/retry` | Body names failed `attempt_id`; reuse frozen settings/artifact. Historical retry requires matching `artifact_id` and `confirm_historical_artifact:true`. A retry ignores any `publish_at` in the frozen snapshot and uploads immediately. |
 | `GET /jobs/{id}/artifacts`; `GET /jobs/{id}/artifacts/{artifact_id}/preview`; `GET .../download` | List immutable revisions without local paths; stream registered bytes; missing/deleted bytes or paths outside allowed roots return `404`. |
 | `GET/PATCH/DELETE /jobs/{id}/artifacts/{artifact_id}` | PATCH body `{display_name}` changes display metadata only. DELETE requires `confirm=true`, removes local bytes but retains a manifest tombstone/upload references; source artifacts cannot be deleted. |
-| `POST /jobs/{id}/artifacts/prune` | Apply the `app.yml:retention.artifacts` policy; `202 {pruned,bytes_freed}`, `404` for a missing job. Only superseded non-source artifacts are candidates; `current`/`stale` are never pruned. No policy set is a no-op. |
+| `POST /jobs/{id}/artifacts/prune` | Apply the `app.yml:retention.artifacts` policy; `202 {pruned,bytes_freed}`, `404` for a missing job, `409` when bytes could not be recycled (nothing is saved). Only superseded non-source artifacts are candidates; `current`/`stale` are never pruned. No policy set is a no-op. |
 
 Explicit records override matching sidecars but never narrow all-source
 discovery; only `source_names` filters API selection. Unknown record sources
 fail without escaping root. `upload.schedule.publish_at` is implemented as an
 in-process deferral; its timezone, queue, durable states, dedup and history
 belong to [#100](https://github.com/A-Baji/ClipMorph/issues/100). #179 defines
-no scheduler API.
+no scheduler API. An armed schedule is owned by the accepted submission, not by
+the draft, so the two ways of superseding it — a draft `PUT`/`DELETE` or a
+rerender — cancel the timer and unmark its pending attempts. The next submission
+is the only thing that re-arms an upload, and to abandon a schedule without
+uploading, discard the draft and then cancel the job.
 
 Every service construction reconciles manifests left `running` by a process
 that never returned, so both surfaces heal phantom queue entries on first
@@ -213,7 +217,7 @@ CONFIG_LAYERS.md remains authoritative for field meaning.
 | Composition review | PATCH configuration; POST conversion/accept; POST render | Layout/preview/accept | Expected hash/checkpoint revision/layout/preflight | conversion.layout | job.yml; new immutable artifact, prior stale/superseded | CLI 1/2; API 409/202 | Stale artifact/history |
 | Pre-upload review | GET/PUT/DELETE checkpoint upload | Content/platform review | Expected revision/platform policy/title/current artifact | Pending upload config only | Draft checkpoint; prior attempts unchanged | CLI 2; API 404/409/422 | Review gate/update/discard |
 | Upload/retry/status | POST /upload; GET /uploads; POST per-platform retry | Submit/result/retry | Platform/credentials/review; attempt artifact and frozen config | upload fields/snapshot | Append-only attempt history | CLI 1; API 202/404/409/422 | Mocked upload/history/retry |
-| Schedule deferral | POST /upload with `upload.schedule.publish_at`; draft PUT | Future instant defers instead of uploading | Snapshot `publish_at` parse/future check; review gate | upload.schedule.publish_at | Pending attempts marked `scheduled`; timers re-armed on startup | CLI 1; API 202 | Service/web deferral, re-arm, immediate retry |
+| Schedule deferral | POST /upload with `upload.schedule.publish_at`; draft PUT/DELETE | Future instant defers instead of uploading | Snapshot `publish_at` parse/future check; review gate | upload.schedule.publish_at | Pending attempts marked `scheduled`; timers re-armed on startup; superseding draft/rerender disarms them | CLI 1; API 202 | Service/web deferral, re-arm, disarm, immediate retry |
 | Artifact preview/download/rename/delete | GET/PATCH/DELETE artifact by ID plus preview/download | Table/preview/download/display-name/trash | Registered immutable ID, safe metadata, availability, confirmation | Display metadata or artifact availability only | Manifest revisions/tombstones; local bytes; upload references retained | CLI 1/2; API 200/400/404/409 | Bytes/headers/containment/rename/delete |
 | Retention/prune | `job artifacts prune ID`; POST /jobs/{id}/artifacts/prune | Apply app-level retention policy | superseded + non-source only; `current`/`stale` protected | None (app-level, not part of the job merge) | Tombstoned manifest entries; bytes to trash | CLI 0/1; API 202/404 | `tests/test_retention.py`; CLI/web cases |
 | Restart reconciliation | Implicit on every service construction | Queue self-healing | Recorded `running` status; unreadable manifests skipped | None | `interrupted_by_restart` checkpoint failure | CLI 0/1; API n/a | `tests/test_reconciliation.py` |
@@ -233,7 +237,7 @@ or network calls.
 | Create/validation | CLI/API equality, one job/source, dry-run no writes, partial successes, stable results/shared overrides. CLI/web/service tests. |
 | App/auth/layout | Init/lazy startup, path resolution/replacement, registry, masking/env precedence/auth-only writes, preset+inline override. CLI/auth/layout/web tests. |
 | Conversion/review | Crop/placement/captions/typography/renderer/strict; transcript hash/roundtrip; invalidation/rerender. Layout/render/transcript/web tests. |
-| Checkpoint/upload | Review gates, content/platform updates, partial result, one-platform retry, historical result, future `publish_at` deferral and immediate retry. Service/web/upload; checkpoint tests under #180. |
+| Checkpoint/upload | Review gates, content/platform updates, partial result, one-platform retry, historical result, future `publish_at` deferral, schedule disarm on draft change/rerender, and immediate retry. Service/web/upload; checkpoint tests under #180. |
 | Lifecycle/artifacts | CRUD/status, immutable source, confirm, cancel/resume/events, preview/download containment, rename/trash/pointers/no remote deletion, retention prune and restart reconciliation. Service/web/CLI tests. |
 | Frontend | Source/results, masked settings, layouts, review checkpoints, `publish_at` field and scheduled-attempt badge, progress/errors, desktop/mobile. Extend `test_e2e_dashboard.py`. |
 

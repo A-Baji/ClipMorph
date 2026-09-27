@@ -244,5 +244,108 @@ class DeferredUploadTests(unittest.TestCase):
                              publish_at)
 
 
+    def test_draft_change_disarms_the_armed_schedule(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = _reviewed_job(data_dir)
+            self.addCleanup(service.close)
+            publish_at = (datetime.now(timezone.utc)
+                          + timedelta(hours=1)).isoformat()
+            first = service.submit_upload(
+                manifest.job_id, ["youtube"],
+                configuration_snapshot={
+                    "platforms": {"include": ["youtube"]},
+                    "schedule": {"publish_at": publish_at}})
+            key = f"upload:{manifest.job_id}"
+            armed = service._scheduled_timers[key][0]
+
+            service.update_upload_draft(
+                manifest.job_id, {"platforms": {"include": ["youtube"]}},
+                service.get_job(manifest.job_id).checkpoints["upload"]["revision"])
+
+            # The superseded schedule must not survive the draft edit, or the
+            # old configuration would post alongside the resubmitted one.
+            self.assertTrue(armed.finished.is_set())
+            self.assertNotIn(key, service._scheduled_timers)
+            discarded = service.get_job(manifest.job_id)
+            self.assertEqual(discarded.checkpoints["upload"]["status"],
+                             "awaiting_review")
+            self.assertEqual(discarded.upload_attempts[0]["status"], "pending")
+            self.assertFalse(discarded.upload_attempts[0]["scheduled"])
+            self.assertNotIn("scheduled_publish_at",
+                             discarded.upload_attempts[0])
+
+            second = service.submit_upload(
+                manifest.job_id, ["youtube"],
+                configuration_snapshot={
+                    "platforms": {"include": ["youtube"]},
+                    "schedule": {"publish_at": publish_at}})
+
+            timers = service._scheduled_timers[key]
+            self.assertEqual(len(timers), 1)
+            self.assertIsNot(timers[0], armed)
+            self.assertNotEqual(second["attempts"][0]["attempt_id"],
+                                first["attempts"][0]["attempt_id"])
+
+    def test_restart_does_not_rearm_a_discarded_schedule(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = _reviewed_job(data_dir)
+            publish_at = (datetime.now(timezone.utc)
+                          + timedelta(hours=1)).isoformat()
+            service.submit_upload(
+                manifest.job_id, ["youtube"],
+                configuration_snapshot={
+                    "platforms": {"include": ["youtube"]},
+                    "schedule": {"publish_at": publish_at}})
+            service.update_upload_draft(
+                manifest.job_id, {"platforms": {"include": ["youtube"]}},
+                service.get_job(manifest.job_id).checkpoints["upload"]["revision"])
+            service.close()
+
+            restarted = JobService(data_dir)
+            try:
+                armed = {key: len(value) for key, value
+                         in restarted._scheduled_timers.items()}
+                healed = restarted.get_job(manifest.job_id)
+            finally:
+                restarted.close()
+
+            self.assertEqual(armed, {})
+            self.assertEqual(healed.checkpoints["upload"]["status"],
+                             "awaiting_review")
+            self.assertFalse(healed.upload_attempts[0]["scheduled"])
+
+    def test_rerender_disarms_the_schedule_it_supersedes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = _reviewed_job(data_dir)
+            self.addCleanup(service.close)
+            publish_at = (datetime.now(timezone.utc)
+                          + timedelta(hours=1)).isoformat()
+            service.submit_upload(
+                manifest.job_id, ["youtube"],
+                configuration_snapshot={
+                    "platforms": {"include": ["youtube"]},
+                    "schedule": {"publish_at": publish_at}})
+            key = f"upload:{manifest.job_id}"
+            armed = service._scheduled_timers[key][0]
+            service.get_job(manifest.job_id).invalidate_checkpoint(
+                "upload", {"code": "rerender", "message": "Conversion rerendered"},
+                service.jobs_dir)
+
+            self.assertEqual(service.discard_scheduled_uploads(manifest.job_id), 1)
+
+            self.assertTrue(armed.finished.is_set())
+            self.assertNotIn(key, service._scheduled_timers)
+            superseded = service.get_job(manifest.job_id)
+            self.assertEqual(superseded.checkpoints["upload"]["status"], "stale")
+            self.assertFalse(superseded.upload_attempts[0]["scheduled"])
+            # A stale upload checkpoint cannot be finalized by a stray timer,
+            # so the unmarked attempt also fails the startup re-arm scan.
+            self.assertFalse(service._upload_awaits_schedule(superseded))
+            self.assertEqual(service.discard_scheduled_uploads(manifest.job_id), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

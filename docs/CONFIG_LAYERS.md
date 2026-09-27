@@ -748,7 +748,11 @@ configuration resolver.
   attempts `pending` with `scheduled: true` and `scheduled_publish_at` set,
   instead of uploading immediately. A timestamp in the past, a value within one
   second of now, or a missing value uploads immediately, and a targeted retry
-  always uploads immediately regardless of the snapshot.
+  always uploads immediately regardless of the snapshot. The schedule belongs to
+  the accepted submission, not to the draft: editing or discarding the draft, or
+  rerendering the conversion, cancels the timer and unmarks those attempts, so
+  the next submission is the only thing that re-arms an upload. See
+  [CLI_WEB_PARITY.md](CLI_WEB_PARITY.md) for the per-route contract.
 - The rest of the `upload.schedule` model — a durable queue, publication
   `queued/published/failed/canceled` attempt states, duplicate suppression, and
   scheduling history — is out of scope here and tracked in

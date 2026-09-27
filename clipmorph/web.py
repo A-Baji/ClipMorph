@@ -499,6 +499,9 @@ def create_app(data_dir: str | Path | None = None,
                 manifest.transition_checkpoint(
                     "conversion", "pending", checkpoint["revision"], service.jobs_dir)
                 manifest = service.get_job(job_id)
+                # A rerender supersedes the accepted upload, so an armed
+                # schedule must not post the artifact it replaces.
+                service.discard_scheduled_uploads(job_id)
                 service.get_job(job_id).invalidate_checkpoint(
                     "upload", {"code": "rerender", "message": "Conversion rerendered"},
                     service.jobs_dir)
@@ -612,6 +615,11 @@ def create_app(data_dir: str | Path | None = None,
             fail(404, "not_found", "job not found")
         except ValueError as error:
             service_failure(error)
+        except OSError as error:
+            # Recycling bytes is the only IO in the call. A locked file is a
+            # state the caller can resolve, and the manifest is untouched
+            # because the failure happens before it is saved.
+            fail(409, "conflict", f"artifact bytes could not be recycled: {error}")
 
     @app.get("/api/v1/jobs/{job_id}/events")
     def job_events(job_id: str):

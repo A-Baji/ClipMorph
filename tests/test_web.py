@@ -42,6 +42,19 @@ class WebApiTests(unittest.TestCase):
                 self.assertFalse((data_dir / "config.json").exists())
                 self.assertFalse((data_dir / "layouts.json").exists())
 
+    def test_artifact_prune_reports_a_failed_recycle_as_a_conflict(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            with TestClient(create_app(data_dir)) as client:
+                with patch.object(JobService, "enforce_retention",
+                                  side_effect=OSError("file is in use")):
+                    response = client.post(
+                        "/api/v1/jobs/any-job/artifacts/prune")
+
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual(response.json()["error"]["code"], "conflict")
+            self.assertIn("could not be recycled", response.json()["error"]["message"])
+
     def test_configuration_version_guards_put_without_touching_the_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"

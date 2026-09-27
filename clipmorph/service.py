@@ -236,6 +236,40 @@ class JobService:
                     len(attempt_ids), job_id, delay)
         return handle
 
+    def _discard_scheduled_uploads_locked(self, manifest: JobManifest) -> int:
+        """Disarm one job's scheduled uploads. Caller holds ``self._lock``.
+
+        Cancels the armed timers and unmarks their still-pending attempts, so
+        neither this process nor a later startup re-arms a configuration the user
+        has since replaced. The attempt records stay ``pending``: their real
+        fate is unknown, exactly as when a stalled upload is failed. Returns the
+        number of attempts unmarked.
+        """
+        for timer in self._scheduled_timers.pop(
+                f"upload:{manifest.job_id}", []):
+            timer.cancel()
+        unmarked = 0
+        for attempt in manifest.upload_attempts:
+            if attempt.get("status") == "pending" and attempt.get("scheduled"):
+                attempt["scheduled"] = False
+                attempt.pop("scheduled_publish_at", None)
+                unmarked += 1
+        return unmarked
+
+    def discard_scheduled_uploads(self, job_id: str) -> int:
+        """Disarm a job's scheduled uploads and persist the unmarked attempts.
+
+        Used where the accepted upload is superseded without a draft edit, such
+        as a rerender invalidating the upload checkpoint. Persists only when a
+        schedule was actually pending.
+        """
+        with self._lock:
+            manifest = self.get_job(job_id)
+            unmarked = self._discard_scheduled_uploads_locked(manifest)
+            if unmarked:
+                manifest.save(self.jobs_dir)
+            return unmarked
+
     def create_job(self, source_path: str, configuration: dict[str, Any],
                    runner: Callable[[JobManifest, CancellationToken], None] | None = None
                    ) -> JobManifest:
@@ -669,6 +703,11 @@ class JobService:
             if checkpoint["started_at"] is None:
                 checkpoint["started_at"] = checkpoint["updated_at"]
             manifest._derive_status()
+            # The draft accepted here is what the next submission uploads, so a
+            # schedule armed by an earlier submission is dropped rather than
+            # firing later with the superseded configuration. Done last, so a
+            # rejected edit above leaves both the timer and the manifest intact.
+            self._discard_scheduled_uploads_locked(manifest)
             manifest.save(self.jobs_dir)
             return manifest
 
@@ -1065,6 +1104,8 @@ class JobService:
         return manifest
 
     def close(self) -> None:
+        # Unlike discard_scheduled_uploads, a clean shutdown leaves the attempts
+        # marked: the next startup re-arms them instead of losing the schedule.
         with self._lock:
             timers = [timer for group in self._scheduled_timers.values()
                       for timer in group]
