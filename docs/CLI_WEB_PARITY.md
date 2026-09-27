@@ -49,8 +49,8 @@ keep media imports lazy.
 | `clipmorph job list [--status STATUS]`; `job get ID` | List/show manifest, effective config, checkpoint, artifacts and platform results; redact secrets. |
 | `clipmorph job update ID --patch FILE [--reopen]`; `job resume ID`; `job cancel ID`; `job delete ID --yes` | Apply a validated per-job patch using the current config hash; persist finalized job.yml and apply #180 invalidation. Reopen completed work only with confirmation; source identity is immutable. |
 | `clipmorph job review ID CHECKPOINT [--edits FILE]`; `job render ID` | `--edits` supplies a complete transcript edit-session YAML/JSON object. Review acceptance uses the current manifest revision; render creates a new immutable artifact. |
-| `clipmorph job upload ID [--platform PLATFORM]`; `job upload retry ID PLATFORM [--attempt-id ID]` | Submit the accepted upload draft or retry one failed attempt. Retries use frozen artifact/settings; historical use requires explicit ID and confirmation. |
-| `clipmorph job artifacts list ID`; `preview ID ARTIFACT_ID`; `download ID ARTIFACT_ID --destination PATH`; `rename ID ARTIFACT_ID --name NAME`; `delete ID ARTIFACT_ID --yes` | Operate on registered artifact IDs; rename changes display metadata only, delete trashes local bytes and retains a manifest tombstone. |
+| `clipmorph job upload ID [--platform PLATFORM]`; `job upload retry ID PLATFORM [--attempt-id ID]` | Submit the accepted upload draft or retry one failed attempt. Retries use frozen artifact/settings and upload immediately; historical use requires explicit ID and confirmation. |
+| `clipmorph job artifacts list ID`; `preview ID ARTIFACT_ID`; `download ID ARTIFACT_ID --destination PATH`; `rename ID ARTIFACT_ID --name NAME`; `delete ID ARTIFACT_ID --yes`; `prune ID` | Operate on registered artifact IDs; rename changes display metadata only, delete trashes local bytes and retains a manifest tombstone. `prune` applies `app.yml:retention.artifacts` and prints `{pruned,bytes_freed}`. |
 | `clipmorph layout list/create/get/delete ...` | CRUD validated global `{id,name,layout}` records; create reads YAML/JSON. |
 
 Map CLI controls to CONFIG_LAYERS.md: no-confirm -> `general.no_confirm`, clean
@@ -73,7 +73,7 @@ root-level names under `source_dir`; validate before queueing.
 | Method / route | Contract |
 | --- | --- |
 | `GET /health` | `200 {status:ok}`; no media imports. |
-| `GET/PUT /configuration` | Get config + credential status; PUT replaces validated full app.yml atomically; no secret values. |
+| `GET/PUT /configuration` | Get config + credential status; PUT replaces validated full app.yml atomically; no secret values. A missing or mismatched `config_version` is `422 invalid_configuration` and leaves the file untouched; an absent stamp is filled in on save. |
 | `GET /credentials`; `PUT /credentials/{platform}` | Configured booleans only; PUT validates fields, saves auth.yaml, returns status only. |
 | `GET/POST /sources` | List root-level supported files; multipart upload sanitizes basename, validates media, uniquifies collision, returns `201 {name,source}`. |
 | `GET/POST /layouts`; `GET/PATCH/DELETE /layouts/{id}` | Validated `{id,name,layout}` in app.yml. Delete requires `confirm=true`; materialized jobs remain valid. |
@@ -86,15 +86,27 @@ root-level names under `source_dir`; validate before queueing.
 | `GET/PUT /jobs/{id}/transcript` | GET returns the active source-bound session. PUT body includes `source_sha256`, `expected_revision`, optional `expected_checkpoint_revision`, duration and original/edited segments; it validates edits and saves a new immutable revision. Conflict `409`; invalid edits `422`. |
 | `POST /jobs/{id}/checkpoints/transcript/accept`; `POST /jobs/{id}/checkpoints/conversion/accept` | Accept current review with expected checkpoint revision; stale input/illegal transition `409`. State contract is [#180](https://github.com/A-Baji/ClipMorph/issues/180). |
 | `GET/PUT/DELETE /jobs/{id}/checkpoints/upload` | GET returns `{upload,checkpoint}`; PUT body `{expected_revision,upload,reopen?}` updates only the pending draft; DELETE query `expected_revision` resets it to frozen global defaults. Mutations do not change prior attempts. |
-| `GET /jobs/{id}/uploads`; `POST /jobs/{id}/upload` | Read append-only history; submit pending draft after review against current artifact; accepted work `202`. |
-| `POST /jobs/{id}/uploads/{platform}/retry` | Body names failed `attempt_id`; reuse frozen settings/artifact. Historical retry requires matching `artifact_id` and `confirm_historical_artifact:true`. |
+| `GET /jobs/{id}/uploads`; `POST /jobs/{id}/upload` | Read append-only history; submit pending draft after review against current artifact; accepted work `202 {job_id,attempts,scheduled,status_url}`. A snapshot whose `upload.schedule.publish_at` is in the future returns `scheduled: true` and leaves the attempts `pending` for a later timer. |
+| `POST /jobs/{id}/uploads/{platform}/retry` | Body names failed `attempt_id`; reuse frozen settings/artifact. Historical retry requires matching `artifact_id` and `confirm_historical_artifact:true`. A retry ignores any `publish_at` in the frozen snapshot and uploads immediately. |
 | `GET /jobs/{id}/artifacts`; `GET /jobs/{id}/artifacts/{artifact_id}/preview`; `GET .../download` | List immutable revisions without local paths; stream registered bytes; missing/deleted bytes or paths outside allowed roots return `404`. |
 | `GET/PATCH/DELETE /jobs/{id}/artifacts/{artifact_id}` | PATCH body `{display_name}` changes display metadata only. DELETE requires `confirm=true`, removes local bytes but retains a manifest tombstone/upload references; source artifacts cannot be deleted. |
+| `POST /jobs/{id}/artifacts/prune` | Apply the `app.yml:retention.artifacts` policy; `202 {pruned,bytes_freed}`, `404` for a missing job. Only superseded non-source artifacts are candidates; `current`/`stale` are never pruned. No policy set is a no-op. |
 
 Explicit records override matching sidecars but never narrow all-source
 discovery; only `source_names` filters API selection. Unknown record sources
-fail without escaping root. `upload.schedule` location is fixed; schedule
-schema, queue, timezone, states, dedup and history belong to [#100](https://github.com/A-Baji/ClipMorph/issues/100). #179 defines no scheduler API.
+fail without escaping root. `upload.schedule.publish_at` is implemented as an
+in-process deferral; its timezone, queue, durable states, dedup and history
+belong to [#100](https://github.com/A-Baji/ClipMorph/issues/100). #179 defines
+no scheduler API.
+
+Every service construction reconciles manifests left `running` by a process
+that never returned, so both surfaces heal phantom queue entries on first
+touch: the in-flight checkpoint becomes `failed` with
+`{"code":"interrupted_by_restart","retryable":true}`. A `running` upload
+checkpoint whose every pending attempt is scheduled for a future `publish_at`
+is left alone, and reconciliation runs before the re-arm scan restores those
+timers. Nothing is resumed automatically and no remote upload is repeated
+without an explicit user action.
 
 ### Response And Validation Boundaries
 
@@ -116,8 +128,9 @@ schema, queue, timezone, states, dedup and history belong to [#100](https://gith
   `tests/test_layout_rendering.py`, `tests/test_transcript.py`,
   `tests/test_transcription.py`, `tests/test_preflight.py`,
   `tests/test_upload_platforms.py`, `tests/test_oauth.py`,
+  `tests/test_reconciliation.py`, `tests/test_retention.py`,
   `tests/test_service.py`, `tests/test_job_manifest.py`,
-  `tests/test_cli.py`, and `tests/test_web.py`.
+  `tests/test_auth.py`, `tests/test_cli.py`, and `tests/test_web.py`.
 
 ## Discovery and Results
 
@@ -186,7 +199,7 @@ CONFIG_LAYERS.md remains authoritative for field meaning.
 | CLI item | API route/request/response | Visual control | Validation | Normalized destination | Manifest/artifact | CLI/API behavior | Focused tests |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Help/startup/web | Health/startup | Service status | Lazy parser/config | App path/data-dir | app.yml/no job writes | CLI 0; API 200/422 | CLI lazy; web health |
-| Init/config/defaults | GET/PUT configuration | Settings/defaults/layout | App schema/path/atomic save | App fields | app.yml/auth template | CLI 0/2; API 200/422 | CLI init; web config |
+| Init/config/defaults | GET/PUT configuration | Settings/defaults/layout | App schema/path/atomic save/`config_version` | App fields | app.yml/auth template | CLI 0/2; API 200/422 | CLI init; web config; version guard |
 | Credentials | GET/PUT credentials | Masked status/secure form | Field allowlist/auth loader | No job field | auth.yaml | Never echo; invalid 422 | Auth/web mask/update |
 | Source upload/select | GET/POST sources | Picker/list/multiselect | Basename/media/nonempty/collision/root | general.source | Source root/manifest identity | CLI 2; API 201/422 | Upload/list/collision |
 | Single/multi create | POST jobs/jobs/bulk | New Job/source selection/shared overrides/results | Resolver/preflight/discovery/priority/dedup | One merged config per source | Per-source job.yml/manifest/output | CLI 0 or 1/2; API 202/200/422 | CLI/API differential; partial results |
@@ -200,8 +213,10 @@ CONFIG_LAYERS.md remains authoritative for field meaning.
 | Composition review | PATCH configuration; POST conversion/accept; POST render | Layout/preview/accept | Expected hash/checkpoint revision/layout/preflight | conversion.layout | job.yml; new immutable artifact, prior stale/superseded | CLI 1/2; API 409/202 | Stale artifact/history |
 | Pre-upload review | GET/PUT/DELETE checkpoint upload | Content/platform review | Expected revision/platform policy/title/current artifact | Pending upload config only | Draft checkpoint; prior attempts unchanged | CLI 2; API 404/409/422 | Review gate/update/discard |
 | Upload/retry/status | POST /upload; GET /uploads; POST per-platform retry | Submit/result/retry | Platform/credentials/review; attempt artifact and frozen config | upload fields/snapshot | Append-only attempt history | CLI 1; API 202/404/409/422 | Mocked upload/history/retry |
-| Schedule boundary | upload.schedule/#100 | #100 controls only | #100 timezone/dedup/status | upload.schedule | #100 history | No #179 scheduler route | #100 tests |
+| Schedule deferral | POST /upload with `upload.schedule.publish_at`; draft PUT | Future instant defers instead of uploading | Snapshot `publish_at` parse/future check; review gate | upload.schedule.publish_at | Pending attempts marked `scheduled`; timers re-armed on startup | CLI 1; API 202 | Service/web deferral, re-arm, immediate retry |
 | Artifact preview/download/rename/delete | GET/PATCH/DELETE artifact by ID plus preview/download | Table/preview/download/display-name/trash | Registered immutable ID, safe metadata, availability, confirmation | Display metadata or artifact availability only | Manifest revisions/tombstones; local bytes; upload references retained | CLI 1/2; API 200/400/404/409 | Bytes/headers/containment/rename/delete |
+| Retention/prune | `job artifacts prune ID`; POST /jobs/{id}/artifacts/prune | Apply app-level retention policy | superseded + non-source only; `current`/`stale` protected | None (app-level, not part of the job merge) | Tombstoned manifest entries; bytes to trash | CLI 0/1; API 202/404 | `tests/test_retention.py`; CLI/web cases |
+| Restart reconciliation | Implicit on every service construction | Queue self-healing | Recorded `running` status; unreadable manifests skipped | None | `interrupted_by_restart` checkpoint failure | CLI 0/1; API n/a | `tests/test_reconciliation.py` |
 | Events/progress/errors | GET job events SSE | Queue progress/checkpoint/errors | Shared status serializer | No config change | Manifest progress/status/errors | Same error fields; terminal SSE | Event/status parity |
 
 ## Differential Test Plan
@@ -218,9 +233,9 @@ or network calls.
 | Create/validation | CLI/API equality, one job/source, dry-run no writes, partial successes, stable results/shared overrides. CLI/web/service tests. |
 | App/auth/layout | Init/lazy startup, path resolution/replacement, registry, masking/env precedence/auth-only writes, preset+inline override. CLI/auth/layout/web tests. |
 | Conversion/review | Crop/placement/captions/typography/renderer/strict; transcript hash/roundtrip; invalidation/rerender. Layout/render/transcript/web tests. |
-| Checkpoint/upload | Review gates, content/platform updates, partial result, one-platform retry, historical result, #100 boundary. Service/web/upload; checkpoint tests under #180. |
-| Lifecycle/artifacts | CRUD/status, immutable source, confirm, cancel/resume/events, preview/download containment, rename/trash/pointers/no remote deletion. Service/web/CLI tests. |
-| Frontend | Source/results, masked settings, layouts, review checkpoints, progress/errors, desktop/mobile. Extend `test_e2e_dashboard.py`. |
+| Checkpoint/upload | Review gates, content/platform updates, partial result, one-platform retry, historical result, future `publish_at` deferral and immediate retry. Service/web/upload; checkpoint tests under #180. |
+| Lifecycle/artifacts | CRUD/status, immutable source, confirm, cancel/resume/events, preview/download containment, rename/trash/pointers/no remote deletion, retention prune and restart reconciliation. Service/web/CLI tests. |
+| Frontend | Source/results, masked settings, layouts, review checkpoints, `publish_at` field and scheduled-attempt badge, progress/errors, desktop/mobile. Extend `test_e2e_dashboard.py`. |
 
 Do not introduce legacy configuration/manifest readers or duplicate validation paths; preserve lazy media imports.
 

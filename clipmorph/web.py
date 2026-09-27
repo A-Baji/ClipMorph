@@ -604,6 +604,15 @@ def create_app(data_dir: str | Path | None = None,
         manifest.save(service.jobs_dir)
         return {"deleted": True, "artifact_id": artifact_id}
 
+    @app.post("/api/v1/jobs/{job_id}/artifacts/prune", status_code=202)
+    def prune_artifacts(job_id: str):
+        try:
+            return service.enforce_retention(job_id)
+        except FileNotFoundError:
+            fail(404, "not_found", "job not found")
+        except ValueError as error:
+            service_failure(error)
+
     @app.get("/api/v1/jobs/{job_id}/events")
     def job_events(job_id: str):
         def events():

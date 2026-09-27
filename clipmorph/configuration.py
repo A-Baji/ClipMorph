@@ -6,6 +6,7 @@ from copy import deepcopy
 import json
 from pathlib import PurePath
 from pathlib import Path
+import shutil
 from typing import Any
 import uuid
 
@@ -20,8 +21,27 @@ from clipmorph.layout import validate_layout
 
 SUPPORTED_SOURCE_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm"}
 
+# Bumped in the same commit as any breaking app.yml schema change. This stamp is
+# independent of the job manifest schema version in clipmorph/job.py; the two
+# are never unified.
+APP_CONFIG_VERSION = 1
+
+# Number of rotated `<file>.backup[n]` copies kept when retention.backups.keep_n
+# is unset or app.yml cannot be read (auth may persist before a valid app.yml).
+DEFAULT_BACKUP_KEEP_N = 5
+
+APP_CONFIGURATION_FIELDS = {
+    "config_version", "source_dir", "output_dir", "job_defaults", "layouts",
+    "retention",
+}
+
+RETENTION_FIELDS = {
+    "artifacts": {"max_age_days", "max_bytes"},
+    "backups": {"keep_n"},
+}
 
 DEFAULT_APP_CONFIGURATION = {
+    "config_version": APP_CONFIG_VERSION,
     "source_dir": "sources",
     "output_dir": "output",
     "job_defaults": {
@@ -55,6 +75,10 @@ DEFAULT_APP_CONFIGURATION = {
         },
     },
     "layouts": [],
+    "retention": {
+        "artifacts": {"max_age_days": None, "max_bytes": None},
+        "backups": {"keep_n": None},
+    },
 }
 
 
@@ -73,6 +97,18 @@ def atomic_write_text(path: str | Path, content: str) -> Path:
     return destination
 
 
+def require_app_config_version(configuration: Any) -> None:
+    """Reject app.yml files that are unstamped or hold a different version."""
+    version = configuration.get("config_version") if isinstance(
+        configuration, dict) else None
+    if version != APP_CONFIG_VERSION:
+        raise ValueError(
+            f"app.yml config_version must be {APP_CONFIG_VERSION}; the file is "
+            "missing it or holds a different value. Run `clipmorph init` beside "
+            "your current app.yml to regenerate a template, then copy your "
+            "settings over.")
+
+
 def load_app_configuration(path: str | Path) -> dict[str, Any]:
     """Load the canonical app.yml file, returning defaults when it is absent."""
     app_path = Path(path)
@@ -84,8 +120,10 @@ def load_app_configuration(path: str | Path) -> dict[str, Any]:
         raise ValueError(f"Unable to read app configuration {app_path}: {error}") from error
     if not isinstance(configuration, dict):
         raise ValueError("App configuration root must be an object")
-    unknown = set(configuration) - {
-        "source_dir", "output_dir", "job_defaults", "layouts"}
+    # The version guard runs before every other field check so an outdated file
+    # reports one actionable error instead of a validation cascade.
+    require_app_config_version(configuration)
+    unknown = set(configuration) - APP_CONFIGURATION_FIELDS
     if unknown:
         raise ValueError(
             f"Unknown app configuration field(s): {', '.join(sorted(unknown))}")
@@ -99,15 +137,63 @@ def save_app_configuration(path: str | Path,
     """Validate and atomically write app.yml."""
     if not isinstance(configuration, dict):
         raise ValueError("App configuration root must be an object")
-    unknown = set(configuration) - {
-        "source_dir", "output_dir", "job_defaults", "layouts"}
+    unknown = set(configuration) - APP_CONFIGURATION_FIELDS
     if unknown:
         raise ValueError(
             f"Unknown app configuration field(s): {', '.join(sorted(unknown))}")
     finalized = merge_configuration(DEFAULT_APP_CONFIGURATION, configuration)
+    # Stamping is bookkeeping, not a compatibility shim: an explicitly
+    # mismatched stamp is still rejected below and on the next load.
+    finalized.setdefault("config_version", APP_CONFIG_VERSION)
     _validate_app_configuration(finalized)
     return atomic_write_text(
         path, yaml.safe_dump(finalized, sort_keys=False, allow_unicode=True))
+
+
+def rotate_backup(path: str | Path, keep_n: int) -> Path:
+    """Back a file up to the newest free numbered slot and drop stale copies.
+
+    The newest copy is `<name>.backup`, older ones `<name>.backup1`,
+    `<name>.backup2`, and so on. Only the newest ``keep_n`` copies survive.
+    """
+    destination = Path(path)
+    backup_path = destination.with_suffix(destination.suffix + ".backup")
+    limit = max(1, int(keep_n))
+    highest_index = 0
+    while backup_path.with_name(f"{backup_path.name}{highest_index + 1}").exists():
+        highest_index += 1
+
+    for index in range(highest_index, 0, -1):
+        current = backup_path.with_name(f"{backup_path.name}{index}")
+        shifted = backup_path.with_name(f"{backup_path.name}{index + 1}")
+        if shifted.exists():
+            shifted.unlink()
+        current.rename(shifted)
+    if backup_path.exists():
+        backup_path.replace(backup_path.with_name(f"{backup_path.name}1"))
+    shutil.copy2(destination, backup_path)
+
+    for index in range(1, highest_index + 2):
+        if index < limit:
+            continue
+        overflow = backup_path.with_name(f"{backup_path.name}{index}")
+        if overflow.exists():
+            overflow.unlink()
+    return backup_path
+
+
+def resolve_backup_keep_n(app_config_path: str | Path | None) -> int:
+    """Return retention.backups.keep_n, or the default when app.yml is unusable."""
+    if app_config_path is None:
+        return DEFAULT_BACKUP_KEEP_N
+    try:
+        configuration = load_app_configuration(app_config_path)
+    except (OSError, ValueError):
+        return DEFAULT_BACKUP_KEEP_N
+    keep_n = configuration.get("retention", {}).get("backups", {}).get("keep_n")
+    if isinstance(keep_n, bool) or not isinstance(keep_n, int) or keep_n < 1:
+        return DEFAULT_BACKUP_KEEP_N
+    return keep_n
 
 
 def load_job_records(path: str | Path) -> list[Any]:
@@ -223,7 +309,34 @@ def discover_source_entries(source_dir: str | Path) -> list[str]:
     return sorted(names, key=lambda name: (name.casefold(), name))
 
 
+def _validate_retention(retention: Any) -> None:
+    """Validate the opt-in app-level retention policy; every knob defaults off."""
+    if not isinstance(retention, dict):
+        raise ValueError("retention must be an object")
+    unknown = set(retention) - set(RETENTION_FIELDS)
+    if unknown:
+        raise ValueError(
+            f"Unknown retention field(s): {', '.join(sorted(unknown))}")
+    for section, allowed in RETENTION_FIELDS.items():
+        values = retention.get(section, {})
+        if not isinstance(values, dict):
+            raise ValueError(f"retention.{section} must be an object")
+        unknown_keys = set(values) - allowed
+        if unknown_keys:
+            raise ValueError(
+                f"Unknown retention.{section} field(s): "
+                f"{', '.join(sorted(unknown_keys))}")
+        for key, value in values.items():
+            if value is None:
+                continue
+            if (isinstance(value, bool) or not isinstance(value, int)
+                    or value < 1):
+                raise ValueError(
+                    f"retention.{section}.{key} must be a positive integer or null")
+
+
 def _validate_app_configuration(configuration: dict[str, Any]) -> None:
+    require_app_config_version(configuration)
     for path_key in ("source_dir", "output_dir"):
         if not isinstance(configuration.get(path_key), str) or not configuration[path_key]:
             raise ValueError(f"{path_key} must be a non-empty path")
@@ -233,6 +346,7 @@ def _validate_app_configuration(configuration: dict[str, Any]) -> None:
     layouts = configuration.get("layouts")
     if not isinstance(layouts, list):
         raise ValueError("layouts must be a list")
+    _validate_retention(configuration.get("retention", {}))
     ids: set[str] = set()
     for record in layouts:
         if (not isinstance(record, dict) or not isinstance(record.get("id"), str)

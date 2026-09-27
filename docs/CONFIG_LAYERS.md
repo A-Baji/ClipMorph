@@ -28,10 +28,12 @@ described informally in
 
 `app.yml` contains application/workspace settings and the persistent global
 defaults for job configuration. `source_dir` and `output_dir` are app-level
-paths and are not part of the job configuration merge.
-`job_defaults` uses the same job-config shape shown below:
+paths and are not part of the job configuration merge. `config_version`,
+`retention`, and the `layouts` registry are likewise app-level and never merge
+into a job. `job_defaults` uses the same job-config shape shown below:
 
 ```yaml
+config_version: 1
 source_dir: sources
 output_dir: output
 job_defaults:
@@ -42,7 +44,45 @@ job_defaults:
   conversion: {}
   upload: {}
 layouts: []
+retention:
+  artifacts:
+    max_age_days: null
+    max_bytes: null
+  backups:
+    keep_n: null
 ```
+
+`config_version` is a stamp of the app-configuration schema shape, maintained
+in `clipmorph/configuration.py:APP_CONFIG_VERSION` and bumped in the same
+commit as any breaking `app.yml` change. It is deliberately independent of the
+job manifest `schema_version` in `clipmorph/job.py`; the two are never
+unified. Loading rejects a file whose stamp is missing or different *before*
+any other field is inspected, so an outdated file produces one actionable
+error instead of a validation cascade. `clipmorph init` run beside an existing
+`app.yml` regenerates a current template to copy settings into; the CLI never
+rewrites an existing `app.yml` in place.
+
+`retention` bounds what a long-lived workspace accumulates. Every knob
+defaults to `null`, which makes retention a no-op until a policy is set:
+
+- `retention.artifacts.max_age_days` prunes non-source artifacts in the
+  `superseded` state once they are older than this, aged from `superseded_at`
+  (falling back to `created_at`).
+- `retention.artifacts.max_bytes` caps the total bytes recorded for a job's
+  artifacts, evicting the oldest obsolete revisions first until the job is
+  under the cap.
+- `retention.backups.keep_n` caps rotated `<file>.backup[n]` copies of
+  credential files; it defaults to 5 when unset or when `app.yml` cannot be
+  read (credentials may be persisted before a valid `app.yml` exists).
+
+`current` and `stale` artifacts are never auto-pruned, so a rerender target
+always survives; a pruned artifact keeps its manifest entry with a `deleted`
+tombstone, and its bytes go to the system trash rather than being unlinked.
+Enforcement runs automatically after a job's run completes and is also
+available on demand as `clipmorph job artifacts prune ID` and
+`POST /api/v1/jobs/{id}/artifacts/prune`. Both return `{"pruned": [...],
+"bytes_freed": N}`; the no-policy case returns `{"pruned": []}` without
+touching the manifest.
 
 When multiple jobs are created together, the UI may present a shared override
 form initialized from `app.yml:job_defaults`. Changed fields are copied into
@@ -79,8 +119,8 @@ conversion:
 upload:
   skip: false                    # skip all uploads
   no_confirm: null              # null = fall back to general.no_confirm; true/false overrides it for this step only
-  schedule:                     # stub for #100, shape TBD when scheduling lands
-    publish_at: null
+  schedule:
+    publish_at: null              # ISO-8601 instant; a future value defers the upload instead of running it now
     timezone: null
   content:
     title: ''
@@ -652,6 +692,31 @@ the API). Only the affected checkpoint and its downstream dependencies reopen.
 Previously successful remote uploads remain immutable history, even when a new
 artifact or upload attempt is created.
 
+### Restart Reconciliation
+
+A process that dies mid-step leaves a `running` checkpoint with no thread behind
+it, so the manifest alone cannot be trusted to describe live work. On
+construction the service scans `jobs/*/job.yml` once and reconciles each manifest
+whose recorded status is `running`: the in-flight checkpoint is marked `failed`
+with `{"code": "interrupted_by_restart", "retryable": true}` and the job returns
+to a state where `resume` or a checkpoint retry is actionable, instead of
+appearing permanently stuck. A `queued` manifest is left alone — all-pending
+checkpoints are not evidence of a crash — and a `running` job whose checkpoints
+have all gone terminal has only its drifted status re-derived.
+
+A `running` upload checkpoint whose every pending attempt is scheduled for a
+future `publish_at` is deliberately left alone — that is a deferral waiting on a
+timer, not a stall, and reconciliation would otherwise cancel a schedule the
+restart was supposed to keep. Reconciliation runs before the re-arm scan, so
+genuinely scheduled attempts get their timers back.
+
+The manifest is the only input: no attempt is resumed automatically, and no
+remote upload is repeated without an explicit user action. Because
+reconciliation reads on-disk state, two concurrent instances pointed at the same
+data directory can mark each other's live jobs failed at the exact moment they
+cross; the checkpoint review flow remains the user-facing guard against that
+race. A manifest that cannot be parsed is logged and skipped, never rewritten.
+
 ### CLI And Web Checkpoint Contract
 
 CLI review, accept, update, retry, artifact, upload, and resume operations use
@@ -678,10 +743,16 @@ configuration resolver.
 
 ## Open items intentionally left unspecified
 
-- Full `upload.schedule` shape, queued/published/failed/canceled states, and
-  history are out of scope here — tracked in
+- `upload.schedule.publish_at` is implemented as a deferral: a submission whose
+  snapshot carries a future instant arms an in-process timer and leaves the
+  attempts `pending` with `scheduled: true` and `scheduled_publish_at` set,
+  instead of uploading immediately. A timestamp in the past, a value within one
+  second of now, or a missing value uploads immediately, and a targeted retry
+  always uploads immediately regardless of the snapshot.
+- The rest of the `upload.schedule` model — a durable queue, publication
+  `queued/published/failed/canceled` attempt states, duplicate suppression, and
+  scheduling history — is out of scope here and tracked in
   [A-Baji/ClipMorph#100](https://github.com/A-Baji/ClipMorph/issues/100).
-  Only the field's *location* (composable, under `upload`) is decided now.
 - Whether multi-job groups ever become save-able presets later is deferred;
   today they are ephemeral execution groups.
 

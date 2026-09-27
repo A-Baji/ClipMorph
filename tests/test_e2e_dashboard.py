@@ -7,6 +7,7 @@ dedicated CI job that installs both before running this file.
 
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 try:
@@ -152,6 +153,7 @@ class DashboardBrowserTests(unittest.TestCase):
                 ).filter(has_text="Uploads").click()
                 page.get_by_label("Upload description").fill("Upload description")
                 page.get_by_label("Upload tags").fill("one, two")
+                page.get_by_label("Upload schedule for").fill("2027-03-04T05:06")
                 self.assertEqual(page.get_by_label("Upload description").input_value(),
                                  "Upload description")
                 checkpoint = service.get_job(manifest.job_id).checkpoints["upload"]
@@ -166,6 +168,11 @@ class DashboardBrowserTests(unittest.TestCase):
                     "description"], "Upload description")
                 self.assertEqual(saved_job.configuration["upload"]["content"][
                     "tags"], ["one", "two"])
+                # The browser sends UTC; this checks the local-time round trip.
+                scheduled = saved_job.configuration["upload"]["schedule"]["publish_at"]
+                self.assertEqual(
+                    datetime.fromisoformat(scheduled).astimezone().strftime(
+                        "%Y-%m-%dT%H:%M"), "2027-03-04T05:06")
                 self.assertGreaterEqual(
                     saved_job.checkpoints["upload"]["revision"], checkpoint["revision"])
             finally:

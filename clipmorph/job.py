@@ -203,6 +203,8 @@ class JobManifest:
                 if attempt == 3:
                     raise
                 time.sleep(0.01 * (attempt + 1))
+        if not isinstance(data, dict):
+            raise ValueError("Job manifest root must be an object")
         if data.get("schema_version") != MANIFEST_SCHEMA_VERSION:
             raise ValueError("Unsupported job manifest schema version")
         return cls(**data)
@@ -344,6 +346,9 @@ class JobManifest:
             current = self.artifacts[self.current_artifact_id]
             if current.get("state") == "current":
                 current["state"] = "superseded"
+                # Retention ages artifacts from when they became obsolete;
+                # readers fall back to created_at when this is absent.
+                current["superseded_at"] = datetime.now(timezone.utc).isoformat()
         revision = max((item.get("revision", 0)
                         for item in self.artifacts.values()), default=0) + 1
         artifact_id = uuid.uuid4().hex

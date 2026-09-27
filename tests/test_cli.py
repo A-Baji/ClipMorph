@@ -1,3 +1,6 @@
+import contextlib
+import io
+import json
 import sys
 import tempfile
 import unittest
@@ -6,6 +9,7 @@ from unittest.mock import patch
 
 from clipmorph.__main__ import main
 from clipmorph.cli import run_cli
+from clipmorph.configuration import save_app_configuration
 from clipmorph.job import JobManifest
 from clipmorph.service import JobService
 
@@ -119,6 +123,48 @@ class JobCommandTests(unittest.TestCase):
             self.assertEqual(
                 saved.configuration["upload"]["content"]["title"],
                 "Reviewed title")
+
+    def test_job_artifacts_prune_reports_the_retention_policy_result(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            (data_dir / "sources").mkdir()
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"video")
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {
+                "conversion": {"skip": True, "subtitles": {"skip": True}}})
+            jobs_dir = service.jobs_dir
+            artifact_dir = data_dir / "output" / manifest.job_id
+            artifact_dir.mkdir(parents=True)
+            obsolete_path = artifact_dir / "obsolete.mp4"
+            obsolete_path.write_bytes(b"0" * 12)
+            manifest.record_artifact("primary", obsolete_path, jobs_dir)
+            kept_path = artifact_dir / "kept.mp4"
+            kept_path.write_bytes(b"0" * 5)
+            manifest.record_artifact("primary", kept_path, jobs_dir)
+            obsolete_id = next(
+                artifact_id for artifact_id, artifact in manifest.artifacts.items()
+                if artifact["state"] == "superseded")
+            manifest.artifacts[obsolete_id]["superseded_at"] = "2000-01-01T00:00:00+00:00"
+            manifest.save(jobs_dir)
+            service.close()
+            save_app_configuration(
+                data_dir / "app.yml", {"retention": {"artifacts": {"max_age_days": 1}}})
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result = run_cli([
+                    "--data-dir", str(data_dir), "job", "artifacts", "prune",
+                    manifest.job_id,
+                ])
+
+            self.assertEqual(result, 0)
+            self.assertEqual(json.loads(output.getvalue()),
+                             {"pruned": [obsolete_id], "bytes_freed": 12})
+            self.assertFalse(obsolete_path.exists())
+            saved = JobManifest.load(manifest.job_id, data_dir / "jobs")
+            self.assertEqual(saved.artifacts[obsolete_id]["state"], "deleted")
+            self.assertTrue(saved.artifact_path.endswith("kept.mp4"))
 
 
 if __name__ == "__main__":

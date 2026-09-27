@@ -21,7 +21,10 @@ clipmorph web
 ```
 
 `app.yml` defaults to the ClipMorph data directory. Configure `source_dir`,
-`output_dir`, `job_defaults`, and named layouts there. Job configuration is
+`output_dir`, `job_defaults`, `retention`, and named layouts there. The file
+carries a `config_version` stamp; a missing or mismatched stamp is rejected with
+one actionable error, and `clipmorph init` run beside an existing `app.yml`
+regenerates a template to copy your settings back into. Job configuration is
 resolved from `app.yml:job_defaults` plus one per-job override object; finalized
 jobs live in `jobs/<job_id>/job.yml` with state in `manifest.json`. A source must
 be an immediate file under `source_dir`.
@@ -36,8 +39,8 @@ be an immediate file under `source_dir`.
 - `clipmorph job list|get ID|update ID --patch FILE [--reopen]|delete ID --yes|resume ID|cancel ID --yes` — inspect and manage the job lifecycle.
 - `clipmorph job review ID {transcript|conversion|upload} [--edits FILE] [--accept]` — checkpoint review gates.
 - `clipmorph job render ID` — create a new immutable artifact revision from the accepted composition.
-- `clipmorph job upload ID [--platform NAME]`, `clipmorph job upload retry ID PLATFORM [--attempt-id ID]` — submit the accepted draft or retry a failed attempt.
-- `clipmorph job artifacts list|preview|download|rename|delete ...` — manage registered artifact revisions.
+- `clipmorph job upload ID [--platform NAME]`, `clipmorph job upload retry ID PLATFORM [--attempt-id ID]` — submit the accepted draft or retry a failed attempt. A draft carrying `upload.schedule.publish_at` in the future defers every selected platform to that time; a retry always uploads immediately.
+- `clipmorph job artifacts list|preview|download|rename|delete|prune ...` — manage registered artifact revisions; `prune` applies the `app.yml:retention` policy.
 
 A directory `job create` scans the root of `app.yml:source_dir` only; unsupported or missing sources are skipped and reported per source, while valid jobs still proceed (no group manifest is persisted). The web API exposes the same lifecycle at `/api/v1/`; see `docs/CLI_WEB_PARITY.md` for the contract.
 ### Local dashboard
@@ -78,7 +81,7 @@ Common variables include:
 - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`
 - `FACEBOOK_APP_ID`, `FACEBOOK_APP_SECRET`, `FACEBOOK_PAGE_ID`, `FACEBOOK_ACCESS_TOKEN`
 - `GCS_BUCKET_NAME`, `GCP_PRIVATE_KEY_ID`, `GCP_PRIVATE_KEY`, `GCP_CLIENT_EMAIL`, `GCP_CLIENT_ID`, `GCP_PROJECT_ID`
-- `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, `TIKTOK_ACCESS_TOKEN`, `TIKTOK_REFRESH_TOKEN`, `TIKTOK_OPEN_ID`
+- `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, `TIKTOK_REFRESH_TOKEN`
 - `TWITTER_CLIENT_ID`, `TWITTER_CLIENT_SECRET`, `TWITTER_OAUTH2_ACCESS_TOKEN`, `TWITTER_OAUTH2_REFRESH_TOKEN`, `TWITTER_OAUTH2_EXPIRES_AT`
 - `HUGGING_FACE_ACCESS_TOKEN`
 

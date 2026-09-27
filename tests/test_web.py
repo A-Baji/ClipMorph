@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import yaml
+from clipmorph.configuration import APP_CONFIG_VERSION
 from clipmorph.service import JobService
 
 try:
@@ -37,8 +38,78 @@ class WebApiTests(unittest.TestCase):
                 self.assertEqual(layout.status_code, 201)
                 app_config = yaml.safe_load((data_dir / "app.yml").read_text(encoding="utf-8"))
                 self.assertEqual(app_config["layouts"][0]["id"], layout.json()["id"])
+                self.assertEqual(app_config["config_version"], APP_CONFIG_VERSION)
                 self.assertFalse((data_dir / "config.json").exists())
                 self.assertFalse((data_dir / "layouts.json").exists())
+
+    def test_configuration_version_guards_put_without_touching_the_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            with TestClient(create_app(data_dir)) as client:
+                client.put("/api/v1/configuration", json={
+                    "configuration": {"source_dir": "sources"}})
+                stored = (data_dir / "app.yml").read_text(encoding="utf-8")
+
+                rejected = client.put("/api/v1/configuration", json={
+                    "configuration": {"config_version": APP_CONFIG_VERSION + 1,
+                                      "source_dir": "elsewhere"}})
+                self.assertEqual(rejected.status_code, 422)
+                self.assertEqual(rejected.json()["error"]["code"], "invalid_configuration")
+                self.assertIn("clipmorph init", rejected.json()["error"]["message"])
+                self.assertEqual((data_dir / "app.yml").read_text(encoding="utf-8"), stored)
+
+                unstamped = client.put("/api/v1/configuration", json={
+                    "configuration": {"source_dir": "inbox"}})
+                self.assertEqual(unstamped.status_code, 200, unstamped.text)
+                self.assertEqual(unstamped.json()["configuration"]["config_version"],
+                                 APP_CONFIG_VERSION)
+                self.assertEqual(
+                    client.get("/api/v1/configuration").json()["configuration"][
+                        "config_version"], APP_CONFIG_VERSION)
+
+    def test_artifact_prune_route_applies_retention_and_404s_for_unknown_jobs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"source")
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {
+                "conversion": {"skip": True, "subtitles": {"skip": True}}})
+            job_id = manifest.job_id
+            manifest_dir = service.jobs_dir
+            artifact_dir = data_dir / "output" / job_id
+            artifact_dir.mkdir(parents=True)
+            obsolete_path = artifact_dir / "obsolete.mp4"
+            obsolete_path.write_bytes(b"0" * 40)
+            manifest.record_artifact("primary", obsolete_path, manifest_dir)
+            kept_path = artifact_dir / "kept.mp4"
+            kept_path.write_bytes(b"0" * 5)
+            manifest.record_artifact("primary", kept_path, manifest_dir)
+            states = {artifact["state"] for artifact in manifest.artifacts.values()}
+            self.assertEqual(states, {"superseded", "current"})
+            obsolete = [artifact_id for artifact_id, artifact in manifest.artifacts.items()
+                        if artifact["state"] == "superseded"]
+            kept_id = manifest.current_artifact_id
+            manifest.artifacts[obsolete[0]]["superseded_at"] = "2000-01-01T00:00:00+00:00"
+            manifest.save(manifest_dir)
+            service.close()
+
+            with TestClient(create_app(data_dir)) as client:
+                missing = client.post("/api/v1/jobs/unknown/artifacts/prune")
+                self.assertEqual(missing.status_code, 404)
+                self.assertEqual(missing.json()["error"]["code"], "not_found")
+
+                client.put("/api/v1/configuration", json={"configuration": {
+                    "retention": {"artifacts": {"max_age_days": 1}}}})
+                pruned = client.post(f"/api/v1/jobs/{job_id}/artifacts/prune")
+                self.assertEqual(pruned.status_code, 202, pruned.text)
+                self.assertEqual(pruned.json(), {"pruned": obsolete, "bytes_freed": 40})
+                self.assertFalse(obsolete_path.exists())
+                kept = {artifact["id"]: artifact for artifact
+                        in client.get(f"/api/v1/jobs/{job_id}/artifacts").json()}
+                self.assertEqual(kept[obsolete[0]]["state"], "deleted")
+                self.assertEqual(kept[kept_id]["state"], "current")
 
     def test_sources_validation_single_create_and_bulk_fanout(self):
         with tempfile.TemporaryDirectory() as temp_dir:

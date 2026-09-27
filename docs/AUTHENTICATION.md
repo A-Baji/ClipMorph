@@ -9,9 +9,40 @@ precedence over `auth.yaml` values; refresh tokens are the exception — a
 freshly issued refresh token in `auth.yaml` always wins over a stale
 environment value so granted tokens are never lost.
 
-Status overview at any time: `clipmorph auth status` prints configured
-booleans per field without revealing values. Add values non-interactively
-through environment variables, or interactively with:
+This guide documents exactly the fields in the credential schema. Nothing is
+documented that the code does not read: `tests/test_auth.py` walks each
+platform adapter and fails if a schema field is unread or a verified-unused
+field reappears.
+
+## Contents
+
+- [Where credentials live](#where-credentials-live)
+- [YouTube](#youtube-google_)
+- [Instagram](#instagram-facebook_-gcs_-gcp_)
+  - [GCS hosting for Instagram](#gcs-hosting-for-instagram)
+- [TikTok](#tiktok-tiktok_)
+- [Twitter / X](#twitter--x-twitter_)
+- [Hugging Face](#hugging-face-hugging_face_)
+- [Troubleshooting](#troubleshooting)
+- [Verification checklist](#verification-checklist)
+- [Official documentation](#official-documentation)
+
+## Where credentials live
+
+`auth.yaml` sits next to `app.yml` in the data directory selected by
+`--data-dir` (or `--app-config` for a custom location). Each platform is a
+mapping of field names to string values; a field ClipMorph needs but you leave
+empty is simply not configured.
+
+Check what is configured at any time — this prints one boolean per platform
+(`true` when at least one of that platform's fields is set) and never a value:
+
+```bash
+clipmorph auth status
+```
+
+Add values non-interactively through environment variables, or interactively
+with:
 
 ```bash
 clipmorph auth set youtube
@@ -22,110 +53,572 @@ clipmorph auth set hugging_face
 ```
 
 Each prompts for that provider's fields (exact names below) and writes them to
-`auth.yaml`. Keep both files private; never commit them.
+`auth.yaml`, keeping a rotated backup of the previous file. Keep both files
+private; never commit them. The per-field environment variable name is listed
+with every section below.
 
 ## YouTube (`GOOGLE_*`)
 
 Fields: `client_id`, `client_secret`, `refresh_token`
 (env: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`).
 
-1. In [Google Cloud Console](https://console.cloud.google.com/) create a
-   project (or reuse one) and enable the **YouTube Data API v3**.
-2. Configure the OAuth consent screen for **External** (or Internal for a
-   Workspace org). Add the scope
-   `https://www.googleapis.com/auth/youtube.upload` to the consent
-   configuration.
-3. Create OAuth client credentials of type **Desktop app**. Desktop clients
-   use loopback redirects, matching how ClipMorph treats the stored refresh
-   token as an installed-app credential.
-4. Copy the client ID and secret into the `youtube` section.
-5. Generate a refresh token with the `youtube.upload` scope (for example via
-   [OAuth 2.0 Playground](https://developers.google.com/oauthplayground):
-   add the scope in settings, authorize, exchange the code, copy the refresh
-   token). Store it under `refresh_token`.
+These authorize `clipmorph/upload_pipeline/platforms/youtube.py` to insert
+videos into a channel you own. The only scope requested anywhere is
+`https://www.googleapis.com/auth/youtube.upload`
+([YouTube API scopes](https://developers.google.com/identity/protocols/oauth2/scopes#youtube)).
 
-Uploads refresh the access token automatically from this refresh token; when
-the refresh token itself is rejected, the CLI falls back to an interactive
-browser authorization and persists the new token into `auth.yaml`.
+### Step-by-step console navigation
+
+1. Open the [Google Cloud Console](https://console.cloud.google.com/) and pick
+   an existing project from the project picker, or create one
+   ([projects](https://cloud.google.com/resource-manager/docs/creating-managing-projects)).
+2. Open **APIs & Services → Library**, search for **YouTube Data API v3**, and
+   click **Enable**
+   ([API library](https://console.cloud.google.com/apis/library)).
+3. Open **APIs & Services → OAuth consent screen** and choose **External** (or
+   **Internal** for a Workspace organization), then set the app name, support
+   email, and developer contact
+   ([authentication overview](https://cloud.google.com/docs/authentication)).
+4. Under **Data Access**, add the scope
+   `https://www.googleapis.com/auth/youtube.upload`. Requesting only this scope
+   keeps the consent screen in the non-sensitive tier
+   ([scopes](https://developers.google.com/identity/protocols/oauth2/scopes#youtube)).
+5. Open **APIs & Services → Credentials → Create credentials → OAuth client
+   ID**, choose application type **Desktop app**, and create it
+   ([OAuth clients](https://developers.google.com/identity/protocols/oauth2/production)).
+6. Open **APIs & Services → Credentials** and copy the **Client ID** and
+   **Client secret** of that client. Download the client secret JSON if you
+   also want an offline copy.
+
+### Credential generation and verification
+
+- `client_id` — the "Client ID" of the OAuth client. Desktop clients end in
+  `.apps.googleusercontent.com`; a bare numeric value is usually the project
+  number you copied from the wrong place. Verify on **Credentials → your
+  client**.
+- `client_secret` — the "Client secret" of the same client. It is shown only in
+  the creation dialog, so download the JSON if you did not copy it. Confirm the
+  row exists in the console and the value starts with `GOCSPX-`.
+- `refresh_token` — never copied from the console; it comes out of the
+  authorization-code exchange below.
+
+### OAuth setup walk-through
+
+The adapter uses Google's *installed app* (desktop) flow
+([installed-app flow](https://developers.google.com/identity/protocols/oauth2/native-app)):
+it starts a short-lived loopback listener on an ephemeral port, opens the
+consent page, receives the code on `http://localhost:<port>`, and exchanges it
+for tokens. A Desktop client needs no registered redirect URI, so step 5 above
+is all the console setup required.
+
+Two ways to obtain the refresh token:
+
+1. **ClipMorph does it for you.** Store only `client_id` and `client_secret`,
+   then trigger any YouTube upload. With no valid refresh token configured the
+   adapter starts the flow, prints that a refresh token was generated, and
+   persists it to `auth.yaml` and `GOOGLE_REFRESH_TOKEN` without ever printing
+   it. When a stored refresh token later fails, the same flow re-runs
+   automatically.
+2. **Manually, via the [OAuth 2.0 Playground](https://developers.google.com/oauthplayground).**
+   Set the client id and secret in the gear menu, add the
+   `youtube.upload` scope in the step-2 scope selector, **Authorize exchange
+   code**, then **Exchange authorization code for tokens** and read
+   `refresh_token` from the step-4 response. Offline access — and therefore a
+   refresh token at all — requires `access_type=offline`
+   ([offline access](https://developers.google.com/identity/protocols/oauth2/web-server#offline)).
+
+Confirm the result without exposing it: **APIs & Services → OAuth consent
+screen → Data Access** shows the scopes that were granted, and
+`clipmorph auth status` shows `youtube: true`.
+
+### Gotchas
+
+- A refresh token minted while the consent screen is in **Testing** publishing
+  status expires after 7 days; publish the consent screen for a long-lived
+  token
+  ([testing and expiration](https://developers.google.com/identity/protocols/oauth2#expiration)).
+- Omitting `access_type=offline` returns a token response with **no** refresh
+  token
+  ([token response](https://developers.google.com/identity/protocols/oauth2/web-server#call-offline)).
+- A refresh token issued for another scope, or belonging to a client you have
+  since deleted, fails with `invalid_grant`; re-run the exchange from step 1.
+- The token is bound to the Google account that approved it, so switching
+  accounts in the consent page changes which channel receives the upload.
 
 ## Instagram (`FACEBOOK_*`, `GCS_*`, `GCP_*`)
 
 Fields: `app_id`, `app_secret`, `page_id`, `access_token`,
 `gcs_bucket_name`, `gcp_private_key_id`, `gcp_private_key`,
-`gcp_client_email`, `gcp_client_id`, `gcp_project_id`.
+`gcp_client_email`, `gcp_client_id`, `gcp_project_id`
+(env: `FACEBOOK_APP_ID`, `FACEBOOK_APP_SECRET`, `FACEBOOK_PAGE_ID`,
+`FACEBOOK_ACCESS_TOKEN`, `GCS_BUCKET_NAME`, `GCP_PRIVATE_KEY_ID`,
+`GCP_PRIVATE_KEY`, `GCP_CLIENT_EMAIL`, `GCP_CLIENT_ID`, `GCP_PROJECT_ID`).
 
-1. Create a **Facebook App** (business type) in the
-   [Meta App Dashboard](https://developers.facebook.com/) and note the App ID
-   (`app_id`) and App Secret (`app_secret`).
-2. Link or create a Facebook Page; its numeric ID goes to `page_id`. Reels
-   publish to that page.
-3. Generate a long-lived page access token with
-   `instagram_content_publish` (and `pages_manage_metadata`) permissions —
-   for example via the Graph API Explorer → exchange for a long-lived token →
-   then derive the page token. Put it in `access_token`.
-4. Instagram upload relies on temporary media hosting in Google Cloud
-   Storage. Create or select a bucket and a service account with
-   `roles/storage.objectAdmin` (or object create/delete) on that bucket,
-   export a JSON key, and fill the `gcs_bucket_name` plus the five
-   `GCP_*` values from that key (`private_key_id`, `private_key`,
-   `client_email`, `client_id`, `project_id`).
+These authorize `clipmorph/upload_pipeline/platforms/instagram.py` to publish
+reels to one Instagram professional account. The Facebook half talks to Graph
+API `v23.0`; the Google half only hosts the video bytes for the signed-URL
+hand-off that the container-publishing flow requires.
 
-ClipMorph uploads each video under a job-scoped unique object key, grants a
-signed URL to Meta, and deletes the object it created after the upload.
+The scopes the adapter requests are `instagram_basic`, `pages_show_list`,
+`pages_read_engagement`, `pages_manage_posts`, and
+`instagram_content_publish`
+([content publishing](https://developers.facebook.com/docs/instagram-platform/instagram-api-with-instagram-login/content-publishing/)).
+
+### Step-by-step console navigation
+
+1. Create an app in the [Meta App Dashboard](https://developers.facebook.com/apps/),
+   linking it to a Business portfolio when prompted
+   ([Graph API](https://developers.facebook.com/documentation/facebook-api)).
+2. Open **App settings → Basic**. This page holds the numeric **App ID** and the
+   **App secret** (behind a **Show** button).
+3. Add the **Instagram** product (**Instagram API with Instagram Login**), then
+   connect the Instagram professional account you intend to publish to.
+   Professional accounts are required for reel publishing
+   ([Instagram API setup](https://developers.facebook.com/docs/instagram-platform/instagram-api-with-instagram-login/get-started/)).
+4. Open that product's **Permissions and features** and request
+   `instagram_basic`, `instagram_content_publish`, `pages_show_list`,
+   `pages_read_engagement`, and `pages_manage_posts`
+   ([permissions](https://developers.facebook.com/docs/permissions/)).
+5. Find the Facebook Page that owns the professional account (under
+   **Page settings → Connected accounts**, or Business Suite). That Page's
+   numeric id is `page_id`.
+6. Generate the long-lived Page access token (next section) and store it in
+   `access_token`.
+7. Configure GCS hosting as described below.
+
+### Credential generation and verification
+
+- `app_id` — the numeric **App ID** on **App settings → Basic**. It is not
+  secret; verify it on that page.
+- `app_secret` — **App secret → Show** on the same page. Meta does not display
+  it again without an explicit reveal, so confirm the pasted value is non-empty
+  rather than re-reading it later.
+- `page_id` — the numeric Page id. Verify with
+  `GET /v23.0/{page_id}?fields=id,name` in the
+  [Graph API Explorer](https://developers.facebook.com/tools/explorer/): a
+  returned `id`/`name` pair proves both the id and the token's access to it.
+- `access_token` — see the OAuth walk-through. Verify it with
+  `GET /me/accounts?fields=id,name,access_token` in the explorer; the Page you
+  intend to publish to must appear with a usable `access_token`.
+
+### OAuth setup walk-through
+
+ClipMorph's Meta flow is a paste-back code exchange rather than a loopback
+listener, and it registers `https://localhost/` as the redirect URI:
+
+1. Add `https://localhost/` to **Facebook Login → Settings → Valid OAuth
+   Redirect URIs**
+   ([manual flow](https://developers.facebook.com/docs/facebook-login/guides/advanced/manual-flow/)).
+2. Request an authorization code for the scopes above, redirecting to
+   `https://localhost/`, and paste the returned `code` back into the CLI when
+   prompted.
+3. Exchange the code with `app_id`, `app_secret`, and the **identical**
+   `redirect_uri` for a short-lived user access token.
+4. Exchange the short-lived user token for a long-lived one
+   (`/oauth/access_token?grant_type=fb_exchange_token&client_id=…&client_secret=…&fb_exchange_token=…`),
+   then derive the Page token from
+   `GET /me/accounts?fields=access_token`. That Page token is the value stored
+   in `access_token`
+   ([access tokens](https://developers.facebook.com/docs/facebook-login/guides/access-tokens/)).
+5. Re-verify with the explorer as described above.
+
+### Gotchas
+
+- A short-lived token pasted straight into `access_token` works once and then
+  fails with a "Session has expired" Graph error
+  ([token types](https://developers.facebook.com/docs/facebook-login/guides/access-tokens/)).
+- A Page token cannot request new permissions: a token derived before
+  `instagram_content_publish` was approved authenticates but fails at publish
+  time, and only a re-derivation after approval fixes it
+  ([app review](https://developers.facebook.com/docs/instagram-platform/app-review/)).
+- An app in development mode only works for roles that have app access; add
+  yourself as an administrator or switch the app to Live
+  ([app modes](https://developers.facebook.com/docs/development/release/)).
+
+## GCS hosting for Instagram
+
+Instagram's container-publishing flow needs a publicly reachable video URL.
+ClipMorph meets that by uploading each render to a private Cloud Storage
+bucket, handing Meta a short-lived signed GET URL, and deleting the object
+afterwards. The bucket therefore has to be writable and deletable by a Google
+service account you control.
+
+### 1. Create the bucket
+
+1. Open the [Cloud Storage console](https://console.cloud.google.com/storage/browser)
+   and select the project that will own the bucket.
+2. Click **Create bucket**, set **Bucket name** (3–63 characters; lowercase
+   letters, numbers, dashes and underscores; globally unique, so prefix it with
+   something like `clipmorph-`), and pick a **Location**
+   ([create a bucket](https://cloud.google.com/storage/docs/creating-buckets)).
+   Choose a region near where your machine runs; Meta fetches the signed URL
+   from its own infrastructure, so a multi-region avoids cross-region latency.
+3. Choose the **default storage class**; Standard is right for short-lived
+   temporary media
+   ([storage classes](https://cloud.google.com/storage/docs/storage-classes)).
+4. Under **Advanced → Access control**, select **Uniform access** on a new
+   bucket. Uniform access disables per-object ACLs and is the recommended
+   default; it is also why the service account below needs an IAM role rather
+   than an object ACL
+   ([uniform bucket-level access](https://cloud.google.com/storage/docs/uniform-bucket-level-access)).
+5. Leave **Object public access prevention** on. The signed URL, not public
+   access, is what grants read access
+   ([public access prevention](https://cloud.google.com/storage/docs/public-access-prevention)).
+6. Leave **Retention** off — objects are deleted at the end of each upload, so
+   a lock would block that delete
+   ([retention policies](https://cloud.google.com/storage/docs/bucket-lock)).
+7. Create the bucket. Its name is the value of `gcs_bucket_name`; verify it in
+   the console's bucket list.
+
+### 2. Create the service account and grant the role
+
+1. Open **IAM & Admin → Service Accounts**
+   ([service accounts](https://cloud.google.com/iam/docs/service-accounts)),
+   click **Create service account**, name it something like
+   `clipmorph-instagram-uploader`, and continue without creating a key yet.
+2. On that service account's **IAM** page, click **Add users**. In the principal
+   picker select the service account itself, then grant the role below, bound
+   **on the bucket** rather than on the whole project — least privilege, and
+   the bucket is the only resource this identity touches.
+3. Grant `roles/storage.objectAdmin` on that one bucket
+   ([predefined storage roles](https://cloud.google.com/storage/docs/access-control/iam-roles)).
+   It is the narrowest predefined role covering all three operations the
+   adapter performs: `objects.create` for the upload and `objects.delete` for
+   the post-publish cleanup. The signed URL is produced locally with the
+   service account's own private key, so it needs no read permission on the
+   object.
+4. Tighter still, if you want a custom role: grant only `storage.objects.create`
+   and `storage.objects.delete` on `projects/_/buckets/<bucket>`
+   ([custom roles](https://cloud.google.com/iam/docs/creating-custom-roles)).
+5. Verify without exposing anything: the service account's **Permissions** tab
+   lists `roles/storage.objectAdmin` with the bucket as its resource, and
+   **Logging → Audit Logs** shows the role-binding event
+   ([audit logging](https://cloud.google.com/logging/docs/audit)).
+6. Back on the service account's **Keys** tab, click **Add key → Create new
+   key → JSON** and download the file
+   ([managing keys](https://cloud.google.com/iam/docs/keys-create-delete)).
+   That JSON is the source for the five `gcp_*` fields.
+
+### 3. Map the JSON key to `auth.yaml`
+
+The downloaded file has `"type": "service_account"` and a `project_id` matching
+the bucket's project. Copy each field across as follows:
+
+| JSON key in the downloaded file | `auth.yaml` field | Notes |
+| --- | --- | --- |
+| `private_key_id` | `gcp_private_key_id` | Key identifier; not secret on its own. |
+| `private_key` | `gcp_private_key` | **Multiline** — see below. |
+| `client_email` | `gcp_client_email` | The `…@….iam.gserviceaccount.com` identity that holds the role. |
+| `client_id` | `gcp_client_id` | OAuth client id of the service account. |
+| `project_id` | `gcp_project_id` | Must be the project that owns the bucket. |
+
+The private key is a PEM block spanning several lines. Because `auth.yaml` is a
+single YAML file, the value must stay on one line with literal `\n` escape
+sequences inside a **double-quoted** scalar — the adapter converts those escapes
+back to real newlines when it builds the credentials object, so a multi-line
+block scalar will not work:
+
+```yaml
+instagram:
+    gcs_bucket_name: "clipmorph-instagram-uploads"
+    gcp_project_id: "my-project-1234"
+    gcp_client_email: "clipmorph-uploader@my-project-1234.iam.gserviceaccount.com"
+    gcp_client_id: "109876543210987654321"
+    gcp_private_key_id: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+    gcp_private_key: "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC...\n...\n-----END PRIVATE KEY-----\n"
+```
+
+When the key is supplied through an environment variable instead, use the same
+escaped form. On PowerShell:
+
+```powershell
+$env:GCP_PRIVATE_KEY = (Get-Content .\key.json -Raw | ConvertFrom-Json).private_key
+```
+
+A wrong or mis-escaped private key fails at the first upload with a signature
+error, not at configuration time.
+
+### Gotchas
+
+- A bucket in a project the service account's IAM binding does not cover yields
+  a `403` on the object create.
+- Turning public access prevention **off** plus a permissive `allUsers` ACL
+  publishes your renders; the signed-URL flow does not need it off.
+- Bucket-level Object Versioning keeps old versions of a deleted object, so the
+  cleanup delete does not reclaim space until those versions are deleted too
+  ([object versioning](https://cloud.google.com/storage/docs/object-versioning)).
 
 ## TikTok (`TIKTOK_*`)
 
-Fields: `client_key`, `client_secret`, `access_token`, `refresh_token`,
-`open_id` (env: `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`,
-`TIKTOK_ACCESS_TOKEN`, `TIKTOK_REFRESH_TOKEN`, `TIKTOK_OPEN_ID`).
+Fields: `client_key`, `client_secret`, `refresh_token`
+(env: `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, `TIKTOK_REFRESH_TOKEN`).
 
-1. Register an app on the
-   [TikTok for Developers](https://developers.tiktok.com/) portal, request the
-   **Video Upload** and **Video Publish** products, and note the client key
-   and secret.
-2. Add an OAuth redirect domain that you control; the PKCE authorization flow
-   opens the consent page in your browser.
-3. Store `client_key` and `client_secret`, then run a refresh-token
-   authorization (the pipeline opens the consent page, handles the code
-   exchange, and returns the refresh token) and fill in
-   `refresh_token` (plus `access_token` and `open_id` from the same
-   response). Scope requested:
-   `user.info.basic,video.upload,video.publish`.
-4. With a persisted `refresh_token`, uploads refresh the access token
-   automatically and fall back to the interactive flow when it expires.
+These authorize `clipmorph/upload_pipeline/platforms/tiktok.py` to publish
+videos to the authorized TikTok account, requesting the scopes
+`user.info.basic,video.upload,video.publish`
+([content posting](https://developers.tiktok.com/doc/content-posting-api-get-started)).
 
-## Twitter/X (`TWITTER_*`)
+There is deliberately no access-token or open-id field: the adapter derives a
+short-lived access token from `refresh_token` on every upload and persists a
+rotated refresh token whenever TikTok issues one
+([token management](https://developers.tiktok.com/doc/oauth-user-access-token-management)).
+
+### Step-by-step console navigation
+
+1. Register an app in the [TikTok for Developers](https://developers.tiktok.com/)
+   portal and open it
+   ([create an app](https://developers.tiktok.com/doc/getting-started-create-an-app)).
+2. Under **Products**, request **Video Upload** and **Video Publish**
+   ([content posting](https://developers.tiktok.com/doc/content-posting-api-get-started)).
+3. Under the app's **Credentials** section, copy **Client key** and **Client
+   secret**.
+4. Under **Login Kit** settings, add the redirect URI the authorization URL
+   uses. The adapter sends `http://127.0.0.1:80/callback/`, and desktop
+   redirect URIs must be a loopback host (`localhost` or `127.0.0.1`) with a
+   port, where plain `http` is allowed
+   ([Login Kit](https://developers.tiktok.com/doc/login-kit-web/)).
+5. Stay in **Sandbox** while testing, then switch the app to **Production** and
+   submit it for audit before posting to real accounts
+   ([content posting](https://developers.tiktok.com/doc/content-posting-api-get-started)).
+
+### Credential generation and verification
+
+- `client_key` and `client_secret` — from the app's **Credentials** section.
+  These are app credentials, not user credentials; verify them against the
+  console page rather than by calling the API.
+- `refresh_token` — produced by the authorization-code + PKCE exchange the
+  adapter performs when no valid refresh token is stored. Run one upload and
+  let the interactive authorization complete; the refresh token is written to
+  `auth.yaml` and to `TIKTOK_REFRESH_TOKEN`.
+
+Verify without exposing it: the portal's **Content posting analytics** shows an
+active user, and `clipmorph auth status` shows `tiktok: true`.
+
+### OAuth setup walk-through
+
+1. Open the authorization URL with `client_key`, the scopes above, and
+   `redirect_uri=http://127.0.0.1:80/callback/`
+   ([authorization](https://developers.tiktok.com/doc/login-kit-web/)).
+2. Approve on the consent page; TikTok returns the authorization code to the
+   redirect URI, and the adapter reads it from its callback listener.
+3. The adapter exchanges the code together with its PKCE verifier at the token
+   endpoint, receiving `access_token` (24 hours) and `refresh_token`
+   (365 days)
+   ([token management](https://developers.tiktok.com/doc/oauth-user-access-token-management)).
+4. The refresh token is persisted; a `refresh_token` returned by a later refresh
+   **replaces** the stored one, which is why the adapter writes rotated values
+   back to `auth.yaml`.
+
+Once stored, uploads exchange the refresh token for a short-lived access token
+automatically and fall back to the interactive flow when TikTok invalidates the
+refresh token.
+
+### Gotchas
+
+- An unapproved app only works for accounts the developer authorized; production
+  posting fails until the app is submitted and approved.
+- A refresh token is bound to the app it was issued for; rotating the client
+  secret or recreating the app invalidates it
+  ([refresh tokens](https://developers.tiktok.com/doc/oauth-user-access-token-management)).
+- A registered redirect domain that does not match the adapter's loopback URI
+  is rejected before any token is issued
+  ([Login Kit](https://developers.tiktok.com/doc/login-kit-web/)).
+
+## Twitter / X (`TWITTER_*`)
 
 Fields: `client_id`, `client_secret`, `oauth2_access_token`,
-`oauth2_refresh_token`, `oauth2_expires_at`.
+`oauth2_refresh_token`, `oauth2_expires_at`
+(env: `TWITTER_CLIENT_ID`, `TWITTER_CLIENT_SECRET`,
+`TWITTER_OAUTH2_ACCESS_TOKEN`, `TWITTER_OAUTH2_REFRESH_TOKEN`,
+`TWITTER_OAUTH2_EXPIRES_AT`).
 
-1. Create a project and app in the
-   [X Developer Portal](https://developer.x.com/); enable **OAuth 2.0** with
-   the **Web App** type and add the redirect callback
-   `http://localhost:8765/callback`.
-2. Store the client ID and secret, then run:
+These are **OAuth 2.0** credentials only, consumed by
+`clipmorph/twitter_auth.py` and
+`clipmorph/upload_pipeline/platforms/twitter.py`. X API v1.1 key/secret/bearer
+fields are not part of the schema and are not read anywhere in the codebase.
+
+Requested scopes: `tweet.read`, `tweet.write`, `users.read`, `media.write`,
+`offline.access`
+([authorization code with PKCE](https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code)).
+
+### Step-by-step console navigation
+
+1. Sign in to the [X Developer Portal](https://developer.x.com/), create a
+   project, then an app inside it
+   ([developer apps](https://docs.x.com/fundamentals/developer-apps)).
+2. Open the app's **Settings → User authentication settings**, enable **OAuth
+   2.0**, and choose the **Web App** type so a client secret is issued.
+3. Under **Keys and tokens**, copy **Client ID** and **Client Secret** and click
+   **Generate and save** if they are not shown
+   ([authentication overview](https://docs.x.com/fundamentals/authentication/overview)).
+4. Under **User authentication settings → Callback URIs**, add exactly
+   `http://localhost:8765/callback`. Callback URLs must match exactly,
+   including the port and any trailing slash
+   ([developer apps](https://docs.x.com/fundamentals/developer-apps)).
+5. Set the app's **User authentication settings** permission to **Read and
+   write**, which is what enables the media-upload and post endpoints.
+6. Run the interactive flow (next section), which writes the remaining three
+   fields.
+
+### Credential generation and verification
+
+- `client_id` / `client_secret` — from the app's **Keys and tokens** page.
+  Verify both against that page.
+- `oauth2_access_token`, `oauth2_refresh_token`, `oauth2_expires_at` — written
+  by the interactive flow. `oauth2_expires_at` is the UTC ISO-8601 expiry derived
+  from the response's `expires_in`.
+
+Verify without exposing it: the portal's **Keys and tokens** page shows the app
+key, and `clipmorph auth status` shows `twitter: true`.
+
+### OAuth setup walk-through
+
+1. Store `client_id` and `client_secret` (or set `TWITTER_CLIENT_ID` and
+   `TWITTER_CLIENT_SECRET`), then run:
 
    ```bash
    clipmorph auth twitter
    ```
 
-   ClipMorph opens the X consent page, validates the returned state,
-   exchanges the code with PKCE (S256), and stores the user access token,
-   refresh token, and expiry in `auth.yaml`. Requested scopes:
-   `tweet.read`, `tweet.write`, `users.read`, `media.write`,
-   `offline.access`.
-3. Expired access tokens are refreshed automatically from
-   `oauth2_refresh_token`; if the refresh token is rejected the CLI reruns
-   the interactive authorization.
+2. ClipMorph opens the consent page at `https://x.com/i/oauth2/authorize` with
+   `redirect_uri=http://localhost:8765/callback`, the scopes above, a random
+   `state`, and a PKCE `S256` challenge
+   ([authorization code with PKCE](https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code)).
+3. The command listens on `http://localhost:8765/callback` for up to 60
+   seconds, validates the returned `state` against the value it generated, then
+   exchanges the code with the PKCE verifier against
+   `https://api.x.com/2/oauth2/token`.
+4. The response's `access_token`, `refresh_token`, and `expires_in` are
+   persisted as `oauth2_access_token`, `oauth2_refresh_token`, and
+   `oauth2_expires_at`.
+
+Expired access tokens are refreshed automatically from `oauth2_refresh_token`;
+if the refresh token is rejected, the CLI reruns the interactive
+authorization.
+
+### Gotchas
+
+- A callback URI registered with a trailing slash, a different port, or an
+  `https` scheme does not match, and the token exchange reports
+  `redirect_uri_mismatch`
+  ([developer apps](https://docs.x.com/fundamentals/developer-apps)).
+- Without `offline.access` no refresh token is issued, so the whole flow has to
+  be repeated whenever the roughly two-hour access token expires
+  ([scopes](https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code)).
+- App permissions must be read/write before the media and post endpoints
+  respond; a read-only app fails at upload with a `403`.
+- Tokens already issued do not gain new scopes or new app permissions — re-run
+  `clipmorph auth twitter` after changing either.
 
 ## Hugging Face (`HUGGING_FACE_ACCESS_TOKEN`)
 
 Field: `access_token` (env: `HUGGING_FACE_ACCESS_TOKEN`).
 
-Required for optional speaker diarization models. Create a read token in your
-[Hugging Face settings](https://huggingface.co/settings/tokens) and paste it
-under `hugging_face.access_token`. Transcription works without it when
-diarization is not used.
+Required for optional speaker diarization models; transcription works without it
+when diarization is not used.
+
+### Step-by-step and verification
+
+1. Open **Settings → Access Tokens → Create new token**
+   ([access tokens](https://huggingface.co/docs/hub/security-tokens)).
+2. Choose the **Read** role — ClipMorph only downloads gated diarization models
+   with it, so a **Write** token is unnecessary and over-privileged.
+3. Paste it under `hugging_face.access_token`.
+
+Verify without exposing it: the token list on that page shows the token's name
+and role, never the value, and `clipmorph auth status` shows
+`hugging_face: true`. A `401` when loading the diarization model usually means
+the gated model's terms were not accepted for your account
+([gated repositories](https://huggingface.co/docs/hub/repositories-licenses)).
+
+## Troubleshooting
+
+Every diagnosis below is something you can inspect in a console, never a secret
+you have to echo. Replace placeholders with your own values.
+
+| Symptom | Diagnosis | Fix |
+| --- | --- | --- |
+| Redirect URI mismatch (Meta) | The registered URI differs from `https://localhost/`. | Register `https://localhost/` on the app and send the identical value in the exchange. |
+| Redirect URI mismatch (X) | The registered callback differs from the adapter's URI in port, scheme, or trailing slash. | Register exactly `http://localhost:8765/callback`. |
+| `invalid_grant` on a YouTube refresh | Token issued for another scope, or a deleted/rotated client. | Re-run the installed-app flow with `youtube.upload`. |
+| "Session has expired" (Instagram) | A short-lived user or Page token was stored. | Re-derive a long-lived Page token from `GET /me/accounts?fields=access_token`. |
+| `403` on Instagram publish | The Page token predates an approved permission. | Re-approve `instagram_content_publish`, then re-derive the Page token. |
+| TikTok refresh rejected | Token bound to a previous client key, or the app is not in production. | Recreate the app authorization and confirm audit approval. |
+| X access token expired with no refresh | `offline.access` was not granted. | Re-run `clipmorph auth twitter` after adding the scope. |
+| X `403` on media upload | App permissions are read-only. | Set **User authentication settings** to **Read and write**, then re-authorize. |
+| Cloud Storage `403` on upload | Service account lacks a role on that bucket, or the bucket is in another project. | Bind `roles/storage.objectAdmin` on the bucket to that service account. |
+| Signature error on the first Instagram upload | `gcp_private_key` was pasted as a real multi-line block instead of escaped `\n`. | Re-paste it as a double-quoted single-line scalar. |
+| `auth.yaml` fails to load | A value contains an unescaped `:`, `#`, or a tab. | Quote the value, or set the matching environment variable instead. |
+| `429` or provider-side throttling | The provider is rate limiting the app. | Wait for the window to reset; a retry reuses the frozen snapshot. |
+| A platform is reported unconfigured | `clipmorph auth status` shows `false` for it. | Run `clipmorph auth set PLATFORM`, or export the documented environment variable. |
+| A job is stuck `running` after a crash | The process died mid-step. | Reconciliation marks it `interrupted_by_restart` on the next service start; retry the checkpoint. |
+
+## Verification checklist
+
+Run these after filling in the file. None of them print a credential value.
+
+1. `clipmorph auth status` — one boolean per platform, computed from the local
+   `auth.yaml` and the environment only. No network calls.
+2. `clipmorph auth set PLATFORM` when a value is wrong; it rewrites the field
+   through the same loader the upload path uses and keeps a rotated backup of
+   the previous file.
+3. A first-upload dry run: `clipmorph job create sources/video.mp4 --dry-run`
+   validates and resolves configuration without publishing, confirming the
+   source and layout side of the setup. The first real upload for a platform is
+   the only step that proves the credential works against the provider — and it
+   is the step that publishes something, so post to a test or private account
+   first.
+4. Read the provider's own console afterwards to confirm the request arrived
+   (YouTube **Video Manager**, Meta **Content**, X **Posts**, TikTok **Content
+   posting analytics**, Hugging Face **last-login/activity**). That verifies the
+   credential without you ever re-reading the secret.
+
+Two planned commands are listed here so you do not wait on them: `clipmorph
+auth status --probe` (per
+[#196](https://github.com/A-Baji/ClipMorph/issues/196)) will check each
+credential's network readability without printing values — note that it is a
+network call, unlike the local-only `auth status` — and `clipmorph doctor` (per
+[#194](https://github.com/A-Baji/ClipMorph/issues/194)) will add a static
+environment self-check.
+
+## Official documentation
+
+- Google Cloud: [projects](https://cloud.google.com/resource-manager/docs/creating-managing-projects),
+  [API library](https://console.cloud.google.com/apis/library),
+  [authentication overview](https://cloud.google.com/docs/authentication),
+  [creating buckets](https://cloud.google.com/storage/docs/creating-buckets),
+  [bucket IAM roles](https://cloud.google.com/storage/docs/access-control/iam-roles),
+  [uniform bucket-level access](https://cloud.google.com/storage/docs/uniform-bucket-level-access),
+  [service accounts](https://cloud.google.com/iam/docs/service-accounts),
+  [managing service account keys](https://cloud.google.com/iam/docs/keys-create-delete),
+  [audit logging](https://cloud.google.com/logging/docs/audit)
+- Google OAuth: [OAuth 2.0](https://developers.google.com/identity/protocols/oauth2),
+  [installed (desktop) apps](https://developers.google.com/identity/protocols/oauth2/native-app),
+  [scopes](https://developers.google.com/identity/protocols/oauth2/scopes#youtube),
+  [offline access](https://developers.google.com/identity/protocols/oauth2/web-server#offline),
+  [testing and token expiration](https://developers.google.com/identity/protocols/oauth2#expiration),
+  [OAuth 2.0 Playground](https://developers.google.com/oauthplayground)
+- Meta: [App Dashboard](https://developers.facebook.com/apps/),
+  [Graph API](https://developers.facebook.com/documentation/facebook-api),
+  [Graph API Explorer](https://developers.facebook.com/tools/explorer/),
+  [manual OAuth flow](https://developers.facebook.com/docs/facebook-login/guides/advanced/manual-flow/),
+  [access tokens](https://developers.facebook.com/docs/facebook-login/guides/access-tokens/),
+  [permissions](https://developers.facebook.com/docs/permissions/),
+  [Instagram platform overview](https://developers.facebook.com/docs/instagram-platform/overview),
+  [Instagram content publishing](https://developers.facebook.com/docs/instagram-platform/instagram-api-with-instagram-login/content-publishing/),
+  [Instagram app review](https://developers.facebook.com/docs/instagram-platform/app-review/),
+  [app modes](https://developers.facebook.com/docs/development/release/)
+- TikTok: [developer portal](https://developers.tiktok.com/),
+  [create an app](https://developers.tiktok.com/doc/getting-started-create-an-app),
+  [Login Kit and redirect URIs](https://developers.tiktok.com/doc/login-kit-web/),
+  [user access token management](https://developers.tiktok.com/doc/oauth-user-access-token-management),
+  [content posting](https://developers.tiktok.com/doc/content-posting-api-get-started)
+- X: [developer portal](https://developer.x.com/),
+  [developer apps and callback URLs](https://docs.x.com/fundamentals/developer-apps),
+  [authentication overview](https://docs.x.com/fundamentals/authentication/overview),
+  [OAuth 2.0 authorization code with PKCE](https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code)
+- Hugging Face: [access tokens](https://huggingface.co/docs/hub/security-tokens),
+  [gated repositories](https://huggingface.co/docs/hub/repositories-licenses)
 
 ## Precedence and storage
 
@@ -136,3 +629,6 @@ diarization is not used.
 - `clipmorph auth set` and the OAuth flows write only to `auth.yaml`; the CLI
   never prints full secrets, and manifest errors redact credential-looking
   values.
+- `auth.yaml` backups are rotated to `auth.yaml.backup`, `auth.yaml.backup1`,
+  and so on. The number kept is `app.yml:retention.backups.keep_n`, defaulting
+  to 5; see [CONFIG_LAYERS.md](CONFIG_LAYERS.md).
