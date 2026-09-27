@@ -7,7 +7,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# Machine-local OpenCode automation surface (see .gitignore entry).
 ALLOWED_ROOT_DIRS = {
+    # Machine-local OpenCode automation surface (see the .gitignore entry).
+    ".opencode",
     ".agents",
     ".claude",
     ".github",
