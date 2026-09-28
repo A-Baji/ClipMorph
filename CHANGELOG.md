@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added the authentication setup guide `docs/AUTHENTICATION.md` with step-by-step credential generation for every provider section of `auth.yaml`.
 - Added the platform extension guide `docs/PLATFORM_EXTENSION_GUIDE.md`, which lists every touchpoint a new platform has to reach, and the `PlatformCoverageDriftTests` drift suite in `tests/test_platforms.py` that fails when a platform is missing from any of them.
 - Added `clipmorph doctor [--json] [--source PATH]`, a read-only environment health check (FFmpeg/FFprobe binaries, app.yml, source/output directories, layouts, fonts, credentials, transcription device, and optional source media) that prints a text report by default and exits `0` when no check failed (warnings allowed) or `1` when at least one failed.
+- Added `clipmorph auth status --probe [PLATFORM ...]`, an opt-in per-platform credential health probe that makes one read-only call per platform and prints a masked verdict as JSON (exit `1` when any probe fails), plus a per-platform **Probe** button in the dashboard Settings view backed by `POST /api/v1/credentials/{platform}/probe`.
 
 ### Changed
 

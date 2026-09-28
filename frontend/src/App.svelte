@@ -12,6 +12,7 @@
   let expandedSource = '';
   let perSourceOverrides = {};
   let credentials = {};
+  let probeResults = {};
   let configuration = { source_dir: 'sources', output_dir: 'output', job_defaults: {}, layouts: [] };
   let transcript = null;
   let notice = '';
@@ -428,6 +429,13 @@
     } catch (error) { errors = [error.message]; }
   }
 
+  async function probeCredential(platform) {
+    try {
+      const record = await api(`/api/v1/credentials/${platform}/probe`, { method: 'POST' });
+      probeResults = { ...probeResults, [platform]: record.probe };
+    } catch (error) { errors = [error.message]; }
+  }
+
   loadWorkspace();
 </script>
 
@@ -590,7 +598,7 @@
       </section>
 
     {:else if activeView === 'Settings'}
-      <section class="form-page"><div class="section-heading"><div><span class="section-kicker">Persistent app configuration</span><h2>Workspace settings</h2></div><button class="primary-action" onclick={saveSettings}>Save app.yml</button></div><div class="settings-grid"><div class="form-card"><span class="card-index">PATHS</span><label class="field-label">Source directory<input bind:value={configuration.source_dir} /></label><label class="field-label">Output directory<input bind:value={configuration.output_dir} /></label></div><div class="form-card"><span class="card-index">CREDENTIAL STATUS</span>{#each platforms as platform}<div class="health-row"><span class:healthy={credentials[platform]}></span><b>{platform}</b><small>{credentials[platform] ? 'configured' : 'not configured'}</small></div>{/each}</div><div class="form-card wide"><span class="card-index">GLOBAL JOB DEFAULTS</span><label class="field-label">Default title<input bind:value={configuration.job_defaults.upload.content.title} /></label><label class="field-label">Default description<textarea bind:value={configuration.job_defaults.upload.content.description} rows="3"></textarea></label></div></div></section>
+      <section class="form-page"><div class="section-heading"><div><span class="section-kicker">Persistent app configuration</span><h2>Workspace settings</h2></div><button class="primary-action" onclick={saveSettings}>Save app.yml</button></div><div class="settings-grid"><div class="form-card"><span class="card-index">PATHS</span><label class="field-label">Source directory<input bind:value={configuration.source_dir} /></label><label class="field-label">Output directory<input bind:value={configuration.output_dir} /></label></div><div class="form-card"><span class="card-index">CREDENTIAL STATUS</span>{#each platforms as platform}<div class="health-row"><span class:healthy={credentials[platform]}></span><b>{platform}</b><small>{credentials[platform] ? 'configured' : 'not configured'}</small><button class="text-button" onclick={() => probeCredential(platform)}>Probe</button>{#if probeResults[platform]}<span class:healthy={probeResults[platform] === 'ok'}></span><small>{probeResults[platform]}</small>{/if}</div>{/each}</div><div class="form-card wide"><span class="card-index">GLOBAL JOB DEFAULTS</span><label class="field-label">Default title<input bind:value={configuration.job_defaults.upload.content.title} /></label><label class="field-label">Default description<textarea bind:value={configuration.job_defaults.upload.content.description} rows="3"></textarea></label></div></div></section>
     {/if}
   </main>
 </div>

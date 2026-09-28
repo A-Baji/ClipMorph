@@ -25,6 +25,7 @@ field reappears.
 - [Hugging Face](#hugging-face-hugging_face_)
 - [Troubleshooting](#troubleshooting)
 - [Verification checklist](#verification-checklist)
+- [Verify credentials](#verify-credentials)
 - [Official documentation](#official-documentation)
 
 ## Where credentials live
@@ -565,21 +566,32 @@ Run these after filling in the file. None of them print a credential value.
 3. A first-upload dry run: `clipmorph job create sources/video.mp4 --dry-run`
    validates and resolves configuration without publishing, confirming the
    source and layout side of the setup. The first real upload for a platform is
-   the only step that proves the credential works against the provider — and it
-   is the step that publishes something, so post to a test or private account
-   first.
+   the step that proves the credential works against the provider end to end —
+   and it is the step that publishes something, so post to a test or private
+   account first.
 4. Read the provider's own console afterwards to confirm the request arrived
    (YouTube **Video Manager**, Meta **Content**, X **Posts**, TikTok **Content
    posting analytics**, Hugging Face **last-login/activity**). That verifies the
    credential without you ever re-reading the secret.
 
-Two planned commands are listed here so you do not wait on them: `clipmorph
-auth status --probe` (per
-[#196](https://github.com/A-Baji/ClipMorph/issues/196)) will check each
-credential's network readability without printing values — note that it is a
-network call, unlike the local-only `auth status` — and `clipmorph doctor` (per
-[#194](https://github.com/A-Baji/ClipMorph/issues/194)) will add a static
-environment self-check.
+## Verify credentials
+
+`clipmorph auth status` only reports whether a credential is *present*. To
+prove it *works* against the provider, run the opt-in probe. It makes one
+read-only call per platform, never prints a value, and exits `1` when any
+probe fails. Two surfaces expose it:
+
+- **CLI:** `clipmorph auth status --probe [PLATFORM ...]` — probe the named
+  platforms, or omit the names to probe every known provider. The verdict is
+  printed as JSON. This is a network call, unlike the local-only
+  `clipmorph auth status`.
+- **Dashboard:** the Settings view's credential-status section has a **Probe**
+  button per platform, backed by `POST /api/v1/credentials/{platform}/probe`,
+  which returns the same masked verdict.
+
+Probing is never automatic — it never runs from preflight, startup, or the
+bare `auth status` command. Hugging Face has no read-only probe, so it always
+reports `unavailable` there.
 
 ## Official documentation
 

@@ -27,10 +27,15 @@ import webbrowser
 
 try:  # typer 0.27+ vendors click inside typer._click and drops the dependency.
     import typer._click as typer_click  # type: ignore[import-not-found]
+    if not hasattr(typer_click, "Choice"):  # the vendored click is trimmed.
+        from typer._types import TyperChoice as _TyperChoice
+
+        typer_click.Choice = _TyperChoice  # type: ignore[attr-defined]
 except ImportError:  # typer < 0.27 depends on the standalone click package.
     import click as typer_click  # type: ignore[no-redef]
 
 
+from rich.box import ASCII2, Box, HEAVY_HEAD
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
@@ -50,6 +55,7 @@ if hasattr(typer_click.exceptions, "Abort"):
 
 from clipmorph.job import default_data_dir
 from clipmorph.platforms import build_platform_default_config
+from clipmorph.platforms import SUPPORTED_PLATFORMS
 
 PROG_NAME = "clipmorph"
 
@@ -123,6 +129,20 @@ def _console() -> Console:
     return Console(highlight=False)
 
 
+def _table_box(console: Console) -> Box:
+    """Pick the grid style for one render.
+
+    rich's default grid is the heavy unicode box, but ``safe_box`` swaps in a
+    different unicode grid on some platforms (light box on legacy Windows
+    consoles, heavy box elsewhere), so the same piped output is not identical
+    on every OS. Pipes, log files, and captured output get a plain ASCII grid
+    everywhere; only a real terminal sees the unicode box. That grid is
+    ``ASCII2``, not ``ASCII``: rich's ``ASCII`` box draws continuous top and
+    bottom edges without the internal column dividers.
+    """
+    return HEAVY_HEAD if console.is_terminal else ASCII2
+
+
 def _tolerate_unencodable_output() -> None:
     """Let redirected streams replace characters they cannot encode.
 
@@ -178,15 +198,17 @@ def _print_table(title: str, rows: list[dict[str, Any]], columns: list[str],
     The title is wrapped as text too, so user data embedded in it (a layout
     name, for example) is never read as rich markup.
     """
-    table = Table(title=_cell(title), title_justify="left", header_style="bold")
+    console = _console()
+    table = Table(title=_cell(title), title_justify="left", header_style="bold",
+                   box=_table_box(console))
     for column in columns:
         table.add_column(_column_label(column), overflow="fold",
                          no_wrap=column in nowrap)
     for row in rows:
         table.add_row(*[_cell(row.get(column)) for column in columns])
-    _console().print(table)
+    console.print(table)
     if not rows:
-        _console().print(Text("(no entries)", style="dim"))
+        console.print(Text("(no entries)", style="dim"))
 
 
 def _print_fields(title: str, fields: list[tuple[str, Any]]) -> None:
@@ -495,20 +517,42 @@ def doctor_command(
 
 
 @auth_app.command("status")
-def auth_status_command(ctx: typer.Context, json_output: JsonOption = False,
-                        data_dir: DataDirOption = None,
-                        app_config: AppConfigOption = None) -> None:
+def auth_status_command(
+        ctx: typer.Context,
+        json_output: JsonOption = False,
+        probe: Annotated[bool, typer.Option(
+            "--probe", help="Probe configured credentials over the network with "
+            "one read-only call per platform; prints the verdict as JSON. "
+            "Exits 1 when any probe fails.")] = False,
+        platforms: Annotated[Optional[list[str]], typer.Argument(
+            help="Platforms to probe; accepts any supported platform plus "
+            "hugging_face. Omit to probe every known provider.",
+            click_type=typer_click.Choice(
+                [*SUPPORTED_PLATFORMS, "hugging_face"]))] = None,
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
     """Show which platforms have at least one configured credential."""
-    from clipmorph.auth import credential_status
+    from clipmorph.auth import credential_status, load_auth_config
 
-    status = credential_status()
-    if json_output:
-        _print_json(status)
+    selected_data_dir, _ = _resolve_paths(ctx, data_dir, app_config)
+    if not probe:
+        status = credential_status()
+        if json_output:
+            _print_json(status)
+            return
+        _print_table("Credentials",
+                     [{"platform": platform, "configured": _cell(value)}
+                      for platform, value in status.items()],
+                     ["platform", "configured"])
         return
-    _print_table("Credentials",
-                 [{"platform": platform, "configured": _cell(value)}
-                  for platform, value in status.items()],
-                 ["platform", "configured"])
+    load_auth_config(selected_data_dir)
+    from clipmorph.auth_probe import probe_credentials
+    selected = (list(platforms) if platforms
+                else [*SUPPORTED_PLATFORMS, "hugging_face"])
+    result = probe_credentials(selected)
+    _print_json(result)
+    if any(entry["probe"] == "failed" for entry in result.values()):
+        raise typer.Exit(1)
 
 
 @auth_app.command("set")

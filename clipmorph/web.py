@@ -138,6 +138,11 @@ def create_app(data_dir: str | Path | None = None,
             fail(422, "invalid_credentials", str(error))
         return {"credentials": credential_status()}
 
+    @app.post("/api/v1/credentials/{platform}/probe")
+    def probe_credential(platform: str):
+        from clipmorph.auth_probe import probe_credentials
+        return probe_credentials([platform])[platform]
+
     @app.get("/api/v1/sources")
     def list_sources():
         directory = source_root()

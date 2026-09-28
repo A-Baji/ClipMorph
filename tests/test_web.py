@@ -271,6 +271,22 @@ class WebApiTests(unittest.TestCase):
                     f"/api/v1/jobs/{job_id}/artifacts/{artifact_id}?confirm=true")
                 self.assertEqual(deleted.status_code, 200, deleted.text)
 
+    def test_credential_probe_route_returns_the_verdict(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            with TestClient(create_app(data_dir)) as client:
+                with patch("clipmorph.auth_probe.probe_credentials",
+                           return_value={"youtube": {
+                               "configured": True, "probe": "ok",
+                               "detail": "refresh token accepted"}}) as probe_fn:
+                    response = client.post("/api/v1/credentials/youtube/probe")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json(), {
+                "configured": True, "probe": "ok",
+                "detail": "refresh token accepted"})
+            probe_fn.assert_called_once_with(["youtube"])
+
     def test_checkpoint_acceptance_rejects_stale_revisions(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
