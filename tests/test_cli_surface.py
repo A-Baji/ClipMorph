@@ -36,9 +36,10 @@ GLOBAL_OPTIONS = ("--data-dir", "--app-config")
 # ``(name, required)`` pairs. ``--help`` is provided by the parser and omitted.
 COMMANDS: dict[tuple[str, ...], tuple[tuple[str, ...], tuple[str, ...],
                                      tuple[tuple[str, bool], ...]]] = {
-    (): (GLOBAL_OPTIONS, ("init", "web", "auth", "job", "layout"), ()),
+    (): (GLOBAL_OPTIONS, ("init", "web", "doctor", "auth", "job", "layout"), ()),
     ("init",): (("--config-path",) + GLOBAL_OPTIONS, (), ()),
     ("web",): (("--host", "--port") + GLOBAL_OPTIONS, (), ()),
+    ("doctor",): (("--json", "--source") + GLOBAL_OPTIONS, (), ()),
     ("auth",): ((), ("status", "set", "twitter"), ()),
     ("auth", "status"): (("--json",) + GLOBAL_OPTIONS, (), ()),
     ("auth", "set"): (GLOBAL_OPTIONS, (), (("platform", True),)),

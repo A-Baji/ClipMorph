@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added ruff (E9,F), typed mypy (0 issues across `clipmorph/`), and coverage reporting as CI gates, a `dev` package extra for the tooling, and a workflow concurrency group that cancels superseded runs.
 - Added the authentication setup guide `docs/AUTHENTICATION.md` with step-by-step credential generation for every provider section of `auth.yaml`.
 - Added the platform extension guide `docs/PLATFORM_EXTENSION_GUIDE.md`, which lists every touchpoint a new platform has to reach, and the `PlatformCoverageDriftTests` drift suite in `tests/test_platforms.py` that fails when a platform is missing from any of them.
+- Added `clipmorph doctor [--json] [--source PATH]`, a read-only environment health check (FFmpeg/FFprobe binaries, app.yml, source/output directories, layouts, fonts, credentials, transcription device, and optional source media) that prints a text report by default and exits `0` when no check failed (warnings allowed) or `1` when at least one failed.
 
 ### Changed
 

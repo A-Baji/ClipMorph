@@ -473,6 +473,27 @@ def web_command(
     uvicorn.run(create_app(selected_data_dir, selected_config), host=host, port=port)
 
 
+@app.command("doctor")
+def doctor_command(
+        ctx: typer.Context,
+        json_output: JsonOption = False,
+        source: Annotated[Optional[Path], typer.Option(
+            "--source", help="Also probe this source file's media streams.")] = None,
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """Check the local environment health without writing any state."""
+    from clipmorph.doctor import _print_text_report, run_checks
+
+    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    checks = run_checks(selected_data_dir, selected_config, source)
+    if json_output:
+        _print_json({"checks": checks})
+    else:
+        _print_text_report(checks)
+    if any(check["status"] == "failed" for check in checks):
+        raise typer.Exit(1)
+
+
 @auth_app.command("status")
 def auth_status_command(ctx: typer.Context, json_output: JsonOption = False,
                         data_dir: DataDirOption = None,
