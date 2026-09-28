@@ -222,3 +222,4 @@ clipmorph-version-manager*.pem
 # on this workstation and are installed by the driver; nothing here is
 # committed.
 .opencode/
+.agents/

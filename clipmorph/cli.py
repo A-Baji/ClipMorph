@@ -21,12 +21,28 @@ from typing import Annotated, Any, Literal, Optional
 import uuid
 import webbrowser
 
-import click
+try:  # typer 0.27+ vendors click inside typer._click and drops the dependency.
+    import typer._click as typer_click
+except ImportError:  # typer < 0.27 depends on the standalone click package.
+    import click as typer_click
+
+
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 import typer
 import yaml
+# run_cli maps the exception tree the installed typer actually raises. 0.27
+# detached typer.Exit/Abort onto its own RuntimeError classes and its vendored
+# exceptions module lost the click Exit/Abort exports, so resolve both sides.
+_USAGE_ERROR = typer_click.exceptions.UsageError
+_CLICK_EXCEPTION = typer_click.exceptions.ClickException
+_EXIT_ERRORS: tuple[type[BaseException], ...] = (typer.Exit,)
+_ABORT_ERRORS: tuple[type[BaseException], ...] = (typer.Abort,)
+if hasattr(typer_click.exceptions, "Exit"):
+    _EXIT_ERRORS += (typer_click.exceptions.Exit,)
+if hasattr(typer_click.exceptions, "Abort"):
+    _ABORT_ERRORS += (typer_click.exceptions.Abort,)
 
 from clipmorph.job import default_data_dir
 from clipmorph.platforms import build_platform_default_config
@@ -122,9 +138,8 @@ def _tolerate_unencodable_output() -> None:
             continue
         try:
             reconfigure(errors="backslashreplace")
-        except (OSError, ValueError) as error:  # pragma: no cover
-            if "closed" not in str(error):
-                raise
+        except (OSError, ValueError):  # pragma: no cover - exotic streams
+            pass  # the stream keeps its current behaviour; nothing to escape
 
 
 def _cell(value: Any, style: str = "") -> Text:
@@ -1065,10 +1080,10 @@ app.add_typer(job_app, name="job")
 app.add_typer(layout_app, name="layout")
 job_app.add_typer(artifact_app, name="artifacts")
 
-_command: click.Command | None = None
+_command: Any = None
 
 
-def _cli_command() -> click.Command:
+def _cli_command() -> Any:
     """Return the click command tree for the typer app, built once per process."""
     global _command
     if _command is None:
@@ -1083,15 +1098,15 @@ def run_cli(argv: list[str] | None = None) -> int:
     try:
         return _cli_command().main(args=args, prog_name=PROG_NAME,
                                    standalone_mode=False) or 0
-    except click.exceptions.Exit as error:  # includes typer.Exit.
-        return error.exit_code or 0
-    except click.exceptions.UsageError as error:
+    except _EXIT_ERRORS as error:
+        return getattr(error, "exit_code", 0) or 0
+    except _USAGE_ERROR as error:
         print(str(error) or "usage error", file=sys.stderr)
         return 2
-    except click.exceptions.ClickException as error:
+    except _CLICK_EXCEPTION as error:
         print(str(error), file=sys.stderr)
         return 2
-    except click.exceptions.Abort:
+    except _ABORT_ERRORS:
         return 130
     except KeyboardInterrupt:
         return 130

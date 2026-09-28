@@ -14,7 +14,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import click
 import typer
 
 from clipmorph.cli import app
@@ -87,8 +86,17 @@ COMMANDS: dict[tuple[str, ...], tuple[tuple[str, ...], tuple[str, ...],
     ("layout", "delete"): (("--yes",) + GLOBAL_OPTIONS, (), (("layout_id", True),)),
 }
 
-PANEL_BORDER_TOP = "\u250c"
-PANEL_BORDER_BOTTOM = "\u2514"
+# typer 0.27 renders the upload argument's metavar in the Arguments panel where
+# older typer renders the parameter name; accept either display.
+ARGUMENT_DISPLAY_ALIASES: dict[tuple[str, ...],
+                              set[tuple[tuple[str, bool], ...]]] = {
+    ("job", "upload"): {(("ID | RETRY ID PLATFORM", False),)},
+}
+
+# rich downgrades rounded corners to square on legacy Windows consoles, so
+# accept both families; the side border is the same glyph either way.
+PANEL_BORDER_TOPS = ("\u250c", "\u256d")
+PANEL_BORDER_BOTTOMS = ("\u2514", "\u2570")
 PANEL_BORDER_SIDE = "\u2502"
 CELL_SEPARATOR = re.compile(r"\s{2,}")
 OPTION_PATTERN = re.compile(r"^--[a-z][a-z0-9-]*$")
@@ -124,9 +132,10 @@ def panel_rows(help_output: str, panel: str) -> list[list[str]]:
     for line in help_output.splitlines():
         stripped = line.strip()
         if not inside:
-            inside = stripped.startswith(PANEL_BORDER_TOP) and f" {panel} " in stripped
+            inside = (stripped.startswith(PANEL_BORDER_TOPS)
+                      and f" {panel} " in stripped)
             continue
-        if stripped.startswith(PANEL_BORDER_BOTTOM):
+        if stripped.startswith(PANEL_BORDER_BOTTOMS):
             break
         if not stripped.startswith(PANEL_BORDER_SIDE):
             break
@@ -153,17 +162,27 @@ def arguments_of(help_output: str) -> tuple[tuple[str, bool], ...]:
             required, name = True, row[1]
         elif ARGUMENT_PATTERN.match(row[0]):
             required, name = False, row[0]
+        elif len(row) >= 2 and row[1].startswith("<"):
+            # typer 0.27 renders the declared metavar (e.g. the variadic
+            # upload argument) in place of the parameter name.
+            required, name = False, row[0]
         else:
             continue
         arguments.append((name, required))
     return tuple(arguments)
 
 
-def walk_click(command: click.Command, prefix: tuple[str, ...] = ()):
-    """Yield every command path of the click tree built from the typer app."""
+def walk_click(command, prefix: tuple[str, ...] = ()):
+    """Yield every command path of the command tree typer exposes.
+
+    typer 0.27 vendored its click clone, so the tree is walked through the
+    click-like ``.commands`` mapping every group exposes instead of importing
+    a click module directly.
+    """
     yield prefix
-    if isinstance(command, click.Group):
-        for name, child in command.commands.items():
+    children = getattr(command, "commands", None)
+    if children:
+        for name, child in children.items():
             yield from walk_click(child, (*prefix, name))
 
 
@@ -180,7 +199,8 @@ class CommandSurfaceTests(unittest.TestCase):
                 self.assertEqual(options_of(rendered), tuple(sorted(options)))
                 self.assertEqual(subcommands_of(rendered),
                                  tuple(sorted(subcommands)))
-                self.assertEqual(arguments_of(rendered), arguments)
+                accepted = {arguments} | ARGUMENT_DISPLAY_ALIASES.get(path, set())
+                self.assertIn(arguments_of(rendered), accepted)
 
 
 class ParityDocumentTests(unittest.TestCase):
