@@ -22,9 +22,9 @@ import uuid
 import webbrowser
 
 try:  # typer 0.27+ vendors click inside typer._click and drops the dependency.
-    import typer._click as typer_click
+    import typer._click as typer_click  # type: ignore[import-not-found]
 except ImportError:  # typer < 0.27 depends on the standalone click package.
-    import click as typer_click
+    import click as typer_click  # type: ignore[no-redef]
 
 
 from rich.console import Console
