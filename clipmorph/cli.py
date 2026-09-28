@@ -27,6 +27,10 @@ import webbrowser
 
 try:  # typer 0.27+ vendors click inside typer._click and drops the dependency.
     import typer._click as typer_click  # type: ignore[import-not-found]
+    if not hasattr(typer_click, "Choice"):  # the vendored click is trimmed.
+        from typer._types import TyperChoice as _TyperChoice
+
+        typer_click.Choice = _TyperChoice  # type: ignore[attr-defined]
 except ImportError:  # typer < 0.27 depends on the standalone click package.
     import click as typer_click  # type: ignore[no-redef]
 
