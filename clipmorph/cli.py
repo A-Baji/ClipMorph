@@ -35,6 +35,7 @@ except ImportError:  # typer < 0.27 depends on the standalone click package.
     import click as typer_click  # type: ignore[no-redef]
 
 
+from rich.box import ASCII2, Box, HEAVY_HEAD
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
@@ -128,6 +129,20 @@ def _console() -> Console:
     return Console(highlight=False)
 
 
+def _table_box(console: Console) -> Box:
+    """Pick the grid style for one render.
+
+    rich's default grid is the heavy unicode box, but ``safe_box`` swaps in a
+    different unicode grid on some platforms (light box on legacy Windows
+    consoles, heavy box elsewhere), so the same piped output is not identical
+    on every OS. Pipes, log files, and captured output get a plain ASCII grid
+    everywhere; only a real terminal sees the unicode box. That grid is
+    ``ASCII2``, not ``ASCII``: rich's ``ASCII`` box draws continuous top and
+    bottom edges without the internal column dividers.
+    """
+    return HEAVY_HEAD if console.is_terminal else ASCII2
+
+
 def _tolerate_unencodable_output() -> None:
     """Let redirected streams replace characters they cannot encode.
 
@@ -183,15 +198,17 @@ def _print_table(title: str, rows: list[dict[str, Any]], columns: list[str],
     The title is wrapped as text too, so user data embedded in it (a layout
     name, for example) is never read as rich markup.
     """
-    table = Table(title=_cell(title), title_justify="left", header_style="bold")
+    console = _console()
+    table = Table(title=_cell(title), title_justify="left", header_style="bold",
+                   box=_table_box(console))
     for column in columns:
         table.add_column(_column_label(column), overflow="fold",
                          no_wrap=column in nowrap)
     for row in rows:
         table.add_row(*[_cell(row.get(column)) for column in columns])
-    _console().print(table)
+    console.print(table)
     if not rows:
-        _console().print(Text("(no entries)", style="dim"))
+        console.print(Text("(no entries)", style="dim"))
 
 
 def _print_fields(title: str, fields: list[tuple[str, Any]]) -> None:
