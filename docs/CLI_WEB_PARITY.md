@@ -54,6 +54,7 @@ interruption.
 | `clipmorph --help`; `clipmorph init [--config-path PATH]` | Lightweight help; `-h` is accepted wherever `--help` is. init writes app.yml and adjacent auth.yaml, no media work. |
 | `clipmorph web [--host HOST] [--port PORT]` | Start API/dashboard; global `--data-dir` and `--app-config` precede the command. |
 | `clipmorph auth status [--json]`; `auth set PLATFORM`; `auth twitter` | Status only; secure prompt + auth.yaml update; existing Twitter/X OAuth flow. Never print secrets. |
+| `clipmorph auth status --probe [PLATFORM ...]` | Opt-in network probe; one read-only call per platform, masked verdict as JSON. Never automatic (not from preflight, startup, or the bare status command). Exits 1 when any probe fails; `unavailable` rows neither fail nor block. |
 | `clipmorph job create SOURCE [--job-configs FILE] [--config-dir DIR] [--dry-run] [--yes] [--json]` | SOURCE is a supported root-level file beneath `app.yml:source_dir` or that directory. Directory creation fans out over immediate files; JSONL is object-per-line, YAML is a list. Dry-run writes no job or manifest. |
 | `clipmorph job list [--status STATUS] [--json]`; `job get ID [--json]` | List/show manifest, effective config, checkpoint, artifacts and platform results; redact secrets. |
 | `clipmorph job update ID --patch FILE [--reopen] [--json]`; `job resume ID`; `job cancel ID --yes [--json]`; `job delete ID --yes` | Apply a validated per-job patch using the current config hash; persist finalized job.yml and apply #180 invalidation. Reopen completed work only with confirmation; source identity is immutable. |
@@ -85,6 +86,7 @@ root-level names under `source_dir`; validate before queueing.
 | `GET /health` | `200 {status:ok}`; no media imports. |
 | `GET/PUT /configuration` | Get config + credential status; PUT replaces validated full app.yml atomically; no secret values. A missing or mismatched `config_version` is `422 invalid_configuration` and leaves the file untouched; an absent stamp is filled in on save. |
 | `GET /credentials`; `PUT /credentials/{platform}` | Configured booleans only; PUT validates fields, saves auth.yaml, returns status only. |
+| `POST /credentials/{platform}/probe` | Executes the single-platform probe from `clipmorph/auth_probe.py`; always `200` with the masked verdict in the body, never a provider-mapped error. |
 | `GET/POST /sources` | List root-level supported files; multipart upload sanitizes basename, validates media, uniquifies collision, returns `201 {name,source}`. |
 | `GET/POST /layouts`; `GET/PATCH/DELETE /layouts/{id}` | Validated `{id,name,layout}` in app.yml. Delete requires `confirm=true`; materialized jobs remain valid. |
 | `GET /jobs?status=...`; `GET /jobs/{id}` | List/get source, status/checkpoint, timestamps, config, artifacts, platform results. Missing ID `404`. |
@@ -216,7 +218,7 @@ CONFIG_LAYERS.md remains authoritative for field meaning.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Help/startup/web | Health/startup | Service status | Lazy parser/config | App path/data-dir | app.yml/no job writes | CLI 0; API 200/422 | CLI lazy; web health |
 | Init/config/defaults | GET/PUT configuration | Settings/defaults/layout | App schema/path/atomic save/`config_version` | App fields | app.yml/auth template | CLI 0/2; API 200/422 | CLI init; web config; version guard |
-| Credentials | GET/PUT credentials | Masked status/secure form | Field allowlist/auth loader | No job field | auth.yaml | Never echo; invalid 422 | Auth/web mask/update |
+| Credentials | GET/PUT credentials; POST per-platform probe | Masked status/secure form/probe verdict | Field allowlist/auth loader | No job field | auth.yaml | Never echo; invalid 422; probe always 200 | Auth/web mask/update; probe masked |
 | Source upload/select | GET/POST sources | Picker/list/multiselect | Basename/media/nonempty/collision/root | general.source | Source root/manifest identity | CLI 2; API 201/422 | Upload/list/collision |
 | Single/multi create | POST jobs/jobs/bulk | New Job/source selection/shared overrides/results | Resolver/preflight/discovery/priority/dedup | One merged config per source | Per-source job.yml/manifest/output | CLI 0 or 1/2; API 202/200/422 | CLI/API differential; partial results |
 | JSONL/YAML/sidecars | Bulk fields after normalization | Import/per-source config | Safe parse/schema/source | Priority chain + defaults | Final job.yml/no patch | Syntax CLI 2/API 422; row failure | Parse/priority/all-clips tests |

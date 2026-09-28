@@ -1,0 +1,218 @@
+"""Read-only, opt-in credential health probes for each platform.
+
+Closes the gap between "credential present" (``clipmorph auth status``) and
+"credential works": every probe performs one cheap, authenticated, read-only
+call so a dead refresh token or page access token surfaces before a real
+upload starts. Probing is never automatic -- it runs only when a surface
+explicitly asks for it.
+
+Secrets are never printed, logged, or returned. Failure details go through
+``clipmorph.job.safe_error_message`` so credential-looking values are
+redacted with the same discipline job manifests use. Platform adapters are
+imported lazily inside each probe so the heavy SDKs stay out of the
+``--help`` path.
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Any, Callable
+
+import requests
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+
+from clipmorph.auth import credential_status
+from clipmorph.job import safe_error_message
+from clipmorph.twitter_auth import refresh_twitter_access_token
+
+# One attempt, no retry: this is a health check, not an upload. Instagram's
+# Graph GET is held to a tighter 10s bound per its own probe spec.
+_PROBE_TIMEOUT = 15
+
+
+def probe_credentials(platforms: list[str]) -> dict[str, dict[str, Any]]:
+    """Probe each named platform's credentials with one read-only call.
+
+    Returns ``{platform: {"configured": bool, "probe": "ok|failed|unavailable",
+    "detail": str}}``. ``unavailable`` rows (not configured, incomplete
+    credentials, no probe implemented, or interactive authorization required)
+    neither fail nor block; only ``failed`` rows fail the run.
+    """
+    status = credential_status()
+    result: dict[str, dict[str, Any]] = {}
+    for platform in platforms:
+        configured = bool(status.get(platform, False))
+        if platform == "hugging_face":
+            result[platform] = _record(configured, "unavailable",
+                                        "no read-only probe implemented")
+            continue
+        if not configured:
+            result[platform] = _record(False, "unavailable", "not configured")
+            continue
+        probe = _PROBES.get(platform)
+        if probe is None:
+            result[platform] = _record(configured, "unavailable",
+                                        "no read-only probe implemented")
+            continue
+        verdict, detail = probe()
+        result[platform] = _record(configured, verdict, detail)
+    return result
+
+
+def _record(configured: bool, probe: str, detail: str) -> dict[str, Any]:
+    return {"configured": configured, "probe": probe, "detail": detail}
+
+
+def _probe_youtube() -> tuple[str, str]:
+    """Prove the Google refresh token is live by refreshing it once.
+
+    No Data API call is made: a successful refresh is the zero-quota-cost
+    health check, and ``mine=True`` reads need a readonly-family scope the
+    upload token does not carry.
+    """
+    from clipmorph.upload_pipeline.platforms.youtube import YouTubeUploadPipeline
+
+    client_id = os.getenv("GOOGLE_CLIENT_ID")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+    refresh_token = os.getenv("GOOGLE_REFRESH_TOKEN")
+    if not all([client_id, client_secret, refresh_token]):
+        return "unavailable", "incomplete credentials"
+    try:
+        credentials = Credentials(
+            None,
+            refresh_token=refresh_token,
+            token_uri=YouTubeUploadPipeline.GOOGLE_TOKEN_URI,
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=[YouTubeUploadPipeline.YOUTUBE_UPLOAD_SCOPE],
+        )
+        credentials.refresh(Request())
+    except Exception as error:
+        return "failed", safe_error_message(str(error))
+    return "ok", "refresh token accepted"
+
+
+def _probe_instagram() -> tuple[str, str]:
+    """Check the Facebook page token and the GCS bucket independently.
+
+    The two sub-checks merge into one detail string so a partial failure
+    still reports the half that worked.
+    """
+    from clipmorph.upload_pipeline.platforms.instagram import InstagramUploadPipeline
+
+    try:
+        pipeline = InstagramUploadPipeline()
+    except Exception:
+        return "unavailable", "incomplete credentials"
+    graph_ok, graph_detail = _instagram_graph_check(pipeline)
+    gcs_ok, gcs_detail = _instagram_gcs_check(pipeline)
+    detail = f"{graph_detail}; {gcs_detail}"
+    return ("ok" if graph_ok and gcs_ok else "failed"), detail
+
+
+def _instagram_graph_check(pipeline: Any) -> tuple[bool, str]:
+    url = (f"{pipeline.FACEBOOK_GRAPH_BASE_URL}/{pipeline.api_version}/"
+           f"{pipeline.page_id}?fields=id&access_token={pipeline.access_token}")
+    try:
+        response = requests.get(url, timeout=10)
+        payload = response.json()
+    except Exception as error:
+        return False, f"graph api failed: {safe_error_message(str(error))}"
+    if response.status_code != 200:
+        return False, ("graph api failed: "
+                       f"{safe_error_message(f'status {response.status_code} {response.text}')}")
+    if payload.get("id") != pipeline.page_id:
+        return False, "graph api failed: page id mismatch"
+    return True, "graph api ok"
+
+
+def _instagram_gcs_check(pipeline: Any) -> tuple[bool, str]:
+    try:
+        pipeline._authenticate_google()
+        from google.cloud import storage
+        storage_client = storage.Client(credentials=pipeline.google_creds)
+        exists = storage_client.bucket(pipeline.gcs_bucket_name).exists()
+    except Exception as error:
+        return False, f"gcs bucket failed: {safe_error_message(str(error))}"
+    if not exists:
+        return False, "gcs bucket not found"
+    return True, "gcs bucket ok"
+
+
+def _probe_tiktok() -> tuple[str, str]:
+    """Prove the TikTok refresh token yields a working access token.
+
+    The pipeline is instantiated the same way ``run`` is; the refresh falls
+    back to the interactive browser flow only when there is no refresh token,
+    so that case is reported as ``unavailable`` instead of opening a browser.
+    """
+    from clipmorph.upload_pipeline.platforms.tiktok import TikTokUploadPipeline
+
+    try:
+        pipeline = TikTokUploadPipeline()
+    except Exception:
+        return "unavailable", "incomplete credentials"
+    if not pipeline.refresh_token:
+        return ("unavailable",
+                "interactive authorization required; run clipmorph auth set tiktok")
+    try:
+        access_token = pipeline._refresh_access_token()
+        response = requests.get(
+            "https://open.tiktokapis.com/v2/user/info/",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=_PROBE_TIMEOUT,
+        )
+        if response.status_code == 401:
+            access_token = pipeline._refresh_access_token()
+            response = requests.get(
+                "https://open.tiktokapis.com/v2/user/info/",
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=_PROBE_TIMEOUT,
+            )
+    except Exception as error:
+        return "failed", safe_error_message(str(error))
+    if response.status_code == 200:
+        return "ok", "user info returned"
+    return ("failed",
+            safe_error_message(f"status {response.status_code} {response.text}"))
+
+
+def _probe_twitter() -> tuple[str, str]:
+    """Prove the X access token can read the authenticated user.
+
+    ``refresh_twitter_access_token`` is the reusable refresh logic;
+    ``authorize_twitter`` (the interactive consent flow) is never invoked, so
+    the probe never opens a browser window.
+    """
+    access_token = os.getenv("TWITTER_OAUTH2_ACCESS_TOKEN")
+    if not access_token:
+        return "unavailable", "incomplete credentials"
+    try:
+        session = requests.Session()
+        session.headers.update({"Authorization": f"Bearer {access_token}"})
+        response = session.get("https://api.x.com/2/users/me",
+                               timeout=_PROBE_TIMEOUT)
+        if response.status_code == 401:
+            try:
+                values = refresh_twitter_access_token()
+            except Exception:
+                return "failed", "token expired; rerun clipmorph auth twitter"
+            session.headers.update(
+                {"Authorization": f"Bearer {values['oauth2_access_token']}"})
+            response = session.get("https://api.x.com/2/users/me",
+                                   timeout=_PROBE_TIMEOUT)
+    except Exception as error:
+        return "failed", safe_error_message(str(error))
+    if response.status_code == 200:
+        return "ok", "user info returned"
+    return ("failed",
+            safe_error_message(f"status {response.status_code} {response.text}"))
+
+
+_PROBES: dict[str, Callable[[], tuple[str, str]]] = {
+    "youtube": _probe_youtube,
+    "instagram": _probe_instagram,
+    "tiktok": _probe_tiktok,
+    "twitter": _probe_twitter,
+}

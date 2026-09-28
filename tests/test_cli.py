@@ -38,6 +38,20 @@ def invoke_json(argv):
     return code, json.loads(output)
 
 
+# rich renders Unicode box-drawing characters when stdout is a UTF-8 stream and
+# ASCII when it is not; the credential-status snapshot compares the table
+# content, so both spellings normalize to the same ASCII grid.
+_BOX_TO_ASCII = {
+    "┌": "+", "─": "-", "┬": "+", "┐": "+",
+    "│": "|", "├": "+", "┼": "+", "┤": "+",
+    "└": "+", "┴": "+", "┘": "+",
+}
+
+
+def _normalize_box(text):
+    return "".join(_BOX_TO_ASCII.get(char, char) for char in text)
+
+
 def seed_job(data_dir, source_name="clip.mp4", configuration=None):
     """Create one job directly through the service, without the workflow."""
     source_dir = data_dir / "sources"
@@ -625,6 +639,75 @@ class JobCommandTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(result, {"pruned": [obsolete_id], "bytes_freed": 12})
             self.assertFalse(obsolete_path.exists())
+
+
+class AuthStatusProbeTests(unittest.TestCase):
+    def test_auth_status_without_probe_is_unchanged(self):
+        from clipmorph.auth import AUTH_ENVIRONMENT_KEYS
+        cleared = {key: "" for fields in AUTH_ENVIRONMENT_KEYS.values()
+                   for key in fields.values()}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            with patch.dict(os.environ, {**WIDE_TERMINAL, **cleared}):
+                code, output = invoke(["--data-dir", str(data_dir), "auth", "status"])
+
+        self.assertEqual(code, 0)
+        actual = [line.rstrip() for line in _normalize_box(output).splitlines()
+                  if line.strip()]
+        self.assertEqual(actual, [
+            "Credentials",
+            "+--------------+------------+",
+            "| Platform     | Configured |",
+            "+--------------+------------+",
+            "| youtube      | no         |",
+            "| instagram    | no         |",
+            "| tiktok       | no         |",
+            "| twitter      | no         |",
+            "| hugging_face | no         |",
+            "+--------------+------------+",
+        ])
+
+    def test_auth_status_with_probe_runs_the_probe_module(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            fake = {"youtube": {"configured": True, "probe": "ok",
+                                "detail": "refresh token accepted"}}
+            with patch("clipmorph.auth_probe.probe_credentials",
+                       return_value=fake) as probe_fn:
+                code, output = invoke(["--data-dir", str(data_dir), "auth",
+                                       "status", "--probe", "youtube"])
+
+        self.assertEqual(code, 0)
+        probe_fn.assert_called_once_with(["youtube"])
+        self.assertIn("refresh token accepted", output)
+
+    def test_auth_status_with_probe_and_no_platforms_probes_all(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            fake = {platform: {"configured": False, "probe": "unavailable",
+                               "detail": "not configured"}
+                    for platform in ("youtube", "instagram", "tiktok", "twitter",
+                                     "hugging_face")}
+            with patch("clipmorph.auth_probe.probe_credentials",
+                       return_value=fake) as probe_fn:
+                code, output = invoke(["--data-dir", str(data_dir), "auth",
+                                       "status", "--probe"])
+
+        self.assertEqual(code, 0)
+        probe_fn.assert_called_once_with(
+            ["youtube", "instagram", "tiktok", "twitter", "hugging_face"])
+
+    def test_auth_status_with_probe_exits_1_when_a_probe_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            fake = {"youtube": {"configured": True, "probe": "failed",
+                                "detail": "refresh failed"}}
+            with patch("clipmorph.auth_probe.probe_credentials", return_value=fake):
+                code, output = invoke(["--data-dir", str(data_dir), "auth",
+                                       "status", "--probe", "youtube"])
+
+        self.assertEqual(code, 1)
+        self.assertIn("failed", output)
 
 
 if __name__ == "__main__":

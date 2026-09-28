@@ -137,6 +137,7 @@ rules.
 
 - Confirm the relevant env vars are set for the target platform.
 - Re-check the platform scopes and refresh tokens.
+- Run `clipmorph auth status --probe` to prove each credential works with one read-only call per platform (it prints a masked verdict and exits `1` when any probe fails); the dashboard Settings view has the same probe per platform.
 - Use dry runs and partial-failure summaries to inspect what was blocked and what succeeded.
 
 ## Features

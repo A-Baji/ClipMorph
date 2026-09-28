@@ -50,6 +50,7 @@ if hasattr(typer_click.exceptions, "Abort"):
 
 from clipmorph.job import default_data_dir
 from clipmorph.platforms import build_platform_default_config
+from clipmorph.platforms import SUPPORTED_PLATFORMS
 
 PROG_NAME = "clipmorph"
 
@@ -495,20 +496,42 @@ def doctor_command(
 
 
 @auth_app.command("status")
-def auth_status_command(ctx: typer.Context, json_output: JsonOption = False,
-                        data_dir: DataDirOption = None,
-                        app_config: AppConfigOption = None) -> None:
+def auth_status_command(
+        ctx: typer.Context,
+        json_output: JsonOption = False,
+        probe: Annotated[bool, typer.Option(
+            "--probe", help="Probe configured credentials over the network with "
+            "one read-only call per platform; prints the verdict as JSON. "
+            "Exits 1 when any probe fails.")] = False,
+        platforms: Annotated[Optional[list[str]], typer.Argument(
+            help="Platforms to probe; accepts any supported platform plus "
+            "hugging_face. Omit to probe every known provider.",
+            click_type=typer_click.Choice(
+                [*SUPPORTED_PLATFORMS, "hugging_face"]))] = None,
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
     """Show which platforms have at least one configured credential."""
-    from clipmorph.auth import credential_status
+    from clipmorph.auth import credential_status, load_auth_config
 
-    status = credential_status()
-    if json_output:
-        _print_json(status)
+    selected_data_dir, _ = _resolve_paths(ctx, data_dir, app_config)
+    if not probe:
+        status = credential_status()
+        if json_output:
+            _print_json(status)
+            return
+        _print_table("Credentials",
+                     [{"platform": platform, "configured": _cell(value)}
+                      for platform, value in status.items()],
+                     ["platform", "configured"])
         return
-    _print_table("Credentials",
-                 [{"platform": platform, "configured": _cell(value)}
-                  for platform, value in status.items()],
-                 ["platform", "configured"])
+    load_auth_config(selected_data_dir)
+    from clipmorph.auth_probe import probe_credentials
+    selected = (list(platforms) if platforms
+                else [*SUPPORTED_PLATFORMS, "hugging_face"])
+    result = probe_credentials(selected)
+    _print_json(result)
+    if any(entry["probe"] == "failed" for entry in result.values()):
+        raise typer.Exit(1)
 
 
 @auth_app.command("set")
