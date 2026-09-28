@@ -3,6 +3,10 @@
 This is the source-linked policy reference for the upload capability layer. The
 runtime policy version is the publication date of the matrix.
 
+Adding a platform or a rule? [PLATFORM_EXTENSION_GUIDE.md](PLATFORM_EXTENSION_GUIDE.md)
+is the step-by-step checklist, and the drift suite in `tests/test_platforms.py`
+fails when a platform is missing from any touchpoint this document names.
+
 ## Static artifact rules
 
 | Platform | API/product source | Static rules enforced |
