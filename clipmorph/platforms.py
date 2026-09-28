@@ -1,9 +1,15 @@
-"""Shared platform registry and metadata rules.
+"""Shared platform registry and per-platform upload defaults.
 
-Single source of truth for which platforms ClipMorph supports and how
-platform-specific metadata is derived. CLI choices, workflow defaults,
-service validation, per-platform configuration defaults, policy validation,
-and web surface lists all read from here instead of duplicating the set.
+Single source of truth for which platforms ClipMorph supports and for each
+platform's plain upload defaults. CLI choices, workflow defaults, service
+validation, per-platform configuration defaults, and web surface lists all read
+from here instead of duplicating the set.
+
+Ownership boundary: the values here are *defaults* (category, privacy status,
+share-to-feed, thumbnail offset), not content rules. How ``upload.content``
+(title, description, tags) becomes a platform payload, and every character
+limit applied to it, is owned by ``clipmorph.policy``; this module only reports
+which platform a default belongs to.
 """
 
 from __future__ import annotations
@@ -22,8 +28,8 @@ PLATFORM_TITLE = {
     "twitter": "Twitter/X",
 }
 
-# Per-platform upload defaults, previously duplicated in cli.build_platform_default_config
-# and inlined in upload_pipeline metadata mapping.
+# Per-platform upload defaults, consumed by the upload pipeline when it folds
+# them into composed metadata and by the CLI runtime summary.
 PLATFORM_DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
     "youtube": {"category": "22", "privacy_status": "public"},
     "instagram": {"share_to_feed": True, "thumb_offset": 0},

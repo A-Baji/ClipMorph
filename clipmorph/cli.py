@@ -6,6 +6,10 @@ configuration failure, and ``130`` an interruption. Human output is rendered
 with rich, which mutes colour on its own when stdout is not a terminal. Every
 command that used to print JSON keeps a ``--json`` flag that reproduces the
 previous payload unchanged, so machine consumers pass ``--json`` explicitly.
+
+Per-platform upload defaults are owned by ``clipmorph.platforms`` and surface
+here only as the runtime summary; how ``upload.content`` becomes a platform
+payload belongs to ``clipmorph.policy``.
 """
 
 from __future__ import annotations

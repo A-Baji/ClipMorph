@@ -140,7 +140,8 @@ without an explicit user action.
   `tests/test_platforms.py`, `tests/test_layout.py`,
   `tests/test_layout_rendering.py`, `tests/test_transcript.py`,
   `tests/test_transcription.py`, `tests/test_preflight.py`,
-  `tests/test_upload_platforms.py`, `tests/test_oauth.py`,
+  `tests/test_upload_platforms.py`, `tests/test_policy_metadata.py`,
+  `tests/test_oauth.py`,
   `tests/test_reconciliation.py`, `tests/test_retention.py`,
   `tests/test_service.py`, `tests/test_job_manifest.py`,
   `tests/test_auth.py`, `tests/test_cli.py`, `tests/test_cli_surface.py`, and
