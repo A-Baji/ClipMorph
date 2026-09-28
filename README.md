@@ -43,6 +43,14 @@ be an immediate file under `source_dir`.
 - `clipmorph job artifacts list|preview|download|rename|delete|prune ...` — manage registered artifact revisions; `prune` applies the `app.yml:retention` policy.
 
 A directory `job create` scans the root of `app.yml:source_dir` only; unsupported or missing sources are skipped and reported per source, while valid jobs still proceed (no group manifest is persisted). The web API exposes the same lifecycle at `/api/v1/`; see `docs/CLI_WEB_PARITY.md` for the contract.
+
+Commands that report records — `auth status`, `job create`, `job list`, `job get`,
+`job update`, `job cancel`, `job review`, `job upload`, `job artifacts list`,
+`job artifacts prune`, and `layout list|create|get` — render a formatted table
+for humans and print the machine-readable JSON payload when `--json` is passed.
+Colour is dropped automatically when output is redirected. `--data-dir` and
+`--app-config` are accepted before a command group and after a leaf command (not
+between a group and its subcommand).
 ### Local dashboard
 
 Install the optional web dependencies from the tagged GitHub repository with `python -m pip install "clipmorph[web] @ git+https://github.com/A-Baji/ClipMorph.git@vX.Y.Z"` (the base package and its `web` extra are currently distributed from tagged GitHub releases; PyPI publication is planned but not yet available),

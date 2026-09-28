@@ -216,3 +216,10 @@ __marimo__/
 clipmorph-version-manager*.pem
 .mypy_cache/
 .ruff_cache/
+
+# Machine-local OpenCode automation surface: the project /review command
+# body and the reviewer rubric skill live under .opencode/ and .agents/
+# on this workstation and are installed by the driver; nothing here is
+# committed.
+.opencode/
+.agents/
