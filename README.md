@@ -120,6 +120,8 @@ rules.
 
 ## Troubleshooting
 
+- Run `clipmorph doctor` for a one-shot, read-only health check of this machine (FFmpeg, app configuration, directories, layouts, fonts, credentials, transcription device) before deeper debugging; add `--json` for a machine-readable report.
+
 ### FFmpeg problems
 
 - Ensure FFmpeg and FFprobe are available in the project runtime path.
