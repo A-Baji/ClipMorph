@@ -7,10 +7,33 @@ runtime policy version is the publication date of the matrix.
 
 | Platform | API/product source | Static rules enforced |
 | --- | --- | --- |
-| YouTube | [encoding settings](https://support.google.com/youtube/answer/1722171) | MP4/H.264 and supported audio guidance; title/metadata limits remain adapter policy where applicable |
+| YouTube | [encoding settings](https://support.google.com/youtube/answer/1722171) | MP4/H.264 and supported audio guidance; title/description/keyword limits follow the upload metadata rules below |
 | Instagram Reels | [Graph API v25.0 media](https://developers.facebook.com/docs/instagram-api/reference/ig-user/media) | 3-900 seconds, max 1920 horizontal pixels, max 300 MB, H.264/HEVC, 23-60 FPS, AAC audio |
 | TikTok | [media transfer guide](https://developers.tiktok.com/doc/content-posting-api-media-transfer-guide) | MP4/MOV/WebM, H.264/H.265/VP8/VP9, 23-60 FPS, 360-4096 pixel dimensions, max 4 GB, minimum 3 seconds |
 | X | [API v2.168 upload](https://docs.x.com/x-api/media/upload-media) and [create posts](https://docs.x.com/x-api/posts/create-post) | one video per post, default 20 minutes/8 GB; account tier may allow 125 minutes/16 GB |
+
+## Upload metadata rules
+
+`clipmorph/policy.py` turns `upload.content` (`title`, `description`, `tags`)
+into the fields an adapter sends; the adapters only transport the shaped values.
+The table mirrors `CAPABILITY_MATRIX`, and `tests/test_policy_metadata.py` fails
+if the two drift apart.
+
+| Platform | content_mode | output_keys | caption_limit |
+| --- | --- | --- | --- |
+| youtube | separate | title, description, keywords | 5000 |
+| instagram | caption | caption | 2200 |
+| tiktok | combined | title | 4000 |
+| twitter | combined | tweet_text | 280 |
+
+`separate` keeps the three content fields apart: YouTube trims its title to 100
+characters, its keyword string to 500 characters, and its description to
+`caption_limit` (substituting a placeholder description when none is set).
+`combined` and `caption` compose title, hashtags, and description into one
+field, prioritized title > hashtags > description, truncated to `caption_limit`.
+Per-platform upload defaults (category, privacy status, share-to-feed,
+thumbnail offset) are plain values owned by `clipmorph/platforms.py`, not
+content rules.
 
 ## Dynamic account rules
 
@@ -35,4 +58,4 @@ derived artifact is supplied.
 - Policy version, warnings, transformations, blockers, and artifact references
 belong in job/platform state.
 
-Last reviewed: 2026-09-23.
+Last reviewed: 2026-09-27.

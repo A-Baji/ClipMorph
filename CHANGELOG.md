@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Moved every per-platform upload metadata rule out of `clipmorph/upload_pipeline/__init__.py` into `clipmorph/policy.py`: `build_platform_metadata` now composes `upload.content` into the fields each adapter sends, bounded by the `CAPABILITY_MATRIX` character limits, and the duplicated per-adapter limits and the inlined composition helper are gone. `POLICY_VERSION` was bumped and `docs/PLATFORM_CAPABILITIES.md` documents the rule set; per-platform upload defaults stay in `clipmorph/platforms.py`.
 - Migrated the CLI from argparse to typer/click: every command, flag, argument, and process status (`0`, `1`, `2`, `130`) is unchanged, `--data-dir`/`--app-config` are now also accepted after the subcommand, and each subcommand gained its own `--help`.
 - `auth status`, `job create|list|get|update|cancel|review|upload`, `job artifacts list|prune`, and `layout list|create|get` now print a rich table instead of JSON; pass the new `--json` flag to get the previous payload unchanged. Colour is dropped automatically when output is not a terminal, and characters the redirected terminal cannot encode are printed as escapes instead of failing the command.
 - Resolve configuration sidecars by `general.source` instead of filename, allowing arbitrary `.yml`/`.yaml` names and distinct same-stem sources; duplicate sidecars for one source are rejected.
