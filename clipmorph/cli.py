@@ -33,6 +33,9 @@ from clipmorph.platforms import build_platform_default_config
 
 PROG_NAME = "clipmorph"
 
+# argparse also answered ``-h``, so both spellings are offered on every command.
+HELP_CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
+
 # The three manifest checkpoints, in pipeline order.
 CHECKPOINT_STAGES = ("transcript", "conversion", "upload")
 
@@ -100,6 +103,30 @@ def _console() -> Console:
     return Console(highlight=False)
 
 
+def _tolerate_unencodable_output() -> None:
+    """Let redirected streams replace characters they cannot encode.
+
+    Human tables print raw path and title characters. A redirected stdout uses
+    the locale encoding, so a cp1252 pipe meeting a CJK or emoji title would
+    abort the command with ``UnicodeEncodeError`` after half the table printed.
+    Reconfigure in place so escaping never costs the command its exit code;
+    the ``--json`` payloads stay ASCII regardless because ``json.dumps``
+    escapes non-ASCII by default.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        encoding = getattr(stream, "encoding", None)
+        if not encoding or encoding.lower().replace("-", "") == "utf8":
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(errors="backslashreplace")
+        except (OSError, ValueError) as error:  # pragma: no cover
+            if "closed" not in str(error):
+                raise
+
+
 def _cell(value: Any, style: str = "") -> Text:
     """Format one value as text rich never re-reads as markup."""
     if isinstance(value, Text):
@@ -129,8 +156,10 @@ def _print_table(title: str, rows: list[dict[str, Any]], columns: list[str],
 
     Values fold onto the next line instead of being dropped, and identifier
     columns stay on one line so a copied job or artifact ID is never mangled.
+    The title is wrapped as text too, so user data embedded in it (a layout
+    name, for example) is never read as rich markup.
     """
-    table = Table(title=title, title_justify="left", header_style="bold")
+    table = Table(title=_cell(title), title_justify="left", header_style="bold")
     for column in columns:
         table.add_column(_column_label(column), overflow="fold",
                          no_wrap=column in nowrap)
@@ -345,12 +374,18 @@ def _resolve_paths(ctx: typer.Context, data_dir: Path | None,
 
 
 app = typer.Typer(add_completion=False, no_args_is_help=False,
+                  context_settings=HELP_CONTEXT_SETTINGS,
                   help="Create and manage ClipMorph jobs.")
-auth_app = typer.Typer(no_args_is_help=False, help="Manage platform credentials.")
-job_app = typer.Typer(no_args_is_help=False, help="Create and manage per-source jobs.")
+auth_app = typer.Typer(no_args_is_help=False, context_settings=HELP_CONTEXT_SETTINGS,
+                       help="Manage platform credentials.")
+job_app = typer.Typer(no_args_is_help=False,
+                      context_settings=HELP_CONTEXT_SETTINGS,
+                      help="Create and manage per-source jobs.")
 artifact_app = typer.Typer(no_args_is_help=False,
+                           context_settings=HELP_CONTEXT_SETTINGS,
                            help="Manage registered artifact revisions.")
 layout_app = typer.Typer(no_args_is_help=False,
+                         context_settings=HELP_CONTEXT_SETTINGS,
                          help="Manage the global layout registry.")
 
 
@@ -1044,12 +1079,11 @@ def _cli_command() -> click.Command:
 def run_cli(argv: list[str] | None = None) -> int:
     """Execute one public command, returning the documented process status."""
     args = list(argv) if argv is not None else None
+    _tolerate_unencodable_output()
     try:
         return _cli_command().main(args=args, prog_name=PROG_NAME,
                                    standalone_mode=False) or 0
-    except typer.Exit as error:  # typer.Exit is a click Exit subclass.
-        return error.exit_code or 0
-    except click.exceptions.Exit as error:
+    except click.exceptions.Exit as error:  # includes typer.Exit.
         return error.exit_code or 0
     except click.exceptions.UsageError as error:
         print(str(error) or "usage error", file=sys.stderr)

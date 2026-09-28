@@ -106,6 +106,17 @@ def help_text(path: tuple[str, ...]) -> str:
     return output.getvalue()
 
 
+
+def help_text_shortcut(path: tuple[str, ...]) -> str:
+    """Return one command's rendered ``-h`` output."""
+    output = io.StringIO()
+    with patch.dict(os.environ, WIDE_TERMINAL), contextlib.redirect_stdout(output):
+        code = run_cli([*path, "-h"])
+    if code != 0:
+        raise AssertionError(f"clipmorph {' '.join(path)} -h exited {code}")
+    return output.getvalue()
+
+
 def panel_rows(help_output: str, panel: str) -> list[list[str]]:
     """Return the cell groups of one help panel, top to bottom."""
     rows: list[list[str]] = []
@@ -193,7 +204,7 @@ class ParityDocumentTests(unittest.TestCase):
             if not path:
                 continue
             with self.subTest(command=" ".join(path)):
-                self.assert_documented(path[-1], " ".join(path))
+                self.assert_documented(" ".join(path[-2:]), " ".join(path))
 
     def test_every_command_group_is_documented(self):
         groups = {path for path in COMMANDS
@@ -210,6 +221,17 @@ class ParityDocumentTests(unittest.TestCase):
                 continue
             with self.subTest(command=" ".join(path)):
                 self.assert_documented("--json", " ".join(path))
+
+
+class HelpShortcutTests(unittest.TestCase):
+    """argparse answered ``-h`` too, so both spellings must keep working."""
+
+    def test_short_help_flag_is_accepted_on_every_command(self):
+        for path in COMMANDS:
+            with self.subTest(command=" ".join(["clipmorph", *path])):
+                rendered = help_text_shortcut(path)
+                self.assertIn("Usage", rendered)
+                self.assertIn("-h", rendered)
 
 
 if __name__ == "__main__":

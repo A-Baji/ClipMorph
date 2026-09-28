@@ -50,6 +50,15 @@ def seed_job(data_dir, source_name="clip.mp4", configuration=None):
         service.close()
 
 
+
+def save_manifest_fields(data_dir, job_id, **fields):
+    """Persist extra manifest fields created outside the normal lifecycle."""
+    path = data_dir / "jobs" / job_id / "manifest.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value.update(fields)
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+
 class CliInitializationTests(unittest.TestCase):
     def test_init_writes_app_yaml_and_auth_in_selected_data_directory(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -94,7 +103,7 @@ class CliDataDirectoryTests(unittest.TestCase):
                     seed_job(data_dir)
 
                     code, records = invoke_json(
-                                                [part.format(data=str(data_dir)) for part in argv])
+                        [part.format(data=str(data_dir)) for part in argv])
 
                     self.assertEqual(code, 0)
                     self.assertEqual(len(records), 1)
@@ -324,6 +333,84 @@ class CliHumanOutputTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("Credentials", output)
             self.assertIn("youtube", output)
+
+    def test_table_title_keeps_markup_looking_names_literal(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            invoke(["--data-dir", str(data_dir), "init"])
+            layout_file = Path(temp_dir) / "layout.yml"
+            layout_file.write_text(
+                "name: '[red]evil[/]'\n"
+                "layout:\n"
+                "  crop:\n"
+                "    enabled: true\n"
+                "    source: {x: 0, y: 0, width: 320, height: 240}\n"
+                "    sizing: {mode: fit, dimensions: {width: 320, height: 240}}\n"
+                "    composition: {mode: overlay, placement: top}\n",
+                encoding="utf-8")
+
+            code, record = invoke_json(["--data-dir", str(data_dir), "layout",
+                                        "create", str(layout_file)])
+            self.assertEqual(code, 0)
+
+            code, output = invoke(["--data-dir", str(data_dir), "layout", "get",
+                                   record["id"]])
+
+            self.assertEqual(code, 0)
+            # The registry name is user data: its brackets must survive verbatim
+            # instead of being read as rich markup.
+            self.assertIn("[red]evil[/]", output)
+
+    def test_job_fields_keep_markup_looking_warnings_literal(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest = seed_job(data_dir)
+            save_manifest_fields(
+                data_dir, manifest.job_id,
+                warnings=["[red]watch out[/]"],
+                errors=[{"code": "upload_failed", "message": "boom [bold]now[/]"}])
+
+            code, output = invoke(["--data-dir", str(data_dir), "job", "get",
+                                   manifest.job_id])
+
+            self.assertEqual(code, 0)
+            self.assertIn("[red]watch out[/]", output)
+            self.assertIn("boom [bold]now[/]", output)
+
+    def test_human_output_survives_a_locale_that_cannot_encode_the_data(self):
+        """Non-encodable titles become escapes instead of a codec crash.
+
+        A cp1252 stdout is the redirected default on Western-locale Windows:
+        the old JSON output was ASCII-escaped there, so the human tables have
+        to stay equally survivable.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest = seed_job(data_dir, source_name="\u65e5\u672c clip.mp4")
+            service = JobService(data_dir)
+            try:
+                fetched = service.get_job(manifest.job_id)
+                content = fetched.configuration.setdefault(
+                    "upload", {}).setdefault("content", {})
+                content["title"] = "\u26a1 kwik \u00fcber \u65e5\u672c"
+                fetched.save(service.jobs_dir)
+            finally:
+                service.close()
+
+            # Feed the CLI a cp1252, strict-encoding stdout through the same
+            # redirect mechanism rich honours in production.
+            buffer = io.BytesIO()
+            stream = io.TextIOWrapper(buffer, encoding="cp1252", errors="strict",
+                                      write_through=True)
+            with patch.dict(os.environ, WIDE_TERMINAL), patch("sys.stdout", stream):
+                code = run_cli(["--data-dir", str(data_dir), "job", "list"])
+            rendered = buffer.getvalue().decode("cp1252")
+
+            self.assertEqual(code, 0)
+            self.assertIn(manifest.job_id, rendered)
+            # Characters outside cp1252 render as their escapes, not a crash.
+            self.assertIn("\\u26a1", rendered)
+            self.assertIn("\\u65e5", rendered)
 
 
 class CliJsonOutputTests(unittest.TestCase):
