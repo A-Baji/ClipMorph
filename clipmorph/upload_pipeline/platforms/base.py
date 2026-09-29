@@ -20,6 +20,11 @@ class BaseUploadPipeline(ABC):
     MAX_RETRIES = 3
     RETRIABLE_STATUS_CODES = [500, 502, 503, 504]
 
+    # Whether this platform can deterministically detect an existing post for
+    # an artifact (see ``find_existing_post``). Adapters opt in by setting this
+    # to True; the default False means detection is unsupported.
+    supports_existing_detection: bool = False
+
     def __init__(self, **kwargs):
         """Initialize base pipeline with common attributes."""
         # Progress bar configuration (must be set by subclasses)
@@ -229,11 +234,22 @@ class BaseUploadPipeline(ABC):
         """
         Main method to handle the complete upload process.
         Must be implemented by subclasses.
-        
+
         Returns:
             Platform-specific identifier (e.g., media_id, video_id, tweet_id)
         """
         pass
+
+    def find_existing_post(self, artifact_sha: str) -> str | None:
+        """Return the id of an existing post carrying this artifact's marker.
+
+        Detection is opt-in per platform: the default ``None`` means the
+        platform cannot deterministically look up an existing post, so the
+        submission-side dedup guard is the only duplicate prevention. An
+        adapter that can perform a bounded, deterministic lookup overrides
+        this and sets ``supports_existing_detection = True``.
+        """
+        return None
 
     def _validate_required_attributes(self):
         """

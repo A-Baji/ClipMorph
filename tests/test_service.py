@@ -101,8 +101,7 @@ class DeferredUploadTests(unittest.TestCase):
                 pipeline.assert_not_called()
                 self.assertTrue(result["scheduled"])
                 attempt = result["attempts"][0]
-                self.assertEqual(attempt["status"], "pending")
-                self.assertTrue(attempt["scheduled"])
+                self.assertEqual(attempt["status"], "scheduled")
                 self.assertEqual(attempt["scheduled_publish_at"], publish_at)
                 self.assertNotIn(f"upload:{manifest.job_id}",
                                  service._futures)
@@ -123,7 +122,7 @@ class DeferredUploadTests(unittest.TestCase):
             self.assertEqual(pipeline.call_count, 1)
             self.assertEqual(
                 pipeline.call_args.args[0], ["youtube"])
-            self.assertEqual(saved.upload_attempts[0]["status"], "completed")
+            self.assertEqual(saved.upload_attempts[0]["status"], "published")
             self.assertTrue(saved.platforms["youtube"]["success"])
             self.assertEqual(saved.checkpoints["upload"]["status"], "completed")
 
@@ -146,40 +145,42 @@ class DeferredUploadTests(unittest.TestCase):
             self.assertEqual(service._scheduled_timers, {})
             self.assertEqual(
                 service.get_job(manifest.job_id).upload_attempts[0]["status"],
-                "pending")
+                "scheduled")
 
     def test_retry_of_a_scheduled_attempt_runs_immediately(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
             service, manifest = _reviewed_job(data_dir)
-            self.addCleanup(service.close)
-            publish_at = (datetime.now(timezone.utc)
-                          + timedelta(hours=1)).isoformat()
-            service.submit_upload(
-                manifest.job_id, ["youtube"],
-                configuration_snapshot={
-                    "platforms": {"include": ["youtube"]},
-                    "schedule": {"publish_at": publish_at}})
-            attempt = service.get_job(manifest.job_id).upload_attempts[0]
-            service._run_upload_attempts(
-                manifest.job_id, [attempt["attempt_id"]],
-                service.get_job(manifest.job_id).artifacts[
-                    attempt["artifact_id"]]["path"],
-                {"platforms": {"include": ["youtube"]}}, ["youtube"])
-            failed = service.get_job(manifest.job_id).upload_attempts[0]
-            failed["status"] = "failed"
-            service.get_job(manifest.job_id).save(service.jobs_dir)
+            try:
+                publish_at = (datetime.now(timezone.utc)
+                              + timedelta(hours=1)).isoformat()
+                service.submit_upload(
+                    manifest.job_id, ["youtube"],
+                    configuration_snapshot={
+                        "platforms": {"include": ["youtube"]},
+                        "schedule": {"publish_at": publish_at}})
+                attempt = service.get_job(manifest.job_id).upload_attempts[0]
+                service._run_upload_attempts(
+                    manifest.job_id, [attempt["attempt_id"]],
+                    service.get_job(manifest.job_id).artifacts[
+                        attempt["artifact_id"]]["path"],
+                    {"platforms": {"include": ["youtube"]}}, ["youtube"])
+                failed = service.get_job(manifest.job_id).upload_attempts[0]
+                failed["status"] = "failed"
+                service.get_job(manifest.job_id).save(service.jobs_dir)
 
-            with patch("clipmorph.upload_attempts.execute_upload_pipeline",
-                       side_effect=_upload_results(["youtube"])) as pipeline:
-                retried = service.retry_upload(
-                    manifest.job_id, "youtube", failed["attempt_id"])
+                with patch("clipmorph.upload_attempts.execute_upload_pipeline",
+                           side_effect=_upload_results(["youtube"])) as pipeline:
+                    retried = service.retry_upload(
+                        manifest.job_id, "youtube", failed["attempt_id"])
 
-            pipeline.assert_called_once()
-            self.assertFalse(retried["scheduled"])
-            self.assertNotIn("scheduled", retried["attempts"][0])
-            self.assertEqual(retried["attempts"][0]["retry_of"],
-                             failed["attempt_id"])
+                pipeline.assert_called_once()
+                self.assertFalse(retried["scheduled"])
+                self.assertEqual(retried["attempts"][0]["status"], "pending")
+                self.assertEqual(retried["attempts"][0]["retry_of"],
+                                 failed["attempt_id"])
+            finally:
+                service.close()
 
     def test_publish_at_in_the_past_uploads_immediately(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -239,7 +240,7 @@ class DeferredUploadTests(unittest.TestCase):
             self.assertEqual(armed[f"upload:{manifest.job_id}"], 1)
             # Reconciliation must not have failed the checkpoint it re-armed.
             self.assertEqual(healed.checkpoints["upload"]["status"], "running")
-            self.assertEqual(healed.upload_attempts[0]["status"], "pending")
+            self.assertEqual(healed.upload_attempts[0]["status"], "scheduled")
             self.assertEqual(healed.upload_attempts[0]["scheduled_publish_at"],
                              publish_at)
 
@@ -271,7 +272,6 @@ class DeferredUploadTests(unittest.TestCase):
             self.assertEqual(discarded.checkpoints["upload"]["status"],
                              "awaiting_review")
             self.assertEqual(discarded.upload_attempts[0]["status"], "pending")
-            self.assertFalse(discarded.upload_attempts[0]["scheduled"])
             self.assertNotIn("scheduled_publish_at",
                              discarded.upload_attempts[0])
 
@@ -279,7 +279,8 @@ class DeferredUploadTests(unittest.TestCase):
                 manifest.job_id, ["youtube"],
                 configuration_snapshot={
                     "platforms": {"include": ["youtube"]},
-                    "schedule": {"publish_at": publish_at}})
+                    "schedule": {"publish_at": publish_at},
+                    "content": {"title": "Updated", "description": "", "tags": []}})
 
             timers = service._scheduled_timers[key]
             self.assertEqual(len(timers), 1)
@@ -314,7 +315,7 @@ class DeferredUploadTests(unittest.TestCase):
             self.assertEqual(armed, {})
             self.assertEqual(healed.checkpoints["upload"]["status"],
                              "awaiting_review")
-            self.assertFalse(healed.upload_attempts[0]["scheduled"])
+            self.assertEqual(healed.upload_attempts[0]["status"], "pending")
 
     def test_rerender_disarms_the_schedule_it_supersedes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -340,11 +341,113 @@ class DeferredUploadTests(unittest.TestCase):
             self.assertNotIn(key, service._scheduled_timers)
             superseded = service.get_job(manifest.job_id)
             self.assertEqual(superseded.checkpoints["upload"]["status"], "stale")
-            self.assertFalse(superseded.upload_attempts[0]["scheduled"])
+            self.assertEqual(superseded.upload_attempts[0]["status"], "pending")
             # A stale upload checkpoint cannot be finalized by a stray timer,
             # so the unmarked attempt also fails the startup re-arm scan.
             self.assertFalse(service._upload_awaits_schedule(superseded))
             self.assertEqual(service.discard_scheduled_uploads(manifest.job_id), 0)
+
+    def test_duplicate_active_attempt_rejected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = _reviewed_job(data_dir)
+            try:
+                # Create a scheduled attempt (active status) without firing it
+                future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+                service.submit_upload(
+                    manifest.job_id, ["youtube"],
+                    configuration_snapshot={
+                        "platforms": {"include": ["youtube"]},
+                        "schedule": {"publish_at": future},
+                        "content": {"title": "Test", "description": "", "tags": []}})
+                # Reset the checkpoint to awaiting_review for the second submission
+                saved = service.get_job(manifest.job_id)
+                service.update_upload_draft(
+                    manifest.job_id, {"platforms": {"include": ["youtube"]}},
+                    saved.checkpoints["upload"]["revision"], reopen=True)
+
+                with self.assertRaisesRegex(ValueError, "active upload attempt"):
+                    service.submit_upload(
+                        manifest.job_id, ["youtube"],
+                        configuration_snapshot={
+                            "platforms": {"include": ["youtube"]},
+                            "content": {"title": "Test", "description": "", "tags": []}})
+            finally:
+                service.close()
+
+    def test_exact_attempt_retry_bypasses_dedup_guard(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = _reviewed_job(data_dir)
+            try:
+                with patch("clipmorph.upload_attempts.execute_upload_pipeline",
+                           side_effect=_upload_results(["youtube"])):
+                    service.submit_upload(
+                        manifest.job_id, ["youtube"],
+                        configuration_snapshot={
+                            "platforms": {"include": ["youtube"]},
+                            "content": {"title": "Test", "description": "", "tags": []}})
+                    service._futures[f"upload:{manifest.job_id}"].result(timeout=5)
+
+                saved = service.get_job(manifest.job_id)
+                saved.upload_attempts[0]["status"] = "failed"
+                saved.checkpoints["upload"]["status"] = "failed"
+                saved.save(service.jobs_dir)
+
+                with patch("clipmorph.upload_attempts.execute_upload_pipeline",
+                           side_effect=_upload_results(["youtube"])):
+                    retried = service.retry_upload(
+                        manifest.job_id, "youtube",
+                        saved.upload_attempts[0]["attempt_id"])
+                self.assertEqual(retried["attempts"][0]["retry_of"],
+                                 saved.upload_attempts[0]["attempt_id"])
+            finally:
+                service.close()
+
+    def test_published_attempt_propagates_platform_url(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = _reviewed_job(data_dir)
+            self.addCleanup(service.close)
+
+            with patch("clipmorph.upload_attempts.execute_upload_pipeline",
+                       side_effect=_upload_results(["youtube"])):
+                service.submit_upload(
+                    manifest.job_id, ["youtube"],
+                    configuration_snapshot={
+                        "platforms": {"include": ["youtube"]},
+                        "content": {"title": "Test", "description": "", "tags": []}})
+                service._futures[f"upload:{manifest.job_id}"].result(timeout=5)
+
+            saved = service.get_job(manifest.job_id)
+            attempt = saved.upload_attempts[0]
+            self.assertEqual(attempt["status"], "published")
+            self.assertEqual(attempt["result"]["platform_post_id"], "youtube ok")
+            self.assertEqual(attempt["result"]["platform_url"],
+                             "https://www.youtube.com/watch?v=youtube ok")
+            self.assertEqual(saved.platforms["youtube"]["status"], "published")
+            self.assertEqual(saved.platforms["youtube"]["platform_post_id"],
+                             "youtube ok")
+
+    def test_cancel_scheduled_upload_marks_cancelled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = _reviewed_job(data_dir)
+            self.addCleanup(service.close)
+            future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+            service.submit_upload(
+                manifest.job_id, ["youtube"],
+                configuration_snapshot={
+                    "platforms": {"include": ["youtube"]},
+                    "schedule": {"publish_at": future},
+                    "content": {"title": "Test", "description": "", "tags": []}})
+
+            cancelled = service.cancel_scheduled_upload(manifest.job_id)
+            self.assertEqual(cancelled, 1)
+
+            saved = service.get_job(manifest.job_id)
+            self.assertEqual(saved.upload_attempts[0]["status"], "cancelled")
+            self.assertIsNotNone(saved.upload_attempts[0]["completed_at"])
 
 
 if __name__ == "__main__":

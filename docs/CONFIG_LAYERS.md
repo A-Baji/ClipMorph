@@ -643,11 +643,20 @@ and all upload references intact.
 
 Each upload attempt is append-only and records attempt id, platform, artifact
 id and SHA-256, the upload-content/platform/schedule configuration snapshot and
-hash, start/completion timestamps, outcome, and safe response/error details.
-An attempt is never rewritten to point at a newer artifact or new content.
-Partial platform success remains visible per attempt and platform. Remote
-uploads are historical results; local edits never silently update or delete
-them.
+hash, a content hash for dedup, start/completion timestamps, outcome, and
+safe response/error details. An attempt is never rewritten to point at a
+newer artifact or new content. Partial platform success remains visible per
+attempt and platform. Remote uploads are historical results; local edits never
+silently update or delete them.
+
+Attempt statuses are `pending`, `scheduled`, `running`, `published`, `failed`,
+and `cancelled`. A scheduled attempt waits on a future `publish_at`; when the
+timer fires it moves to `running`, then to a terminal state. A successful
+upload records `platform_post_id`, `platform_url`, and `published_at` in its
+result. A `cancelled` attempt is a scheduled upload aborted before its timer
+fired. The submission-side dedup guard rejects a new submission when the same
+platform already holds an active (`pending`, `scheduled`, or `running`)
+attempt for the same artifact bytes and content hash.
 
 ### Invalidation And Retry Rules
 
@@ -704,11 +713,12 @@ appearing permanently stuck. A `queued` manifest is left alone — all-pending
 checkpoints are not evidence of a crash — and a `running` job whose checkpoints
 have all gone terminal has only its drifted status re-derived.
 
-A `running` upload checkpoint whose every pending attempt is scheduled for a
+A `running` upload checkpoint whose every `scheduled` attempt waits on a
 future `publish_at` is deliberately left alone — that is a deferral waiting on a
 timer, not a stall, and reconciliation would otherwise cancel a schedule the
-restart was supposed to keep. Reconciliation runs before the re-arm scan, so
-genuinely scheduled attempts get their timers back.
+restart was supposed to keep. A past-due `scheduled` attempt is healed as an
+interrupted failure, never published unattended. Reconciliation runs before
+the re-arm scan, so genuinely scheduled attempts get their timers back.
 
 The manifest is the only input: no attempt is resumed automatically, and no
 remote upload is repeated without an explicit user action. Because
@@ -745,18 +755,20 @@ configuration resolver.
 
 - `upload.schedule.publish_at` is implemented as a deferral: a submission whose
   snapshot carries a future instant arms an in-process timer and leaves the
-  attempts `pending` with `scheduled: true` and `scheduled_publish_at` set,
-  instead of uploading immediately. A timestamp in the past, a value within one
-  second of now, or a missing value uploads immediately, and a targeted retry
-  always uploads immediately regardless of the snapshot. The schedule belongs to
-  the accepted submission, not to the draft: editing or discarding the draft, or
-  rerendering the conversion, cancels the timer and unmarks those attempts, so
-  the next submission is the only thing that re-arms an upload. See
+  attempts `scheduled` with `scheduled_publish_at` set, instead of uploading
+  immediately. A timestamp in the past, a value within one second of now, or a
+  missing value uploads immediately, and a targeted retry always uploads
+  immediately regardless of the snapshot. The schedule belongs to the accepted
+  submission, not to the draft: editing or discarding the draft, or rerendering
+  the conversion, cancels the timer and unmarks those attempts, so the next
+  submission is the only thing that re-arms an upload. See
   [CLI_WEB_PARITY.md](CLI_WEB_PARITY.md) for the per-route contract.
-- The rest of the `upload.schedule` model — a durable queue, publication
-  `queued/published/failed/canceled` attempt states, duplicate suppression, and
-  scheduling history — is out of scope here and tracked in
-  [A-Baji/ClipMorph#100](https://github.com/A-Baji/ClipMorph/issues/100).
+- The `upload.schedule` model now includes the full attempt lifecycle:
+  `pending → scheduled → running → published|failed|cancelled` attempt states,
+  a derived `scheduled` job-status bucket, submission-side dedup guard,
+  platform-side existing-post detection, and filterable history. A past-due
+  `scheduled` attempt at service startup is healed as an interrupted failure,
+  never published unattended.
 - Whether multi-job groups ever become save-able presets later is deferred;
   today they are ephemeral execution groups.
 

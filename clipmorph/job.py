@@ -305,6 +305,24 @@ class JobManifest:
             self._derive_status()
             self.save(jobs_dir)
 
+    def _awaits_scheduled_upload(self) -> bool:
+        """Report whether the upload checkpoint is waiting on a schedule.
+
+        True when the upload checkpoint is running, at least one attempt is
+        scheduled, and no attempt is pending or running outside the schedule.
+        """
+        upload = self.checkpoints.get("upload", {})
+        if upload.get("status") != "running":
+            return False
+        has_scheduled = False
+        for attempt in self.upload_attempts:
+            status = attempt.get("status")
+            if status == "scheduled":
+                has_scheduled = True
+            elif status in {"pending", "running"}:
+                return False
+        return has_scheduled
+
     def _derive_status(self) -> None:
         statuses = [checkpoint["status"] for checkpoint in self.checkpoints.values()]
         if "failed" in statuses:
@@ -313,6 +331,8 @@ class JobManifest:
             self.status = "cancelled"
         elif "partial_failure" in statuses:
             self.status = "partial_failure"
+        elif self._awaits_scheduled_upload():
+            self.status = "scheduled"
         elif "running" in statuses:
             self.status = "running"
         elif "awaiting_review" in statuses:

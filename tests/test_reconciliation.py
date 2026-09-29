@@ -45,7 +45,7 @@ def _start_stage(manifest: JobManifest, jobs_dir: Path, stage: str) -> None:
 
 def _add_pending_attempt(manifest: JobManifest, jobs_dir: Path,
                          publish_at: str | None) -> None:
-    """Append one pending upload attempt in the state a crash would leave."""
+    """Append one upload attempt in the state a crash would leave."""
     artifact = manifest.artifacts[manifest.current_artifact_id]
     attempt = {
         "attempt_id": "attempt-1",
@@ -54,6 +54,7 @@ def _add_pending_attempt(manifest: JobManifest, jobs_dir: Path,
         "artifact_hash": artifact["sha256"],
         "configuration_snapshot": {"platforms": {"include": ["youtube"]}},
         "configuration_hash": "configuration-hash",
+        "content_hash": "content-hash",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "started_at": None,
         "completed_at": None,
@@ -61,8 +62,8 @@ def _add_pending_attempt(manifest: JobManifest, jobs_dir: Path,
         "result": None,
     }
     if publish_at is not None:
-        attempt["scheduled"] = True
         attempt["scheduled_publish_at"] = publish_at
+        attempt["status"] = "scheduled"
     manifest.upload_attempts.append(attempt)
     manifest.checkpoints["upload"]["references"]["attempt_ids"] = [
         attempt["attempt_id"]]
@@ -123,10 +124,34 @@ class StartupReconciliationTests(unittest.TestCase):
                 service.close()
 
             self.assertEqual(healed.checkpoints["upload"]["status"], "running")
-            self.assertEqual(healed.upload_attempts[0]["status"], "pending")
+            self.assertEqual(healed.upload_attempts[0]["status"], "scheduled")
             self.assertEqual(healed.upload_attempts[0]["scheduled_publish_at"],
                              publish_at)
             # Reaching the re-arm scan at all proves reconciliation skipped it.
+            self.assertEqual(armed, {f"upload:{manifest.job_id}": 1})
+
+    def test_scheduled_attempt_with_timezone_offset_normalizes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest, jobs_dir = _create_manifest(data_dir)
+            # A future instant in a negative UTC offset
+            offset_stamp = (datetime.now(timezone.utc) + timedelta(hours=2)).astimezone(
+                timezone(timedelta(hours=-5))).isoformat()
+            _add_pending_attempt(manifest, jobs_dir, offset_stamp)
+            _start_stage(manifest, jobs_dir, "upload")
+
+            service = JobService(data_dir)
+            try:
+                healed = service.get_job(manifest.job_id)
+                armed = {key: len(value)
+                         for key, value in service._scheduled_timers.items()}
+            finally:
+                service.close()
+
+            self.assertEqual(healed.checkpoints["upload"]["status"], "running")
+            self.assertEqual(healed.upload_attempts[0]["status"], "scheduled")
+            self.assertEqual(healed.upload_attempts[0]["scheduled_publish_at"],
+                             offset_stamp)
             self.assertEqual(armed, {f"upload:{manifest.job_id}": 1})
 
     def test_unscheduled_pending_upload_attempts_fail(self):

@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 import tempfile
 import unittest
 from pathlib import Path
@@ -266,7 +268,7 @@ class WebApiTests(unittest.TestCase):
                 self.assertEqual(
                     client.get(f"/api/v1/jobs/{job_id}").json()["configuration"][
                         "upload"]["content"]["title"], "New draft")
-                self.assertEqual(attempts[1]["status"], "completed")
+                self.assertEqual(attempts[1]["status"], "published")
                 deleted = client.delete(
                     f"/api/v1/jobs/{job_id}/artifacts/{artifact_id}?confirm=true")
                 self.assertEqual(deleted.status_code, 200, deleted.text)
@@ -286,6 +288,101 @@ class WebApiTests(unittest.TestCase):
                 "configured": True, "probe": "ok",
                 "detail": "refresh token accepted"})
             probe_fn.assert_called_once_with(["youtube"])
+
+    def test_uploads_filter_contract(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"source")
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {
+                "conversion": {"skip": True, "subtitles": {"skip": True}},
+                "upload": {"platforms": {"include": ["youtube"]}},
+            })
+            artifact_dir = data_dir / "output" / manifest.job_id
+            artifact_dir.mkdir(parents=True)
+            artifact_path = artifact_dir / "output.mp4"
+            artifact_path.write_bytes(b"rendered artifact")
+            manifest.set_artifact(str(artifact_path), service.jobs_dir)
+            service.close()
+
+            app = create_app(data_dir)
+            with TestClient(app) as client:
+                job_id = manifest.job_id
+                client.put(
+                    f"/api/v1/jobs/{job_id}/checkpoints/upload",
+                    json={"expected_revision": 0,
+                          "upload": {"content": {"title": "Frozen title"}}})
+
+                with patch("clipmorph.upload_pipeline.UploadPipeline") as pipeline_type:
+                    pipeline_type.return_value.run.return_value = {
+                        "YouTube": {"success": True, "result": "video-id"}}
+                    submitted = client.post(f"/api/v1/jobs/{job_id}/upload", json={})
+                    self.assertEqual(submitted.status_code, 202, submitted.text)
+                    app.state.job_service._futures[f"upload:{job_id}"].result(timeout=2)
+
+                # Filter by status
+                published = client.get(
+                    f"/api/v1/jobs/{job_id}/uploads?status=published")
+                self.assertEqual(published.status_code, 200)
+                self.assertEqual(len(published.json()), 1)
+                self.assertEqual(published.json()[0]["status"], "published")
+
+                # Filter by platform
+                youtube = client.get(
+                    f"/api/v1/jobs/{job_id}/uploads?platform=youtube")
+                self.assertEqual(youtube.status_code, 200)
+                self.assertEqual(len(youtube.json()), 1)
+
+                # Filter by since — use a cutoff before the attempt was created
+                before = (datetime.now(timezone.utc)
+                          - timedelta(hours=1)).isoformat()
+                recent = client.get(
+                    f"/api/v1/jobs/{job_id}/uploads?since={quote(before)}")
+                self.assertEqual(recent.status_code, 200)
+                self.assertEqual(len(recent.json()), 1)
+
+                # Invalid since -> 422
+                invalid = client.get(
+                    f"/api/v1/jobs/{job_id}/uploads?since=not-a-timestamp")
+                self.assertEqual(invalid.status_code, 422)
+
+    def test_queue_event_payload_with_scheduled_attempts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"source")
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {
+                "conversion": {"skip": True, "subtitles": {"skip": True}},
+                "upload": {"platforms": {"include": ["youtube"]}},
+            })
+            artifact_dir = data_dir / "output" / manifest.job_id
+            artifact_dir.mkdir(parents=True)
+            artifact_path = artifact_dir / "output.mp4"
+            artifact_path.write_bytes(b"rendered artifact")
+            manifest.set_artifact(str(artifact_path), service.jobs_dir)
+            service.close()
+
+            app = create_app(data_dir)
+            with TestClient(app) as client:
+                job_id = manifest.job_id
+                future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+                client.put(
+                    f"/api/v1/jobs/{job_id}/checkpoints/upload",
+                    json={"expected_revision": 0,
+                          "upload": {
+                              "content": {"title": "Scheduled"},
+                              "schedule": {"publish_at": future}}})
+
+                submitted = client.post(f"/api/v1/jobs/{job_id}/upload", json={})
+                self.assertEqual(submitted.status_code, 202, submitted.text)
+
+                job = client.get(f"/api/v1/jobs/{job_id}").json()
+                self.assertEqual(job["status"], "scheduled")
+                self.assertEqual(job["upload_attempts"][0]["status"], "scheduled")
 
     def test_checkpoint_acceptance_rejects_stale_revisions(self):
         with tempfile.TemporaryDirectory() as temp_dir:

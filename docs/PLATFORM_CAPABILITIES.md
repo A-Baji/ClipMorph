@@ -62,4 +62,28 @@ derived artifact is supplied.
 - Policy version, warnings, transformations, blockers, and artifact references
 belong in job/platform state.
 
-Last reviewed: 2026-09-27.
+## Existing-post detection
+
+Platform-side existing-post detection is opt-in per platform, coded via the
+adapter's `supports_existing_detection` capability flag and the
+`find_existing_post(artifact_sha)` hook on `BaseUploadPipeline`. The hook runs
+at submission time (outside the service lock) and returns the id of an
+existing post carrying the artifact's `clip:{sha256}` marker, or `None` when
+no match exists. A detection failure (for example a token lacking the read
+scope) surfaces as an `unavailable` note, never a blocker.
+
+| Platform | Detection | Mechanism |
+| --- | --- | --- |
+| YouTube | Supported (opt-in) | `channels.list(mine=true)` → uploads playlist → one `playlistItems.list` page; matches `clip:{artifact_sha}` marker in description |
+| Instagram | Not supported | Submission-side dedup guard only |
+| TikTok | Not supported | Submission-side dedup guard only |
+| Twitter/X | Not supported | Submission-side dedup guard only |
+
+YouTube's detection requires the `youtube.readonly` scope. The consent
+request asks for both `youtube.upload` and `youtube.readonly`; existing
+upload-only refresh tokens stay valid for uploads, but detection remains
+unavailable until the user re-runs `clipmorph auth youtube` to grant the read
+scope. The marker is embedded in the video description at publish time and is
+truncated to stay within the platform's description limit.
+
+Last reviewed: 2026-09-29.

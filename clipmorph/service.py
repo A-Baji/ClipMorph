@@ -36,8 +36,23 @@ INTERRUPTED_ERROR = {
     "retryable": True,
 }
 
-# A publish_at closer than this is treated as "now" rather than deferred.
+# A publish_at closer to now than this is treated as "now" rather than deferred.
 SCHEDULE_MINIMUM_DELAY_SECONDS = 1.0
+
+# Attempt statuses that still block a new submission for the same content.
+ACTIVE_ATTEMPT_STATUSES = {"pending", "scheduled", "running"}
+
+# Platform post-id to public URL templates for platforms whose posts are
+# addressable by id alone. Platforms without a template record no URL.
+PLATFORM_URL_TEMPLATES = {
+    "youtube": "https://www.youtube.com/watch?v={post_id}",
+}
+
+
+def _platform_url(platform: str, post_id: str) -> str | None:
+    """Return the public URL for one platform post id, when addressable."""
+    template = PLATFORM_URL_TEMPLATES.get(platform)
+    return template.format(post_id=post_id) if template else None
 
 
 def _parse_utc_timestamp(value: str) -> datetime:
@@ -159,15 +174,15 @@ class JobService:
                            stage, manifest.job_id, error)
 
     def _upload_awaits_schedule(self, manifest: JobManifest) -> bool:
-        """Report whether every pending attempt waits on a future publish_at."""
+        """Report whether every scheduled attempt waits on a future publish_at."""
         now = datetime.now(timezone.utc)
         scheduled: list[dict[str, Any]] = []
         for attempt in manifest.upload_attempts:
-            if attempt.get("status") != "pending":
+            if attempt.get("status") != "scheduled":
                 continue
             scheduled.append(attempt)
             stamp = attempt.get("scheduled_publish_at")
-            if not attempt.get("scheduled") or not isinstance(stamp, str):
+            if not isinstance(stamp, str):
                 return False
             try:
                 if _parse_utc_timestamp(stamp) <= now:
@@ -189,7 +204,7 @@ class JobService:
                 continue
             groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
             for attempt in manifest.upload_attempts:
-                if attempt.get("status") != "pending" or not attempt.get("scheduled"):
+                if attempt.get("status") != "scheduled":
                     continue
                 stamp = attempt.get("scheduled_publish_at")
                 if not isinstance(stamp, str):
@@ -239,19 +254,19 @@ class JobService:
     def _discard_scheduled_uploads_locked(self, manifest: JobManifest) -> int:
         """Disarm one job's scheduled uploads. Caller holds ``self._lock``.
 
-        Cancels the armed timers and unmarks their still-pending attempts, so
+        Cancels the armed timers and unmarks their scheduled attempts, so
         neither this process nor a later startup re-arms a configuration the user
-        has since replaced. The attempt records stay ``pending``: their real
-        fate is unknown, exactly as when a stalled upload is failed. Returns the
-        number of attempts unmarked.
+        has since replaced. The attempt records return to ``pending``: their
+        real fate is unknown, exactly as when a stalled upload is failed.
+        Returns the number of attempts unmarked.
         """
         for timer in self._scheduled_timers.pop(
                 f"upload:{manifest.job_id}", []):
             timer.cancel()
         unmarked = 0
         for attempt in manifest.upload_attempts:
-            if attempt.get("status") == "pending" and attempt.get("scheduled"):
-                attempt["scheduled"] = False
+            if attempt.get("status") == "scheduled":
+                attempt["status"] = "pending"
                 attempt.pop("scheduled_publish_at", None)
                 unmarked += 1
         return unmarked
@@ -725,6 +740,33 @@ class JobService:
                       configuration_snapshot: dict[str, Any] | None = None,
                       retry_of: str | None = None,
                       honor_schedule: bool = True) -> dict[str, Any]:
+        # Resolve the submission outside the lock so platform-side existing-post
+        # detection (network I/O) never runs while the service lock is held. The
+        # artifact hash is verified here too, so detection never runs for bytes
+        # that will be rejected anyway.
+        pre_manifest = self.get_job(job_id)
+        pre_artifact_id = artifact_id or pre_manifest.current_artifact_id
+        pre_artifact = (pre_manifest.artifacts.get(pre_artifact_id)
+                        if pre_artifact_id else None)
+        if pre_artifact is None:
+            raise ValueError("selected artifact is unavailable")
+        pre_artifact_path = Path(pre_artifact["path"])
+        if not pre_artifact_path.is_file():
+            raise ValueError("selected artifact bytes are unavailable")
+        pre_actual_hash = source_sha256(pre_artifact_path)
+        if (not pre_artifact.get("sha256")
+                or pre_actual_hash != pre_artifact["sha256"]):
+            raise ValueError("selected artifact hash does not match manifest")
+        pre_config = deepcopy(
+            configuration_snapshot if configuration_snapshot is not None
+            else pre_manifest.configuration.get("upload", {}))
+        pre_settings = pre_config.get("platforms", {})
+        pre_include = platforms or pre_settings.get("include")
+        pre_selected = enabled_platforms({**pre_settings, "include": pre_include})
+        pre_sha = pre_artifact.get("sha256")
+        existing_posts, detection_unavailable = self._detect_existing_posts(
+            pre_selected, pre_sha)
+
         with self._lock:
             manifest = self.get_job(job_id)
             checkpoint = manifest.checkpoints["upload"]
@@ -761,6 +803,10 @@ class JobService:
             scheduled_for = self._resolve_publish_at(
                 upload_config, honor_schedule)
             upload_hash = configuration_sha256(upload_config)
+            content_hash = configuration_sha256(upload_config.get("content", {}))
+            if retry_of is None:
+                self._reject_duplicate_active_attempt(
+                    manifest, selected, artifact.get("sha256"), content_hash)
             now = datetime.now(timezone.utc).isoformat()
             attempts: list[dict[str, Any]] = []
             for platform in selected:
@@ -771,6 +817,7 @@ class JobService:
                     "artifact_hash": artifact.get("sha256"),
                     "configuration_snapshot": upload_config,
                     "configuration_hash": upload_hash,
+                    "content_hash": content_hash,
                     "created_at": now,
                     "started_at": None,
                     "completed_at": None,
@@ -780,31 +827,132 @@ class JobService:
                 if retry_of is not None:
                     attempt["retry_of"] = retry_of
                 if scheduled_for is not None:
-                    attempt["scheduled"] = True
                     attempt["scheduled_publish_at"] = scheduled_for.isoformat()
+                    attempt["status"] = "scheduled"
+                if platform in existing_posts:
+                    post_id = existing_posts[platform]
+                    attempt["status"] = "published"
+                    attempt["started_at"] = now
+                    attempt["completed_at"] = now
+                    result_message = (
+                        "skipped upload: platform already holds "
+                        f"this content (id {post_id})")
+                    attempt["result"] = {
+                        "success": True,
+                        "message": result_message,
+                        "platform_post_id": post_id,
+                        "platform_url": _platform_url(platform, post_id),
+                        "published_at": now,
+                    }
+                    manifest.platforms[platform] = {
+                        "success": True,
+                        "status": "published",
+                        "message": result_message,
+                        "attempt_id": attempt["attempt_id"],
+                        "artifact_id": attempt["artifact_id"],
+                        "artifact_hash": attempt["artifact_hash"],
+                        "platform_post_id": post_id,
+                        "platform_url": _platform_url(platform, post_id),
+                        "published_at": now,
+                    }
                 attempts.append(attempt)
                 manifest.upload_attempts.append(attempt)
             checkpoint["artifact_hash"] = artifact.get("sha256")
             checkpoint["references"]["artifact_id"] = selected_artifact_id
             checkpoint["references"]["attempt_ids"] = [
                 item["attempt_id"] for item in attempts]
-            manifest.transition_checkpoint(
-                "upload", "running", checkpoint["revision"], self.jobs_dir)
+            if all(item["status"] == "published" for item in attempts):
+                # Every platform already holds this content, so the upload
+                # checkpoint completes without running a pipeline. Transition
+                # through "running" first: "awaiting_review" cannot jump straight
+                # to "completed".
+                manifest.transition_checkpoint(
+                    "upload", "running", checkpoint["revision"], self.jobs_dir)
+                checkpoint = manifest.checkpoints["upload"]
+                manifest.transition_checkpoint(
+                    "upload", "completed", checkpoint["revision"], self.jobs_dir)
+            else:
+                manifest.transition_checkpoint(
+                    "upload", "running", checkpoint["revision"], self.jobs_dir)
 
-        attempt_ids = [attempt["attempt_id"] for attempt in attempts]
-        if scheduled_for is not None:
+        attempt_ids = [attempt["attempt_id"] for attempt in attempts
+                       if attempt["status"] != "published"]
+        upload_platforms = [platform for platform in selected
+                            if platform not in existing_posts]
+        if scheduled_for is not None and attempt_ids:
             self._schedule_attempts(
                 job_id, attempt_ids, str(artifact_path), upload_config,
-                selected, scheduled_for)
-        else:
+                upload_platforms, scheduled_for)
+        elif attempt_ids:
             future = self.executor.submit(
                 self._run_upload_attempts, job_id, attempt_ids,
-                str(artifact_path), upload_config, selected)
+                str(artifact_path), upload_config, upload_platforms)
             with self._lock:
                 self._futures[f"upload:{job_id}"] = future
         return {"job_id": job_id, "attempts": attempts,
                 "scheduled": scheduled_for is not None,
-                "status_url": f"/api/v1/jobs/{job_id}"}
+                "status_url": f"/api/v1/jobs/{job_id}",
+                "detection": {
+                    "existing_posts": existing_posts,
+                    "unavailable": detection_unavailable,
+                }}
+
+    def _reject_duplicate_active_attempt(self, manifest: JobManifest,
+                                        platforms: list[str],
+                                        artifact_sha: str | None,
+                                        content_hash: str) -> None:
+        """Raise when an active attempt already targets the same content.
+
+        A scheduled or immediate submission is refused when the same platform
+        already holds a pending, scheduled, or running attempt for the same
+        artifact bytes and upload content. Exact-attempt retries bypass this
+        guard because they name the failed attempt being retried.
+        """
+        for attempt in manifest.upload_attempts:
+            if (attempt.get("platform") in platforms
+                    and attempt.get("artifact_hash") == artifact_sha
+                    and attempt.get("content_hash") == content_hash
+                    and attempt.get("status") in ACTIVE_ATTEMPT_STATUSES):
+                raise ValueError(
+                    f"active upload attempt exists for {attempt['platform']} "
+                    f"(attempt {attempt['attempt_id']})")
+
+    def _detect_existing_posts(
+            self, platforms: list[str],
+            artifact_sha: str | None) -> tuple[dict[str, str], list[str]]:
+        """Run platform-side existing-post detection outside the service lock.
+
+        Returns ``(found, unavailable)``: ``found`` maps a platform to the id
+        of an existing post carrying the artifact marker; ``unavailable``
+        lists platforms whose detection hook could not run (for example a
+        token that lacks the read scope). Detection is best-effort and never
+        blocks a submission.
+        """
+        from clipmorph.platforms import PLATFORM_TITLE
+        from clipmorph.upload_pipeline import UploadPipeline
+
+        found: dict[str, str] = {}
+        unavailable: list[str] = []
+        if not artifact_sha:
+            return found, unavailable
+        pipeline = UploadPipeline(**{platform: True for platform in platforms})
+        for platform in platforms:
+            adapter = pipeline.enabled_platforms.get(
+                PLATFORM_TITLE.get(platform, platform))
+            if adapter is None:
+                continue
+            if getattr(adapter, "supports_existing_detection", False) is not True:
+                continue
+            try:
+                post_id = adapter.find_existing_post(artifact_sha)
+            except Exception as error:
+                logger.warning("existing-post detection unavailable for %s: %s",
+                               platform, error)
+                unavailable.append(platform)
+                continue
+            if isinstance(post_id, str) and post_id:
+                found[platform] = post_id
+        return found, unavailable
 
     @staticmethod
     def _resolve_publish_at(upload_config: dict[str, Any],
@@ -835,6 +983,17 @@ class JobService:
                              platforms: list[str]) -> None:
         from clipmorph.upload_attempts import execute_upload_pipeline
         from clipmorph.upload_attempts import normalize_results
+        with self._lock:
+            manifest = self.get_job(job_id)
+            now = datetime.now(timezone.utc).isoformat()
+            for attempt_id in attempt_ids:
+                attempt = next((item for item in manifest.upload_attempts
+                                if item["attempt_id"] == attempt_id), None)
+                if attempt is None:
+                    continue
+                attempt["status"] = "running"
+                attempt["started_at"] = now
+            manifest.save(self.jobs_dir)
         try:
             results = execute_upload_pipeline(
                 platforms, artifact_path, upload_config)
@@ -860,19 +1019,31 @@ class JobService:
                 success = bool(result.get("success"))
                 started_at = result.get("started_at") or attempt["started_at"]
                 attempt["started_at"] = started_at or attempt["created_at"]
-                attempt["completed_at"] = (result.get("completed_at")
-                                           or datetime.now(timezone.utc).isoformat())
-                attempt["status"] = "completed" if success else "failed"
+                completed_at = (result.get("completed_at")
+                                or datetime.now(timezone.utc).isoformat())
+                attempt["completed_at"] = completed_at
+                post_id = result.get("result")
+                if success and not isinstance(post_id, str):
+                    post_id = None
+                attempt["status"] = "published" if success else "failed"
                 attempt["result"] = {
                     "success": success,
                     "message": str(result.get("error") or result.get("result") or "")[:1000],
+                    "platform_post_id": post_id if success else None,
+                    "platform_url": (_platform_url(platform, post_id)
+                                     if success and post_id else None),
+                    "published_at": completed_at if success else None,
                 }
                 manifest.platforms[platform] = {
                     "success": success,
+                    "status": "published" if success else "failed",
                     "message": attempt["result"]["message"],
                     "attempt_id": attempt_id,
                     "artifact_id": attempt["artifact_id"],
                     "artifact_hash": attempt["artifact_hash"],
+                    "platform_post_id": attempt["result"]["platform_post_id"],
+                    "platform_url": attempt["result"]["platform_url"],
+                    "published_at": attempt["result"]["published_at"],
                 }
                 if success:
                     success_count += 1
@@ -1084,7 +1255,57 @@ class JobService:
             token.cancel()
         if manifest.status in {"created", "queued", "awaiting_review"}:
             self._cancel_manifest(manifest)
+        elif manifest.status == "scheduled":
+            self.cancel_scheduled_upload(job_id)
+            self._cancel_manifest(self.get_job(job_id))
         return self.get_job(job_id)
+
+    def cancel_scheduled_upload(self, job_id: str) -> int:
+        """Abort a job's scheduled upload attempts before their timers fire.
+
+        Disarms the armed timers and moves every ``scheduled`` attempt to the
+        ``cancelled`` terminal state. Returns the number of attempts cancelled.
+        """
+        with self._lock:
+            manifest = self.get_job(job_id)
+            for timer in self._scheduled_timers.pop(f"upload:{job_id}", []):
+                timer.cancel()
+            cancelled = 0
+            now = datetime.now(timezone.utc).isoformat()
+            for attempt in manifest.upload_attempts:
+                if attempt.get("status") == "scheduled":
+                    attempt["status"] = "cancelled"
+                    attempt["completed_at"] = now
+                    cancelled += 1
+            if cancelled:
+                manifest._derive_status()
+                manifest.save(self.jobs_dir)
+            return cancelled
+
+    def list_upload_attempts(self, job_id: str, status: str | None = None,
+                             platform: str | None = None,
+                             since: str | None = None) -> list[dict[str, Any]]:
+        """Return a job's upload attempts filtered by status, platform, or age.
+
+        ``since`` keeps only attempts created at or after the given ISO-8601
+        instant; an unparsable value raises ``ValueError``.
+        """
+        manifest = self.get_job(job_id)
+        attempts = list(manifest.upload_attempts)
+        if status is not None:
+            attempts = [item for item in attempts if item.get("status") == status]
+        if platform is not None:
+            attempts = [item for item in attempts
+                        if item.get("platform") == platform.lower()]
+        if since is not None:
+            try:
+                cutoff = _parse_utc_timestamp(since)
+            except ValueError as error:
+                raise ValueError(
+                    f"since is not an ISO-8601 timestamp: {error}") from error
+            attempts = [item for item in attempts
+                        if _attempt_on_or_after(item, cutoff)]
+        return attempts
 
     def resume_job(self, job_id: str, runner: Callable) -> JobManifest:
         manifest = self.get_job(job_id)
@@ -1122,4 +1343,15 @@ def _artifact_size(artifact: dict[str, Any]) -> int:
         return path.stat().st_size if path.is_file() else 0
     except OSError:
         return 0
+
+
+def _attempt_on_or_after(attempt: dict[str, Any], cutoff: datetime) -> bool:
+    """Report whether an attempt was created at or after ``cutoff``."""
+    stamp = attempt.get("created_at")
+    if not isinstance(stamp, str):
+        return False
+    try:
+        return _parse_utc_timestamp(stamp) >= cutoff
+    except ValueError:
+        return False
 

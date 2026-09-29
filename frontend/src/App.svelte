@@ -33,6 +33,9 @@
   };
   let uploadDraft = { title: '', description: '', tags: '', publishAt: '' };
   let uploadPlatforms = [...platforms];
+  let uploadFilterStatus = '';
+  let uploadFilterPlatform = '';
+  let uploadFilterSince = '';
 
   $: selectedJob = jobs.find((job) => job.job_id === selectedJobId) || jobs[0];
   $: selectedCheckpoint = selectedJob?.checkpoints?.[selectedJob?.current_checkpoint];
@@ -75,9 +78,54 @@
   }
 
   function scheduleLabel(attempt) {
-    if (!attempt.scheduled || !attempt.scheduled_publish_at) return '';
-    return `Scheduled for ${new Date(attempt.scheduled_publish_at)
-      .toLocaleString()}`;
+    if (attempt.status !== 'scheduled' || !attempt.scheduled_publish_at) return '';
+    const then = new Date(attempt.scheduled_publish_at);
+    if (Number.isNaN(then.getTime())) return '';
+    const now = new Date();
+    const delta = then.getTime() - now.getTime();
+    const hours = Math.floor(delta / 3600000);
+    const minutes = Math.floor((delta % 3600000) / 60000);
+    const countdown = delta <= 0 ? 'due now'
+      : hours > 0 ? `in ${hours}h ${minutes}m` : `in ${minutes}m`;
+    return `Scheduled for ${then.toLocaleString()} (${countdown})`;
+  }
+
+  function attemptUrl(attempt) {
+    return attempt.result?.platform_url || attempt.platform_url || '';
+  }
+
+  $: filteredUploadAttempts = uploadAttempts.filter((attempt) => {
+    if (uploadFilterStatus && attempt.status !== uploadFilterStatus) return false;
+    if (uploadFilterPlatform && attempt.platform !== uploadFilterPlatform) return false;
+    if (uploadFilterSince) {
+      const cutoff = new Date(uploadFilterSince);
+      if (Number.isNaN(cutoff.getTime())) return true;
+      const created = new Date(attempt.created_at);
+      if (!Number.isNaN(created.getTime()) && created < cutoff) return false;
+    }
+    return true;
+  });
+
+  async function applyUploadFilters() {
+    if (!selectedJob) return;
+    try {
+      const params = new URLSearchParams();
+      if (uploadFilterStatus) params.set('status', uploadFilterStatus);
+      if (uploadFilterPlatform) params.set('platform', uploadFilterPlatform);
+      if (uploadFilterSince) params.set('since', new Date(uploadFilterSince).toISOString());
+      const query = params.toString();
+      uploadAttempts = await api(`/api/v1/jobs/${selectedJob.job_id}/uploads${query ? '?' + query : ''}`);
+    } catch (error) { errors = [error.message]; }
+  }
+
+  function soonestScheduledPublish(job) {
+    const stamps = (job.upload_attempts || [])
+      .filter((attempt) => attempt.status === 'scheduled' && attempt.scheduled_publish_at)
+      .map((attempt) => new Date(attempt.scheduled_publish_at))
+      .filter((date) => !Number.isNaN(date.getTime()));
+    if (!stamps.length) return '';
+    stamps.sort((a, b) => a.getTime() - b.getTime());
+    return stamps[0].toLocaleString();
   }
 
   async function loadWorkspace() {
@@ -476,6 +524,7 @@
         <div class="stat-block"><strong>{jobs.length.toString().padStart(2, '0')}</strong><span>jobs</span></div>
         <div class="stat-block"><strong>{jobs.filter((job) => job.current_checkpoint).length.toString().padStart(2, '0')}</strong><span>checkpoints open</span></div>
         <div class="stat-block"><strong>{jobs.filter((job) => job.status === 'completed').length.toString().padStart(2, '0')}</strong><span>complete</span></div>
+        <div class="stat-block"><strong>{jobs.filter((job) => job.status === 'scheduled').length.toString().padStart(2, '0')}</strong><span>scheduled</span></div>
         <button class="primary-action" onclick={() => setView('New Job')}>＋ New job</button>
       </section>
       <section class="queue-layout">
@@ -484,9 +533,9 @@
           {#if !jobs.length}<div class="empty-inline">No jobs yet. Select a source to begin.</div>{/if}
           {#each jobs as job}
             <button class:selected={selectedJobId === job.job_id} class="job-row" onclick={() => selectJob(job.job_id)}>
-              <div class="thumb"><span>{job.status === 'completed' ? '✓' : '▶'}</span></div>
+              <div class="thumb"><span>{job.status === 'completed' ? '✓' : job.status === 'scheduled' ? '⏰' : '▶'}</span></div>
               <div class="job-copy"><div class="job-title">{job.configuration?.upload?.content?.title || job.configuration?.general?.source}</div><div class="job-meta">{job.configuration?.general?.source} <span>·</span> {job.status}</div></div>
-              <div class="job-state"><span class="state-dot"></span>{job.current_checkpoint || job.status}<small>{job.updated_at}</small></div><span class="row-arrow">→</span>
+              <div class="job-state"><span class="state-dot"></span>{job.current_checkpoint || job.status}<small>{job.status === 'scheduled' ? soonestScheduledPublish(job) : job.updated_at}</small></div><span class="row-arrow">→</span>
             </button>
           {/each}
         </div>
@@ -594,7 +643,7 @@
         {#if !selectedJob}<div class="empty-view"><h2>Select a job first</h2></div>{:else}<div class="upload-layout"><div class="form-card upload-draft-fields"><span class="card-index">UPLOAD DRAFT</span><label class="field-label">Title<input aria-label="Upload title" bind:value={uploadDraft.title} /></label><label class="field-label">Description<textarea aria-label="Upload description" rows="4" bind:value={uploadDraft.description}></textarea></label><label class="field-label">Tags<input aria-label="Upload tags" bind:value={uploadDraft.tags} placeholder="tag one, tag two" /></label><label class="field-label">Schedule for<input aria-label="Upload schedule for" type="datetime-local" bind:value={uploadDraft.publishAt} /><small>Leave empty to upload as soon as you submit. A future time defers every selected platform; a retry always runs immediately.</small></label>
           {#each platforms as platform}<label><input type="checkbox" checked={uploadPlatforms.includes(platform)} onchange={(event) => uploadPlatforms = event.currentTarget.checked ? [...uploadPlatforms, platform] : uploadPlatforms.filter((item) => item !== platform)} /> {platform}</label>{/each}
           <span class="card-index">ARTIFACTS</span>{#each artifacts as artifact}<div class="saved-row"><div><b>{artifact.display_name || artifact.kind} · r{artifact.revision}</b><small>{artifact.state} · {artifact.sha256 || 'unavailable'}</small></div><a class="text-button" href={`/api/v1/jobs/${selectedJob.job_id}/artifacts/${artifact.id}/preview`} target="_blank">Preview</a><a class="text-button" href={`/api/v1/jobs/${selectedJob.job_id}/artifacts/${artifact.id}/download`}>Download</a><button class="quiet-action" onclick={() => renameArtifact(artifact)} aria-label="Rename artifact">✎</button><button class="quiet-action" onclick={() => deleteArtifact(artifact)} aria-label="Delete artifact">×</button></div>{/each}
-        </div><div class="form-card"><span class="card-index">ATTEMPT HISTORY</span>{#each uploadAttempts as attempt}<div class="saved-row"><div><b>{attempt.platform} · {attempt.status}</b><small>{attempt.configuration_snapshot?.content?.title} · {attempt.artifact_hash}</small>{#if scheduleLabel(attempt)}<small class="schedule-note">{scheduleLabel(attempt)}</small>{/if}</div>{#if attempt.status === 'failed'}<button class="text-button" onclick={() => retryUpload(attempt)}>Retry</button>{/if}</div>{/each}</div></div>{/if}
+        </div><div class="form-card"><span class="card-index">ATTEMPT HISTORY</span><div class="field-row"><label class="field-label">Status<select bind:value={uploadFilterStatus} onchange={applyUploadFilters}><option value="">All</option>{['pending', 'scheduled', 'running', 'published', 'failed', 'cancelled'].map((s) => `<option value="${s}">${s}</option>`).join('')}</select></label><label class="field-label">Platform<select bind:value={uploadFilterPlatform} onchange={applyUploadFilters}><option value="">All</option>{platforms.map((p) => `<option value="${p}">${p}</option>`).join('')}</select></label><label class="field-label">Since<input type="datetime-local" bind:value={uploadFilterSince} onchange={applyUploadFilters} /></label></div>{#each filteredUploadAttempts as attempt}<div class="saved-row"><div><b>{attempt.platform} · {attempt.status}</b><small>{attempt.configuration_snapshot?.content?.title} · {attempt.artifact_hash}</small>{#if scheduleLabel(attempt)}<small class="schedule-note">{scheduleLabel(attempt)}</small>{/if}{#if attemptUrl(attempt)}<a class="text-button" href={attemptUrl(attempt)} target="_blank">View post</a>{/if}</div>{#if attempt.status === 'failed'}<button class="text-button" onclick={() => retryUpload(attempt)}>Retry</button>{/if}</div>{/each}</div></div>{/if}
       </section>
 
     {:else if activeView === 'Settings'}

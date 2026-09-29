@@ -60,6 +60,7 @@ interruption.
 | `clipmorph job update ID --patch FILE [--reopen] [--json]`; `job resume ID`; `job cancel ID --yes [--json]`; `job delete ID --yes` | Apply a validated per-job patch using the current config hash; persist finalized job.yml and apply #180 invalidation. Reopen completed work only with confirmation; source identity is immutable. |
 | `clipmorph job review ID CHECKPOINT [--edits FILE] [--accept] [--json]`; `job render ID` | `--edits` supplies a complete transcript edit-session YAML/JSON object. Review acceptance uses the current manifest revision; render creates a new immutable artifact. |
 | `clipmorph job upload ID [--platform PLATFORM] [--json]`; `job upload retry ID PLATFORM [--attempt-id ID]` | Submit the accepted upload draft or retry one failed attempt. Retries use frozen artifact/settings and upload immediately; historical use requires explicit ID and confirmation. PLATFORM is a supported id (`youtube`, `instagram`, `tiktok`, `twitter`) validated against `clipmorph/platforms.py::SUPPORTED_PLATFORMS`, which stays the single source of truth. |
+| `clipmorph job uploads ID [--status S] [--platform P] [--since ISO] [--json]` | List a job's upload attempt history with optional status, platform, and since filters. Returns filtered attempts with result fields (`platform_post_id`, `platform_url`, `published_at`). |
 | `clipmorph job artifacts list ID [--json]`; `job artifacts preview ID ARTIFACT_ID`; `job artifacts download ID ARTIFACT_ID --destination PATH`; `job artifacts rename ID ARTIFACT_ID --name NAME`; `job artifacts delete ID ARTIFACT_ID --yes`; `job artifacts prune ID [--json]` | Operate on registered artifact IDs; rename changes display metadata only, delete trashes local bytes and retains a manifest tombstone. `prune` applies `app.yml:retention.artifacts` and prints `{pruned,bytes_freed}`. |
 | `clipmorph layout list [--json]`; `layout create FILE [--json]`; `layout get ID [--json]`; `layout delete ID --yes` | CRUD validated global `{id,name,layout}` records; create reads YAML/JSON. |
 | `clipmorph doctor [--json] [--source PATH]` | Read-only environment health check (FFmpeg/FFprobe binaries, app.yml, source/output directories, layouts, fonts, credentials, transcription device, and optional source media); text report by default, `--json` emits `{"checks":[{"id","status","detail"}]}` with status `ok\|warning\|failed`. CLI-only surface; no API route — an intentional CLI-only mechanic. Exit `0` when no check failed (warnings allowed), `1` when at least one failed. |
@@ -98,7 +99,7 @@ root-level names under `source_dir`; validate before queueing.
 | `GET/PUT /jobs/{id}/transcript` | GET returns the active source-bound session. PUT body includes `source_sha256`, `expected_revision`, optional `expected_checkpoint_revision`, duration and original/edited segments; it validates edits and saves a new immutable revision. Conflict `409`; invalid edits `422`. |
 | `POST /jobs/{id}/checkpoints/transcript/accept`; `POST /jobs/{id}/checkpoints/conversion/accept` | Accept current review with expected checkpoint revision; stale input/illegal transition `409`. State contract is [#180](https://github.com/A-Baji/ClipMorph/issues/180). |
 | `GET/PUT/DELETE /jobs/{id}/checkpoints/upload` | GET returns `{upload,checkpoint}`; PUT body `{expected_revision,upload,reopen?}` updates only the pending draft; DELETE query `expected_revision` resets it to frozen global defaults. Mutations do not change prior attempts. A draft change also discards a schedule armed by an earlier submission: its timers are cancelled and its pending attempts are unmarked, so only the next submission uploads. |
-| `GET /jobs/{id}/uploads`; `POST /jobs/{id}/upload` | Read append-only history; submit pending draft after review against current artifact; accepted work `202 {job_id,attempts,scheduled,status_url}`. A snapshot whose `upload.schedule.publish_at` is in the future returns `scheduled: true` and leaves the attempts `pending` for a later timer. |
+| `GET /jobs/{id}/uploads?status=&platform=&since=`; `POST /jobs/{id}/upload` | Read append-only history with optional status, platform, and since filters; submit pending draft after review against current artifact; accepted work `202 {job_id,attempts,scheduled,status_url,detection}`. A snapshot whose `upload.schedule.publish_at` is in the future returns `scheduled: true` and leaves the attempts `scheduled` for a later timer. Attempt statuses are `pending`, `scheduled`, `running`, `published`, `failed`, `cancelled`. A duplicate active submission returns `409`. Platform-side detection may mark attempts `published` without running a pipeline. |
 | `POST /jobs/{id}/uploads/{platform}/retry` | Body names failed `attempt_id`; reuse frozen settings/artifact. Historical retry requires matching `artifact_id` and `confirm_historical_artifact:true`. A retry ignores any `publish_at` in the frozen snapshot and uploads immediately. |
 | `GET /jobs/{id}/artifacts`; `GET /jobs/{id}/artifacts/{artifact_id}/preview`; `GET .../download` | List immutable revisions without local paths; stream registered bytes; missing/deleted bytes or paths outside allowed roots return `404`. |
 | `GET/PATCH/DELETE /jobs/{id}/artifacts/{artifact_id}` | PATCH body `{display_name}` changes display metadata only. DELETE requires `confirm=true`, removes local bytes but retains a manifest tombstone/upload references; source artifacts cannot be deleted. |
@@ -107,22 +108,26 @@ root-level names under `source_dir`; validate before queueing.
 Explicit records override matching sidecars but never narrow all-source
 discovery; only `source_names` filters API selection. Unknown record sources
 fail without escaping root. `upload.schedule.publish_at` is implemented as an
-in-process deferral; its timezone, queue, durable states, dedup and history
-belong to [#100](https://github.com/A-Baji/ClipMorph/issues/100). #179 defines
-no scheduler API. An armed schedule is owned by the accepted submission, not by
-the draft, so the two ways of superseding it — a draft `PUT`/`DELETE` or a
-rerender — cancel the timer and unmark its pending attempts. The next submission
-is the only thing that re-arms an upload, and to abandon a schedule without
-uploading, discard the draft and then cancel the job.
+in-process deferral with a full attempt lifecycle: attempts move through
+`pending → scheduled → running → published|failed|cancelled`, the derived job
+status gains a `scheduled` bucket, duplicate prevention combines a
+submission-side guard with platform-side existing-post detection, and history
+is filterable by status, platform, and since. #179 defines no scheduler API. An
+armed schedule is owned by the accepted submission, not by the draft, so the
+two ways of superseding it — a draft `PUT`/`DELETE` or a rerender — cancel the
+timer and unmark its scheduled attempts. The next submission is the only thing
+that re-arms an upload, and to abandon a schedule without uploading, cancel
+the job (which aborts scheduled attempts to `cancelled`).
 
 Every service construction reconciles manifests left `running` by a process
 that never returned, so both surfaces heal phantom queue entries on first
 touch: the in-flight checkpoint becomes `failed` with
 `{"code":"interrupted_by_restart","retryable":true}`. A `running` upload
-checkpoint whose every pending attempt is scheduled for a future `publish_at`
+checkpoint whose every `scheduled` attempt waits on a future `publish_at`
 is left alone, and reconciliation runs before the re-arm scan restores those
-timers. Nothing is resumed automatically and no remote upload is repeated
-without an explicit user action.
+timers. A past-due `scheduled` attempt is healed as an interrupted failure,
+never published unattended. Nothing is resumed automatically and no remote
+upload is repeated without an explicit user action.
 
 ### Response And Validation Boundaries
 
@@ -231,7 +236,11 @@ CONFIG_LAYERS.md remains authoritative for field meaning.
 | Composition review | PATCH configuration; POST conversion/accept; POST render | Layout/preview/accept | Expected hash/checkpoint revision/layout/preflight | conversion.layout | job.yml; new immutable artifact, prior stale/superseded | CLI 1/2; API 409/202 | Stale artifact/history |
 | Pre-upload review | GET/PUT/DELETE checkpoint upload | Content/platform review | Expected revision/platform policy/title/current artifact | Pending upload config only | Draft checkpoint; prior attempts unchanged | CLI 2; API 404/409/422 | Review gate/update/discard |
 | Upload/retry/status | POST /upload; GET /uploads; POST per-platform retry | Submit/result/retry | Platform/credentials/review; attempt artifact and frozen config | upload fields/snapshot | Append-only attempt history | CLI 1; API 202/404/409/422 | Mocked upload/history/retry |
-| Schedule deferral | POST /upload with `upload.schedule.publish_at`; draft PUT/DELETE | Future instant defers instead of uploading | Snapshot `publish_at` parse/future check; review gate | upload.schedule.publish_at | Pending attempts marked `scheduled`; timers re-armed on startup; superseding draft/rerender disarms them | CLI 1; API 202 | Service/web deferral, re-arm, disarm, immediate retry |
+| Schedule deferral | POST /upload with `upload.schedule.publish_at`; draft PUT/DELETE | Future instant defers instead of uploading | Snapshot `publish_at` parse/future check; review gate | upload.schedule.publish_at | Attempts marked `scheduled`; timers re-armed on startup; superseding draft/rerender disarms them | CLI 1; API 202 | Service/web deferral, re-arm, disarm, immediate retry |
+| Upload history/filters | `job uploads ID [--status --platform --since]`; GET /uploads?status=&platform=&since= | Filter chips on Uploads view | Status/platform/since filter validation | Read-only | Filtered attempt history with result fields | CLI 0/2; API 200/422 | Scheduling history filter tests |
+| Dedup guard | POST /upload; POST /uploads/{platform}/retry | Submission blocked while active attempt exists | Same platform + artifact + content hash + active status | None | `409` on duplicate active attempt | CLI 2; API 409 | Service dedup guard tests |
+| Platform-side detection | POST /upload (YouTube with read scope) | Existing post detected, upload skipped | `find_existing_post` hook per adapter | None | Attempt `published` with found id/url; `unavailable` note on scope failure | CLI 1; API 202 | Detection hook tests |
+| Cancel scheduled | POST /jobs/{id}/cancel (job in `scheduled` status) | Scheduled attempts aborted pre-firing | Disarm timers + mark `cancelled` | None | Attempts `cancelled`; job `cancelled` | CLI 0; API 200 | Service cancel path tests |
 | Artifact preview/download/rename/delete | GET/PATCH/DELETE artifact by ID plus preview/download | Table/preview/download/display-name/trash | Registered immutable ID, safe metadata, availability, confirmation | Display metadata or artifact availability only | Manifest revisions/tombstones; local bytes; upload references retained | CLI 1/2; API 200/400/404/409 | Bytes/headers/containment/rename/delete |
 | Retention/prune | `job artifacts prune ID`; POST /jobs/{id}/artifacts/prune | Apply app-level retention policy | superseded + non-source only; `current`/`stale` protected | None (app-level, not part of the job merge) | Tombstoned manifest entries; bytes to trash | CLI 0/1; API 202/404 | `tests/test_retention.py`; CLI/web cases |
 | Restart reconciliation | Implicit on every service construction | Queue self-healing | Recorded `running` status; unreadable manifests skipped | None | `interrupted_by_restart` checkpoint failure | CLI 0/1; API n/a | `tests/test_reconciliation.py` |

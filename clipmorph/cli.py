@@ -70,7 +70,7 @@ CHECKPOINT_STAGES = ("transcript", "conversion", "upload")
 STATUS_STYLES = {
     "completed": "green", "published": "green", "created": "green",
     "ok": "green", "succeeded": "green", "current": "green",
-    "running": "cyan", "queued": "cyan",
+    "running": "cyan", "queued": "cyan", "scheduled": "yellow",
     "awaiting_review": "yellow", "partial_failure": "red", "failed": "red",
     "creation_failed": "red", "invalid_config": "red", "invalid_record": "red",
     "stale": "yellow", "cancelled": "magenta", "skipped": "dim",
@@ -384,9 +384,10 @@ def _print_upload_result(result: dict[str, Any], json_output: bool) -> None:
         "platform": attempt.get("platform"),
         "attempt_id": attempt.get("attempt_id"),
         "status": _status(attempt.get("status")),
-        "scheduled": _cell(_yes_no(attempt.get("scheduled"))),
+        "scheduled_publish_at": attempt.get("scheduled_publish_at"),
     } for attempt in (result.get("attempts") or [])],
-        ["platform", "attempt_id", "status", "scheduled"], nowrap=("attempt_id",))
+        ["platform", "attempt_id", "status", "scheduled_publish_at"],
+        nowrap=("attempt_id",))
     _print_summary([f"job: {result.get('job_id')}",
                     f"scheduled: {_yes_no(result.get('scheduled'))}",
                     f"status_url: {result.get('status_url')}"])
@@ -1007,6 +1008,40 @@ def job_upload_command(
                 upload_args[0], platform, artifact_id,
                 confirm_historical_artifact)
     _print_upload_result(result, json_output)
+
+
+@job_app.command("uploads")
+def job_uploads_command(
+        ctx: typer.Context,
+        job_id: Annotated[str, typer.Argument(help="Job ID.")],
+        status: Annotated[Optional[str], typer.Option(
+            "--status", help="Keep only attempts in this status.")] = None,
+        platform: Annotated[Optional[str], typer.Option(
+            "--platform", help="Keep only attempts for this platform.")] = None,
+        since: Annotated[Optional[str], typer.Option(
+            "--since", help="Keep only attempts created at or after this "
+            "ISO-8601 instant.")] = None,
+        json_output: JsonOption = False,
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """List a job's upload attempt history with optional filters."""
+    from clipmorph.service import JobService
+
+    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    with closing(JobService(selected_data_dir,
+                           app_config_path=selected_config)) as service:
+        attempts = service.list_upload_attempts(job_id, status, platform, since)
+    if json_output:
+        _print_json(attempts)
+        return
+    _print_table(f"Upload attempts for job {job_id}", [{
+        "platform": attempt.get("platform"),
+        "attempt_id": attempt.get("attempt_id"),
+        "status": _status(attempt.get("status")),
+        "scheduled_publish_at": attempt.get("scheduled_publish_at"),
+    } for attempt in attempts],
+        ["platform", "attempt_id", "status", "scheduled_publish_at"],
+        nowrap=("attempt_id",))
 
 
 @artifact_app.command("list")

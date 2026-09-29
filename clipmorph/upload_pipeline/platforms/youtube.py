@@ -30,6 +30,17 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
     GOOGLE_AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
     GOOGLE_TOKEN_URI = "https://oauth2.googleapis.com/token"
     YOUTUBE_UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
+    YOUTUBE_READ_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
+    # The consent request asks for both scopes so a fresh refresh token can
+    # run existing-post detection; upload-only tokens stay valid for uploads.
+    YOUTUBE_SCOPES = [YOUTUBE_UPLOAD_SCOPE, YOUTUBE_READ_SCOPE]
+
+    # YouTube can deterministically detect an existing post for an artifact by
+    # scanning the channel's uploads playlist for the marker embedded at
+    # publish time. The capability ships here, but it only works once the
+    # user grants the read scope (see YOUTUBE_READ_SCOPE); until then the
+    # lookup is unavailable and never blocks the upload.
+    supports_existing_detection = True
 
     # Video processing constants
     DEFAULT_PROCESSING_TIME_PER_MB = 15  # seconds
@@ -137,7 +148,7 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
                                        token_uri=self.GOOGLE_TOKEN_URI,
                                        client_id=self.client_id,
                                        client_secret=self.client_secret,
-                                       scopes=[self.YOUTUBE_UPLOAD_SCOPE])
+                                       scopes=self.YOUTUBE_SCOPES)
 
         if not self.credentials.valid:
             if self.credentials.refresh_token:
@@ -158,7 +169,7 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
                         token_uri=self.GOOGLE_TOKEN_URI,
                         client_id=self.client_id,
                         client_secret=self.client_secret,
-                        scopes=[self.YOUTUBE_UPLOAD_SCOPE])
+                        scopes=self.YOUTUBE_SCOPES)
                     self.credentials.refresh(Request())
             else:
                 # Generate new token if credentials are completely invalid
@@ -175,7 +186,7 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
                     token_uri=self.GOOGLE_TOKEN_URI,
                     client_id=self.client_id,
                     client_secret=self.client_secret,
-                    scopes=[self.YOUTUBE_UPLOAD_SCOPE])
+                    scopes=self.YOUTUBE_SCOPES)
                 self.credentials.refresh(Request())
 
         self.youtube_service = build(self.api_service_name,
@@ -328,7 +339,7 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
                 "Client ID and Client Secret are required for token generation"
             )
 
-        scopes = [self.YOUTUBE_UPLOAD_SCOPE]
+        scopes = list(self.YOUTUBE_SCOPES)
 
         flow = InstalledAppFlow.from_client_config(
             {
@@ -412,8 +423,9 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
 
                 # Prepare upload request
                 request = self._prepare_upload_request(
-                    video_path, title, description or "", category,
-                    keywords, privacy_status)
+                    video_path, title,
+                    self._embed_marker(video_path, description or ""),
+                    category, keywords, privacy_status)
 
                 # Execute upload
                 video_id = self._execute_resumable_upload(
@@ -427,3 +439,57 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
                 raise
 
         return video_id
+
+    def _embed_marker(self, video_path: str, description: str) -> str:
+        """Append the artifact marker that ``find_existing_post`` detects.
+
+        The marker carries the artifact's SHA-256 so a later submission can
+        recognize an already-published post. The description is truncated to
+        keep the composed value within the platform's description limit.
+        """
+        from clipmorph.job import source_sha256
+        from clipmorph.policy import CAPABILITY_MATRIX
+
+        marker = f"clip:{source_sha256(video_path)}"
+        description = (description or "").strip()
+        rule = CAPABILITY_MATRIX.get("youtube")
+        limit = rule.caption_limit if rule and rule.caption_limit else len(marker)
+        separator = "\n\n"
+        if len(description) + len(marker) + len(separator) > limit:
+            description = description[:limit - len(marker) - len(separator)].rstrip()
+        return f"{description}{separator}{marker}" if description else marker
+
+    def find_existing_post(self, artifact_sha: str) -> str | None:
+        """Return the id of an existing upload carrying this artifact's marker.
+
+        The lookup is deterministic and bounded: one ``channels.list`` call
+        resolves the channel's uploads playlist, then a single
+        ``playlistItems.list`` page scans it for the ``clip:{artifact_sha}``
+        marker embedded at publish time. Returns ``None`` when no matching
+        post exists. Raises on API failure (for example a token that lacks
+        the read scope) so the caller can mark detection unavailable without
+        blocking the upload.
+        """
+        if not self.youtube_service:
+            if not self.refresh_token and not os.getenv("GOOGLE_REFRESH_TOKEN"):
+                return None
+            self._authenticate()
+        marker = f"clip:{artifact_sha}"
+        channels = self.youtube_service.channels().list(
+            mine=True, part="contentDetails").execute()
+        items = channels.get("items") or []
+        if not items:
+            return None
+        uploads_id = (items[0].get("contentDetails", {})
+                       .get("relatedPlaylists", {}).get("uploads"))
+        if not uploads_id:
+            return None
+        page = self.youtube_service.playlistItems().list(
+            playlistId=uploads_id, part="snippet", maxResults=50).execute()
+        for item in page.get("items") or []:
+            snippet = item.get("snippet", {})
+            if marker in (snippet.get("description") or ""):
+                video_id = snippet.get("resourceId", {}).get("videoId")
+                if video_id:
+                    return video_id
+        return None
