@@ -644,10 +644,12 @@ and all upload references intact.
 Each upload attempt is append-only and records attempt id, platform, artifact
 id and SHA-256, the upload-content/platform/schedule configuration snapshot and
 hash, a content hash for dedup, start/completion timestamps, outcome, and
-safe response/error details. An attempt is never rewritten to point at a
-newer artifact or new content. Partial platform success remains visible per
-attempt and platform. Remote uploads are historical results; local edits never
-silently update or delete them.
+safe response/error details. A completed attempt's `result` also carries
+`progress_percent`, the last observed live upload percent; live percents are
+runtime state and are never rewritten into a terminal record. An attempt is
+never rewritten to point at a newer artifact or new content. Partial platform
+success remains visible per attempt and platform. Remote uploads are historical
+results; local edits never silently update or delete them.
 
 Attempt statuses are `pending`, `scheduled`, `running`, `published`, `failed`,
 and `cancelled`. A scheduled attempt waits on a future `publish_at`; when the

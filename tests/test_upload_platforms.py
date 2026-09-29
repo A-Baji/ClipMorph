@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 
 from clipmorph.policy import CAPABILITY_MATRIX, validate_artifact
 from clipmorph.upload_pipeline import UploadPipeline
+from clipmorph.upload_pipeline.platforms.base import BaseUploadPipeline
 
 
 class UploadPipelineTests(unittest.TestCase):
@@ -93,6 +94,51 @@ class CommonParameterMappingTests(unittest.TestCase):
 
         self.assertEqual(set(sent) - {"video_path"},
                          {"caption", "share_to_feed", "thumb_offset"})
+
+
+class _FakeAdapter(BaseUploadPipeline):
+    """A minimal adapter that walks its allocation steps during run."""
+
+    def __init__(self, allocations):
+        self.progress_allocations = allocations
+        self.progress_bar = None
+        self.platform_name = "TikTok"
+        # Prevent the orchestrator's interactive-auth pass from refreshing.
+        self.access_token = "fake"
+        super().__init__()
+
+    def run(self, video_path, **kwargs):
+        for step in self.progress_allocations:
+            self._update_progress(step)
+        return "fake-result"
+
+
+class UploadProgressCallbackTests(unittest.TestCase):
+    def _run_with_callback(self, allocations):
+        updates = []
+        pipeline = UploadPipeline(
+            progress_callback=lambda name, percent: updates.append(
+                (name, percent)))
+        pipeline.enabled_platforms = {"TikTok": _FakeAdapter(allocations)}
+        pipeline.run("video.mp4", "title")
+        return updates
+
+    def test_callback_receives_ordered_percent_updates(self):
+        updates = self._run_with_callback(
+            {"step_a": 25, "step_b": 50, "step_c": 25})
+        self.assertEqual(updates, [
+            ("TikTok", 25), ("TikTok", 75), ("TikTok", 100)])
+
+    def test_normalization_pins_allocations_sum_to_90(self):
+        updates = self._run_with_callback({"step_a": 30, "step_b": 60})
+        self.assertEqual(updates, [("TikTok", 33), ("TikTok", 100)])
+
+    def test_no_callback_by_default_keeps_cli_behavior(self):
+        pipeline = UploadPipeline()
+        pipeline.enabled_platforms = {
+            "TikTok": _FakeAdapter({"step_a": 25, "step_b": 50, "step_c": 25})}
+        results = pipeline.run("video.mp4", "title")
+        self.assertTrue(results["TikTok"]["success"])
 
 
 if __name__ == "__main__":

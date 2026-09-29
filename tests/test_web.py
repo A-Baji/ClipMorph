@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,7 @@ from unittest.mock import patch
 import yaml
 from clipmorph.configuration import APP_CONFIG_VERSION
 from clipmorph.service import JobService
+from clipmorph.upload_pipeline.platforms.base import BaseUploadPipeline
 
 try:
     from fastapi.testclient import TestClient
@@ -15,6 +17,34 @@ try:
 except ImportError:  # CLI-only installations do not include the web extra.
     TestClient = None
     create_app = None
+
+
+def _fake_youtube_adapter(percent, fail=False):
+    """Build a fake YouTube adapter that reports exactly one progress step.
+
+    The allocations sum to 100 so the normalized percent after the single
+    ``upload`` step equals ``percent``.
+    """
+
+    class FakeYouTubeAdapter(BaseUploadPipeline):
+        def __init__(self):
+            self.progress_allocations = {"upload": percent,
+                                         "finalize": 100 - percent}
+            self.progress_bar = None
+            self.platform_name = "YouTube"
+            # Prevent the orchestrator's interactive-auth pass from firing.
+            self.credentials = True
+            super().__init__()
+
+        def run(self, video_path, **kwargs):
+            self._update_progress("upload")
+            if fail:
+                raise RuntimeError("upload failed")
+            return {"success": True, "result": "remote-id",
+                    "started_at": "2026-01-01T00:00:00+00:00",
+                    "completed_at": "2026-01-01T00:00:01+00:00"}
+
+    return FakeYouTubeAdapter()
 
 
 @unittest.skipUnless(TestClient and create_app, "web extra is not installed")
@@ -272,6 +302,113 @@ class WebApiTests(unittest.TestCase):
                 deleted = client.delete(
                     f"/api/v1/jobs/{job_id}/artifacts/{artifact_id}?confirm=true")
                 self.assertEqual(deleted.status_code, 200, deleted.text)
+
+    def test_events_payload_contains_live_upload_progress(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"source")
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {
+                "conversion": {"skip": True, "subtitles": {"skip": True}},
+                "upload": {"platforms": {"include": ["youtube"]}},
+            })
+            # A terminal status ends the SSE stream after one event.
+            manifest.set_status("completed", service.jobs_dir)
+            service.close()
+
+            app = create_app(data_dir)
+            with TestClient(app) as client:
+                job_id = manifest.job_id
+                # Simulate an in-flight upload's live progress.
+                app.state.job_service._live_progress[job_id] = {"youtube": 42}
+
+                response = client.get(f"/api/v1/jobs/{job_id}/events")
+                self.assertEqual(response.status_code, 200)
+                events = [line[6:] for line in response.text.splitlines()
+                          if line.startswith("data: ")]
+                self.assertTrue(events)
+                payload = json.loads(events[0])
+                self.assertEqual(payload["upload_progress"], {"youtube": 42})
+
+                # The polling fallback carries the same field.
+                job = client.get(f"/api/v1/jobs/{job_id}").json()
+                self.assertEqual(job["upload_progress"], {"youtube": 42})
+
+    def test_final_attempt_result_carries_progress_percent(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"source")
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {
+                "conversion": {"skip": True, "subtitles": {"skip": True}},
+                "upload": {"platforms": {"include": ["youtube"]}},
+            })
+            artifact_dir = data_dir / "output" / manifest.job_id
+            artifact_dir.mkdir(parents=True)
+            artifact_path = artifact_dir / "output.mp4"
+            artifact_path.write_bytes(b"rendered artifact")
+            manifest.set_artifact(str(artifact_path), service.jobs_dir)
+            service.close()
+
+            app = create_app(data_dir)
+            with TestClient(app) as client:
+                job_id = manifest.job_id
+                draft = client.put(
+                    f"/api/v1/jobs/{job_id}/checkpoints/upload",
+                    json={"expected_revision": 0,
+                          "upload": {"content": {"title": "Frozen title"}}})
+                self.assertEqual(draft.status_code, 200, draft.text)
+
+                with patch("clipmorph.upload_pipeline.YouTubeUploadPipeline") as adapter_type:
+                    adapter_type.return_value = _fake_youtube_adapter(75)
+                    submitted = client.post(f"/api/v1/jobs/{job_id}/upload", json={})
+                    self.assertEqual(submitted.status_code, 202, submitted.text)
+                    app.state.job_service._futures[f"upload:{job_id}"].result(timeout=2)
+
+                attempts = client.get(f"/api/v1/jobs/{job_id}/uploads").json()
+                self.assertEqual(attempts[0]["result"]["progress_percent"], 75)
+                self.assertEqual(app.state.job_service.live_progress_for(job_id), {})
+
+    def test_failed_attempt_retains_last_observed_progress(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"source")
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {
+                "conversion": {"skip": True, "subtitles": {"skip": True}},
+                "upload": {"platforms": {"include": ["youtube"]}},
+            })
+            artifact_dir = data_dir / "output" / manifest.job_id
+            artifact_dir.mkdir(parents=True)
+            artifact_path = artifact_dir / "output.mp4"
+            artifact_path.write_bytes(b"rendered artifact")
+            manifest.set_artifact(str(artifact_path), service.jobs_dir)
+            service.close()
+
+            app = create_app(data_dir)
+            with TestClient(app) as client:
+                job_id = manifest.job_id
+                draft = client.put(
+                    f"/api/v1/jobs/{job_id}/checkpoints/upload",
+                    json={"expected_revision": 0,
+                          "upload": {"content": {"title": "Frozen title"}}})
+                self.assertEqual(draft.status_code, 200, draft.text)
+
+                with patch("clipmorph.upload_pipeline.YouTubeUploadPipeline") as adapter_type:
+                    adapter_type.return_value = _fake_youtube_adapter(30, fail=True)
+                    submitted = client.post(f"/api/v1/jobs/{job_id}/upload", json={})
+                    self.assertEqual(submitted.status_code, 202, submitted.text)
+                    app.state.job_service._futures[f"upload:{job_id}"].result(timeout=2)
+
+                attempts = client.get(f"/api/v1/jobs/{job_id}/uploads").json()
+                self.assertEqual(attempts[0]["status"], "failed")
+                self.assertEqual(attempts[0]["result"]["progress_percent"], 30)
 
     def test_credential_probe_route_returns_the_verdict(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -309,7 +309,8 @@ def create_app(data_dir: str | Path | None = None,
     @app.get("/api/v1/jobs/{job_id}")
     def get_job(job_id: str):
         try:
-            return asdict(service.get_job(job_id))
+            return {**asdict(service.get_job(job_id)),
+                    "upload_progress": service.live_progress_for(job_id)}
         except FileNotFoundError:
             fail(404, "not_found", "job not found")
 
@@ -638,7 +639,9 @@ def create_app(data_dir: str | Path | None = None,
                     manifest = service.get_job(job_id)
                 except FileNotFoundError:
                     return
-                yield f"data: {json.dumps(asdict(manifest))}\n\n"
+                payload = {**asdict(manifest),
+                           "upload_progress": service.live_progress_for(job_id)}
+                yield f"data: {json.dumps(payload)}\n\n"
                 if manifest.status in {"completed", "failed", "cancelled"}:
                     break
                 time.sleep(0.5)

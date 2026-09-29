@@ -450,5 +450,48 @@ class DeferredUploadTests(unittest.TestCase):
             self.assertIsNotNone(saved.upload_attempts[0]["completed_at"])
 
 
+def _upload_results_reporting_progress(platforms, percents):
+    """A mocked execute_upload_pipeline that reports live progress."""
+    def execute(*args, **kwargs):
+        progress_callback = kwargs.get("progress_callback")
+        if progress_callback:
+            for platform, percent in zip(platforms, percents):
+                progress_callback(platform, percent)
+        stamp = datetime.now(timezone.utc).isoformat()
+        return {platform: {"success": True, "result": f"{platform} ok",
+                           "started_at": stamp, "completed_at": stamp}
+                for platform in platforms}
+    return execute
+
+
+class LiveProgressTests(unittest.TestCase):
+    def test_restart_clears_live_progress_but_retains_final_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = _reviewed_job(data_dir)
+            self.addCleanup(service.close)
+            job_id = manifest.job_id
+
+            with patch("clipmorph.upload_attempts.execute_upload_pipeline",
+                       side_effect=_upload_results_reporting_progress(
+                           ["youtube"], [75])):
+                service.submit_upload(job_id, ["youtube"])
+                service._futures[f"upload:{job_id}"].result(timeout=2)
+
+            attempt = service.get_job(job_id).upload_attempts[0]
+            self.assertEqual(attempt["result"]["progress_percent"], 75)
+            # Live progress is cleared once the upload completes.
+            self.assertEqual(service.live_progress_for(job_id), {})
+
+            # Simulate a restart: a fresh service instance.
+            service.close()
+            restarted = JobService(data_dir)
+            self.addCleanup(restarted.close)
+            self.assertEqual(restarted.live_progress_for(job_id), {})
+            # The final snapshot persists in the manifest.
+            persisted = restarted.get_job(job_id).upload_attempts[0]
+            self.assertEqual(persisted["result"]["progress_percent"], 75)
+
+
 if __name__ == "__main__":
     unittest.main()

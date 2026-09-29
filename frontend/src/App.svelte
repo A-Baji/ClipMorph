@@ -7,6 +7,8 @@
   let layouts = [];
   let artifacts = [];
   let uploadAttempts = [];
+  let uploadProgress = {};
+  let progressStream = null;
   let selectedJobId = '';
   let selectedSources = [];
   let expandedSource = '';
@@ -39,6 +41,23 @@
 
   $: selectedJob = jobs.find((job) => job.job_id === selectedJobId) || jobs[0];
   $: selectedCheckpoint = selectedJob?.checkpoints?.[selectedJob?.current_checkpoint];
+
+  // Latest attempt per platform: each submission appends one attempt per
+  // selected platform, so the last attempt per platform is the latest set.
+  $: currentAttemptPlatforms = (() => {
+    const latest = {};
+    for (const attempt of uploadAttempts || []) latest[attempt.platform] = attempt;
+    return Object.keys(latest);
+  })();
+  // Composite live upload percent across the current attempt set.
+  $: overallUploadPercent = (() => {
+    const progress = uploadProgress[selectedJobId] || {};
+    const percents = currentAttemptPlatforms
+      .map((platform) => progress[platform])
+      .filter((value) => typeof value === 'number');
+    if (!percents.length) return null;
+    return Math.round(percents.reduce((sum, value) => sum + value, 0) / percents.length);
+  })();
 
   function flash(message) {
     notice = message;
@@ -128,6 +147,37 @@
     return stamps[0].toLocaleString();
   }
 
+  function closeProgressStream() {
+    if (progressStream) {
+      progressStream.close();
+      progressStream = null;
+    }
+  }
+
+  function openProgressStream(jobId) {
+    closeProgressStream();
+    if (!jobId) return;
+    const source = new EventSource(`/api/v1/jobs/${jobId}/events`);
+    source.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        const progress = data.upload_progress || {};
+        uploadProgress = { ...uploadProgress, [jobId]: progress };
+        if (['completed', 'failed', 'cancelled'].includes(data.status)) {
+          source.close();
+          if (progressStream === source) progressStream = null;
+        }
+      } catch (error) {
+        // Ignore malformed events.
+      }
+    };
+    source.onerror = () => {
+      source.close();
+      if (progressStream === source) progressStream = null;
+    };
+    progressStream = source;
+  }
+
   async function loadWorkspace() {
     try {
       [jobs, sources, layouts] = await Promise.all([
@@ -163,6 +213,7 @@
       publishAt: toLocalInput(job.configuration?.upload?.schedule?.publish_at),
     };
     compositionJson = JSON.stringify(job.configuration?.conversion?.layout || {}, null, 2);
+    openProgressStream(selectedJobId);
   }
 
   async function setView(view) {
@@ -536,6 +587,15 @@
               <div class="thumb"><span>{job.status === 'completed' ? '✓' : job.status === 'scheduled' ? '⏰' : '▶'}</span></div>
               <div class="job-copy"><div class="job-title">{job.configuration?.upload?.content?.title || job.configuration?.general?.source}</div><div class="job-meta">{job.configuration?.general?.source} <span>·</span> {job.status}</div></div>
               <div class="job-state"><span class="state-dot"></span>{job.current_checkpoint || job.status}<small>{job.status === 'scheduled' ? soonestScheduledPublish(job) : job.updated_at}</small></div><span class="row-arrow">→</span>
+              {#if uploadProgress[job.job_id] && Object.keys(uploadProgress[job.job_id]).length}
+                <div class="upload-mini-bars">
+                  {#each Object.entries(uploadProgress[job.job_id]) as [platform, percent]}
+                    <div class="upload-mini-bar" title={`${platform}: ${percent}%`}>
+                      <div class="upload-mini-bar-fill" style="width: {percent}%"></div>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
             </button>
           {/each}
         </div>
@@ -548,6 +608,14 @@
                 <div class="platform-row"><span class="platform-icon">{stage[0].toUpperCase()}</span><span>{stage}</span><span class="upload-pending">{selectedJob.checkpoints?.[stage]?.status}</span></div>
               {/each}
             </div>
+            {#if overallUploadPercent !== null}
+              <div class="upload-overall">
+                <div class="upload-overall-label">Upload {overallUploadPercent}% overall</div>
+                <div class="upload-overall-track">
+                  <div class="upload-overall-fill" style="width: {overallUploadPercent}%"></div>
+                </div>
+              </div>
+            {/if}
             <div class="detail-actions">
               {#if selectedJob.current_checkpoint}<button class="primary-action" onclick={() => setView(selectedJob.current_checkpoint === 'upload' ? 'Uploads' : 'Captions')}>Review {selectedJob.current_checkpoint}</button>{/if}
               {#if ['failed', 'cancelled', 'partial_failure'].includes(selectedJob.status)}<button class="secondary-action" onclick={() => jobAction('resume')}>Resume job</button>{/if}
@@ -643,7 +711,7 @@
         {#if !selectedJob}<div class="empty-view"><h2>Select a job first</h2></div>{:else}<div class="upload-layout"><div class="form-card upload-draft-fields"><span class="card-index">UPLOAD DRAFT</span><label class="field-label">Title<input aria-label="Upload title" bind:value={uploadDraft.title} /></label><label class="field-label">Description<textarea aria-label="Upload description" rows="4" bind:value={uploadDraft.description}></textarea></label><label class="field-label">Tags<input aria-label="Upload tags" bind:value={uploadDraft.tags} placeholder="tag one, tag two" /></label><label class="field-label">Schedule for<input aria-label="Upload schedule for" type="datetime-local" bind:value={uploadDraft.publishAt} /><small>Leave empty to upload as soon as you submit. A future time defers every selected platform; a retry always runs immediately.</small></label>
           {#each platforms as platform}<label><input type="checkbox" checked={uploadPlatforms.includes(platform)} onchange={(event) => uploadPlatforms = event.currentTarget.checked ? [...uploadPlatforms, platform] : uploadPlatforms.filter((item) => item !== platform)} /> {platform}</label>{/each}
           <span class="card-index">ARTIFACTS</span>{#each artifacts as artifact}<div class="saved-row"><div><b>{artifact.display_name || artifact.kind} · r{artifact.revision}</b><small>{artifact.state} · {artifact.sha256 || 'unavailable'}</small></div><a class="text-button" href={`/api/v1/jobs/${selectedJob.job_id}/artifacts/${artifact.id}/preview`} target="_blank">Preview</a><a class="text-button" href={`/api/v1/jobs/${selectedJob.job_id}/artifacts/${artifact.id}/download`}>Download</a><button class="quiet-action" onclick={() => renameArtifact(artifact)} aria-label="Rename artifact">✎</button><button class="quiet-action" onclick={() => deleteArtifact(artifact)} aria-label="Delete artifact">×</button></div>{/each}
-        </div><div class="form-card"><span class="card-index">ATTEMPT HISTORY</span><div class="field-row"><label class="field-label">Status<select bind:value={uploadFilterStatus} onchange={applyUploadFilters}><option value="">All</option>{['pending', 'scheduled', 'running', 'published', 'failed', 'cancelled'].map((s) => `<option value="${s}">${s}</option>`).join('')}</select></label><label class="field-label">Platform<select bind:value={uploadFilterPlatform} onchange={applyUploadFilters}><option value="">All</option>{platforms.map((p) => `<option value="${p}">${p}</option>`).join('')}</select></label><label class="field-label">Since<input type="datetime-local" bind:value={uploadFilterSince} onchange={applyUploadFilters} /></label></div>{#each filteredUploadAttempts as attempt}<div class="saved-row"><div><b>{attempt.platform} · {attempt.status}</b><small>{attempt.configuration_snapshot?.content?.title} · {attempt.artifact_hash}</small>{#if scheduleLabel(attempt)}<small class="schedule-note">{scheduleLabel(attempt)}</small>{/if}{#if attemptUrl(attempt)}<a class="text-button" href={attemptUrl(attempt)} target="_blank">View post</a>{/if}</div>{#if attempt.status === 'failed'}<button class="text-button" onclick={() => retryUpload(attempt)}>Retry</button>{/if}</div>{/each}</div></div>{/if}
+        </div><div class="form-card"><span class="card-index">ATTEMPT HISTORY</span><div class="field-row"><label class="field-label">Status<select bind:value={uploadFilterStatus} onchange={applyUploadFilters}><option value="">All</option>{['pending', 'scheduled', 'running', 'published', 'failed', 'cancelled'].map((s) => `<option value="${s}">${s}</option>`).join('')}</select></label><label class="field-label">Platform<select bind:value={uploadFilterPlatform} onchange={applyUploadFilters}><option value="">All</option>{platforms.map((p) => `<option value="${p}">${p}</option>`).join('')}</select></label><label class="field-label">Since<input type="datetime-local" bind:value={uploadFilterSince} onchange={applyUploadFilters} /></label></div>{#each filteredUploadAttempts as attempt}<div class="saved-row"><div><b>{attempt.platform} · {attempt.status}</b><small>{attempt.configuration_snapshot?.content?.title} · {attempt.artifact_hash}</small>{#if scheduleLabel(attempt)}<small class="schedule-note">{scheduleLabel(attempt)}</small>{/if}{#if attemptUrl(attempt)}<a class="text-button" href={attemptUrl(attempt)} target="_blank">View post</a>{/if}</div><div class="attempt-progress">{#if uploadProgress[selectedJobId]?.[attempt.platform] !== undefined}<span class="attempt-progress-live">{uploadProgress[selectedJobId][attempt.platform]}%</span>{:else if attempt.result?.progress_percent !== undefined}<span class="attempt-progress-final">{attempt.result.progress_percent}%</span>{/if}</div>{#if attempt.status === 'failed'}<button class="text-button" onclick={() => retryUpload(attempt)}>Retry</button>{/if}</div>{/each}</div></div>{/if}
       </section>
 
     {:else if activeView === 'Settings'}

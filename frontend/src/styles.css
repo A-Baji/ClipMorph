@@ -29,3 +29,13 @@ nav { display:grid; gap:5px; }.nav-item { border:0; color:#9ca49e; background:tr
 .source-option small { color:#788279; font:9px 'DM Mono'; }
 .source-override { grid-column:1/-1; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; padding:10px 0 14px 25px; border-left:2px solid var(--line); }
 @media (max-width:560px) { .source-entry { grid-template-columns:minmax(0,1fr); }.source-override { grid-template-columns:1fr; padding-left:12px; } }
+.upload-mini-bars { grid-column:1/-1; display:flex; gap:4px; padding:2px 8px 8px; }
+.upload-mini-bar { flex:1; height:3px; background:#343d35; border-radius:2px; overflow:hidden; }
+.upload-mini-bar-fill { height:100%; background:var(--acid); }
+.upload-overall { border-bottom:1px solid var(--line); padding:4px 0 18px; margin-bottom:16px; }
+.upload-overall-label { color:#8b978d; font:9px 'DM Mono'; text-transform:uppercase; letter-spacing:.08em; margin-bottom:7px; }
+.upload-overall-track { height:5px; background:#343d35; border-radius:3px; overflow:hidden; }
+.upload-overall-fill { height:100%; background:var(--acid); }
+.attempt-progress { min-width:36px; text-align:right; font:10px 'DM Mono'; color:#8b978d; }
+.attempt-progress-live { color:var(--acid); }
+.attempt-progress-final { color:#6e786f; }
