@@ -49,18 +49,23 @@ class UploadPipeline:
                  instagram: bool = False,
                  tiktok: bool = False,
                  twitter: bool = False,
-                 max_workers: int = 4):
+                 max_workers: int = 4,
+                 progress_callback=None):
         """
         Initialize the upload pipeline with platform configurations.
-        
+
         Args:
             youtube: Whether to upload to YouTube
-            instagram: Whether to upload to Instagram  
+            instagram: Whether to upload to Instagram
             tiktok: Whether to upload to TikTok
             twitter: Whether to upload to Twitter
             max_workers: Maximum number of parallel uploads
+            progress_callback: Optional callable invoked with
+                ``(platform_name, percent)`` after each adapter step update;
+                ``None`` keeps the default CLI behavior untouched
         """
         self.max_workers = max_workers
+        self._progress_callback = progress_callback
         self.enabled_platforms: Dict[str, Any] = {}
         self.initialization_errors: Dict[str, str] = {}
 
@@ -175,6 +180,13 @@ class UploadPipeline:
             # apply the platform-specific overrides in one place
             platform_params = self._map_common_parameters(
                 platform_name, title, **kwargs)
+
+            # Wire the orchestrator's progress callback onto the adapter so
+            # each step update during run forwards (platform_name, percent).
+            if self._progress_callback:
+                pipeline.progress_callback = (
+                    lambda percent, _name=platform_name:
+                    self._progress_callback(_name, percent))
 
             # Call the platform's run method
             result = pipeline.run(video_path=video_path, **platform_params)

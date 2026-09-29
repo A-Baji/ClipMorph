@@ -62,13 +62,18 @@ class Bug001RegressionTests(unittest.TestCase):
                     service._futures[f"upload:{manifest.job_id}"].result(
                         timeout=10)
 
+                submitted = pipeline_type.call_args.kwargs
                 self.assertEqual(
-                    pipeline_type.call_args.kwargs,
+                    {key: value for key, value in submitted.items()
+                     if key != "progress_callback"},
                     {"youtube": True, "instagram": True,
                      "tiktok": True, "twitter": True},
                 )
-                submitted = pipeline_type.call_args.kwargs
-                self.assertEqual(sorted(submitted), sorted(SUPPORTED_PLATFORMS))
+                self.assertIsNotNone(submitted.get("progress_callback"))
+                self.assertEqual(
+                    sorted(key for key in submitted if key != "progress_callback"),
+                    sorted(SUPPORTED_PLATFORMS),
+                )
             finally:
                 service.close()
 

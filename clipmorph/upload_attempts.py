@@ -8,7 +8,7 @@ per-result normalization. Manifest/checkpoint state transitions stay in
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 
 def content_options(upload_config: dict[str, Any],
@@ -27,17 +27,22 @@ def content_options(upload_config: dict[str, Any],
 
 
 def execute_upload_pipeline(platforms: list[str], artifact_path: str,
-                            upload_config: dict[str, Any]) -> dict[str, Any]:
+                            upload_config: dict[str, Any],
+                            progress_callback: Callable[[str, int], None] | None = None
+                            ) -> dict[str, Any]:
     """Run the upload pipeline and return per-platform results.
 
     Platform failures that abort the whole pipeline are normalized into a
     failed result per requested platform so no requested destination silently
-    disappears (#87).
+    disappears (#87). ``progress_callback`` is threaded through to the
+    orchestrator and invoked with ``(platform_name, percent)`` after each
+    adapter step update.
     """
     from clipmorph.upload_pipeline import UploadPipeline
 
     platform_flags = {platform: True for platform in platforms}
-    pipeline = UploadPipeline(**platform_flags)
+    pipeline = UploadPipeline(**platform_flags,
+                              progress_callback=progress_callback)
     content = upload_config.get("content", {})
     try:
         return pipeline.run(artifact_path, content.get("title", ""),

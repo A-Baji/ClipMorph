@@ -102,6 +102,10 @@ class JobService:
         self._tokens: dict[str, CancellationToken] = {}
         self._futures: dict[str, Future] = {}
         self._scheduled_timers: dict[str, list[Timer]] = {}
+        # Live per-platform upload percents (job_id -> {platform: percent}),
+        # held in service memory only while an upload is in flight; the
+        # final snapshot is written into the attempt record at completion.
+        self._live_progress: dict[str, dict[str, int]] = {}
         # Order matters: reconciliation must settle stalled checkpoints first so
         # that only genuinely scheduled uploads survive into the re-arm scan.
         self._reconcile_interrupted_jobs()
@@ -978,6 +982,22 @@ class JobService:
             return None
         return parsed
 
+    def _on_progress(self, job_id: str) -> Callable[[str, int], None]:
+        """Return a progress callback that records live percents for one job."""
+        def record(platform: str, percent: int) -> None:
+            with self._lock:
+                self._live_progress.setdefault(job_id, {})[platform.lower()] = percent
+        return record
+
+    def live_progress_for(self, job_id: str) -> dict[str, int]:
+        """Return a copy of the live upload percents for one job.
+
+        Empty when no upload is in flight; the final snapshot persists in the
+        attempt record instead.
+        """
+        with self._lock:
+            return dict(self._live_progress.get(job_id, {}))
+
     def _run_upload_attempts(self, job_id: str, attempt_ids: list[str],
                              artifact_path: str, upload_config: dict[str, Any],
                              platforms: list[str]) -> None:
@@ -996,7 +1016,8 @@ class JobService:
             manifest.save(self.jobs_dir)
         try:
             results = execute_upload_pipeline(
-                platforms, artifact_path, upload_config)
+                platforms, artifact_path, upload_config,
+                progress_callback=self._on_progress(job_id))
         except Exception as error:
             now = datetime.now(timezone.utc).isoformat()
             results = {platform: {"success": False, "error": str(error),
@@ -1008,6 +1029,7 @@ class JobService:
             manifest = self.get_job(job_id)
             success_count = 0
             failure_count = 0
+            live_progress = self._live_progress.get(job_id, {})
             for attempt_id in attempt_ids:
                 attempt = next((item for item in manifest.upload_attempts
                                 if item["attempt_id"] == attempt_id), None)
@@ -1033,6 +1055,7 @@ class JobService:
                     "platform_url": (_platform_url(platform, post_id)
                                      if success and post_id else None),
                     "published_at": completed_at if success else None,
+                    "progress_percent": live_progress.get(platform.lower(), 0),
                 }
                 manifest.platforms[platform] = {
                     "success": success,
@@ -1054,6 +1077,9 @@ class JobService:
                             "partial_failure" if success_count else "failed")
             manifest.transition_checkpoint(
                 "upload", final_status, checkpoint["revision"], self.jobs_dir)
+            # The final snapshot is written; clear the live registry so a
+            # restart (or a later submission) starts from empty.
+            self._live_progress.pop(job_id, None)
 
     def retry_upload(self, job_id: str, platform: str, attempt_id: str,
                      artifact_id: str | None = None,

@@ -37,6 +37,16 @@ class BaseUploadPipeline(ABC):
         if not hasattr(self, 'platform_name'):
             self.platform_name = "Unknown"
 
+        # Live progress state: running sum of applied step increments and the
+        # normalized coarse percent (increments seen / full allocation total,
+        # clamped 0..100). The optional progress_callback hook is fired by
+        # _update_progress with the normalized percent after each applied step
+        # update; the upload orchestrator installs a per-adapter lambda that
+        # forwards (platform_name, percent).
+        self._progress_seen = 0
+        self._percent = 0
+        self.progress_callback = None
+
     def _retry_request(self,
                        func: Callable,
                        *args,
@@ -187,18 +197,33 @@ class BaseUploadPipeline(ABC):
     def _update_progress(self, step_name: str, description: str = ""):
         """
         Update the progress bar based on step completion.
-        
+
+        Tracks the running sum of applied step increments and exposes the
+        normalized coarse percent (increments seen / full allocation total,
+        clamped 0..100) so the upload orchestrator can surface live progress
+        even when no progress bar is attached. Fires ``self.progress_callback``
+        with the normalized percent after each applied step update.
+
         Args:
             step_name: Name of the step (must exist in self.progress_allocations)
             description: Optional description to show in progress bar
         """
-        if self.progress_bar and step_name in self.progress_allocations:
-            increment = self.progress_allocations[step_name]
-            if increment > 0:
+        if step_name not in self.progress_allocations:
+            return
+        increment = self.progress_allocations[step_name]
+        if increment > 0:
+            self._progress_seen += increment
+            total = sum(self.progress_allocations.values())
+            if total > 0:
+                self._percent = max(0, min(100, round(
+                    self._progress_seen * 100 / total)))
+            if self.progress_bar:
                 self.progress_bar.update(increment)
-            if description:
-                self.progress_bar.set_description(
-                    f"[{self.platform_name}] {description}")
+            if self.progress_callback:
+                self.progress_callback(self._percent)
+        if self.progress_bar and description:
+            self.progress_bar.set_description(
+                f"[{self.platform_name}] {description}")
 
     @contextmanager
     def _progress_context(self,
