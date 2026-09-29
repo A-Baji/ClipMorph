@@ -69,7 +69,8 @@ def create_app(data_dir: str | Path | None = None,
     def service_failure(error: Exception) -> NoReturn:
         message = str(error)
         conflict_terms = ("stale", "conflict", "immutable", "reopen", "review",
-                          "artifact", "checkpoint", "source identity")
+                          "artifact", "checkpoint", "source identity",
+                          "active upload attempt")
         status = 409 if any(term in message.lower() for term in conflict_terms) else 422
         fail(status, "conflict" if status == 409 else "invalid_request", message)
 
@@ -445,11 +446,14 @@ def create_app(data_dir: str | Path | None = None,
                 "checkpoint": manifest.checkpoints["upload"]}
 
     @app.get("/api/v1/jobs/{job_id}/uploads")
-    def list_uploads(job_id: str):
+    def list_uploads(job_id: str, status: str | None = None,
+                     platform: str | None = None, since: str | None = None):
         try:
-            return service.get_job(job_id).upload_attempts
+            return service.list_upload_attempts(job_id, status, platform, since)
         except FileNotFoundError:
             fail(404, "not_found", "job not found")
+        except ValueError as error:
+            service_failure(error)
 
     @app.post("/api/v1/jobs/{job_id}/upload", status_code=202)
     def submit_upload(job_id: str, payload: dict):

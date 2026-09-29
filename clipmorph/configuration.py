@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime
 import json
 from pathlib import PurePath
 from pathlib import Path
@@ -429,6 +430,17 @@ def validate_job_configuration(configuration: dict[str, Any]) -> None:
     for key, value in schedule.items():
         if value is not None and not isinstance(value, str):
             raise ValueError(f"upload.schedule.{key} must be a string or null")
+    publish_at = schedule.get("publish_at")
+    if publish_at is not None:
+        try:
+            parsed_publish_at = datetime.fromisoformat(publish_at)
+        except ValueError as error:
+            raise ValueError(
+                f"upload.schedule.publish_at is not an ISO-8601 timestamp: {error}"
+            ) from error
+        if parsed_publish_at.tzinfo is None:
+            raise ValueError(
+                "upload.schedule.publish_at must include a UTC offset")
     content = check_object(upload.get("content", {}), "upload.content",
                            {"title", "description", "tags"})
     for key in ("title", "description"):
