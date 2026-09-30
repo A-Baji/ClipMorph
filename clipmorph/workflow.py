@@ -9,9 +9,10 @@ from typing import Any
 from clipmorph.configuration import load_app_configuration
 from clipmorph.ffmpeg import FFmpegRunner, configure_ffmpeg
 from clipmorph.job import JobManifest, resolve_output_dir
-from clipmorph.platforms import enabled_platforms as resolve_enabled_platforms
+from clipmorph.platforms import resolve_upload_participants
 from clipmorph.preflight import PreflightValidator
 from clipmorph.service import CancellationToken, JobService
+from clipmorph.service import _stage_skipped, conversion_groups
 from clipmorph.storage import storage_key_for
 
 
@@ -37,8 +38,8 @@ def _effective_no_confirm(configuration: dict[str, Any], stage: str) -> bool:
     return bool(general.get("no_confirm", False) if value is None else value)
 
 
-def _enabled_platforms(upload: dict[str, Any]) -> list[str]:
-    return resolve_enabled_platforms(upload.get("platforms", {}))
+def _enabled_platforms(configuration: dict[str, Any]) -> list[str]:
+    return resolve_upload_participants(configuration)
 
 
 def execute_job(manifest: JobManifest, token: CancellationToken,
@@ -55,10 +56,10 @@ def execute_job(manifest: JobManifest, token: CancellationToken,
     conversion = configuration.get("conversion", {})
     subtitles = conversion.get("subtitles", {})
     upload = configuration.get("upload", {})
-    transcript_skipped = bool(conversion.get("skip") or subtitles.get("skip"))
-    conversion_skipped = bool(conversion.get("skip"))
-    upload_skipped = bool(upload.get("skip"))
-    enabled_platforms = _enabled_platforms(upload)
+    transcript_skipped = _stage_skipped(configuration, "transcript")
+    conversion_skipped = _stage_skipped(configuration, "conversion")
+    upload_skipped = _stage_skipped(configuration, "upload")
+    enabled_platforms = _enabled_platforms(configuration)
     title = upload.get("content", {}).get("title", "")
 
     configure_ffmpeg()
@@ -87,7 +88,8 @@ def execute_job(manifest: JobManifest, token: CancellationToken,
         transcript_checkpoint = manifest.checkpoints["transcript"]
         if transcript_checkpoint["status"] == "awaiting_review":
             return
-        if transcript_checkpoint["status"] in {"pending", "stale", "failed", "cancelled"}:
+        if transcript_checkpoint["status"] in {
+                "pending", "stale", "failed", "cancelled", "skipped"}:
             if transcript_checkpoint["status"] != "pending":
                 _transition(manifest, "transcript", "pending", jobs_root)
                 transcript_checkpoint = manifest.checkpoints["transcript"]
@@ -141,37 +143,127 @@ def execute_job(manifest: JobManifest, token: CancellationToken,
     elif conversion_checkpoint["status"] == "awaiting_review":
         return
     elif conversion_checkpoint["status"] != "completed":
-        if conversion_checkpoint["status"] in {"stale", "failed", "cancelled"}:
+        if conversion_checkpoint["status"] == "skipped":
+            # A born-``skipped`` aggregate whose per-platform sections are not
+            # all skipped (a platform override un-skipped it) is returned to
+            # ``pending`` so the group loop below reconciles and renders it.
             _transition(manifest, "conversion", "pending", jobs_root)
+            manifest = JobManifest.load(manifest.job_id, jobs_root)
             conversion_checkpoint = manifest.checkpoints["conversion"]
-        _transition(manifest, "conversion", "running", jobs_root)
-        manifest.set_step("conversion", "running", jobs_root)
-        from clipmorph.conversion_pipeline import ConversionPipeline
-        transcript_path = None
-        if not subtitles.get("skip") and manifest.active_transcript:
-            transcript_path = str(jobs_root / manifest.job_id /
-                                  manifest.active_transcript["path"])
-        conversion_pipeline = ConversionPipeline(
-            input_path=manifest.source_path,
-            skip_subtitles=bool(subtitles.get("skip")),
-            no_confirm=True,
-            strict=bool(conversion.get("strict", False)),
-            reviewed_transcript_path=transcript_path,
-            output_dir=str(output_dir),
-            layout=conversion.get("layout", {}),
-        )
-        artifact_path = conversion_pipeline.run()
-        manifest.set_artifact(
-            artifact_path, jobs_root, name="conversion",
-            storage_key=storage_key_for(output_root, artifact_path))
+        groups = conversion_groups(manifest.configuration)
+        # Reconcile the stored group set with what the current configuration
+        # derives, so a group created or dropped by a configuration edit (or by
+        # a layout registry change) is rendered or forgotten instead of
+        # silently skipped.
+        manifest.sync_conversion_groups(groups)
         manifest = JobManifest.load(manifest.job_id, jobs_root)
-        _transition(manifest, "conversion", "awaiting_review", jobs_root)
-        manifest.set_step("conversion", "awaiting_review", jobs_root,
-                          artifact_id=manifest.current_artifact_id)
+        conversion_checkpoint = manifest.checkpoints["conversion"]
+        for group in groups:
+            group_id = group["id"]
+            group_record = conversion_checkpoint.get("groups", {}).get(group_id)
+            if group_record is None:
+                continue
+            group_conversion = group["conversion"]
+            group_subtitles = group_conversion.get("subtitles", {})
+            if group_record["status"] == "awaiting_review":
+                continue
+            if group_record["status"] == "completed":
+                continue
+            if group_record["status"] in {"stale", "failed", "cancelled"}:
+                manifest.transition_checkpoint(
+                    "conversion", "pending", group_record["revision"],
+                    jobs_root, group_id=group_id)
+                group_record = conversion_checkpoint["groups"][group_id]
+            if group_conversion.get("skip"):
+                # A conversion.skip group never renders: it binds to the source
+                # artifact and keeps the ``skipped`` state it is born in, which
+                # is terminal (``skipped -> completed`` is not a legal
+                # transition).  The aggregate reports one completed group and
+                # one intentionally skipped one.
+                if group_record.get("current_artifact_id") is None:
+                    manifest.record_artifact(
+                        "source", manifest.source_path, jobs_root,
+                        storage_key=storage_key_for(
+                            output_root, manifest.source_path),
+                        group_id=group_id)
+                    group_record = conversion_checkpoint["groups"][group_id]
+                if group_record["status"] != "skipped":
+                    manifest.transition_checkpoint(
+                        "conversion", "skipped", group_record["revision"],
+                        jobs_root, group_id=group_id)
+                    manifest = JobManifest.load(manifest.job_id, jobs_root)
+                    conversion_checkpoint = manifest.checkpoints["conversion"]
+                continue
+            # Preflight runs per group: each group's own layout and title
+            # must validate before it renders, so a bad group fails alone
+            # instead of failing the whole conversion stage.
+            for warning in PreflightValidator(ffmpeg_runner).validate(
+                input_path=manifest.source_path,
+                output_dir=str(output_dir),
+                conversion=group_conversion,
+                upload=upload,
+                enabled_platforms=enabled_platforms,
+                title=title,
+                layout=group_conversion.get("layout"),
+            ):
+                if warning not in manifest.warnings:
+                    manifest.warnings.append(warning)
+            if token.is_cancelled:
+                return
+            manifest.transition_checkpoint(
+                "conversion", "running", group_record["revision"],
+                jobs_root, group_id=group_id)
+            manifest.set_step("conversion", "running", jobs_root)
+            from clipmorph.conversion_pipeline import ConversionPipeline
+            transcript_path = None
+            if not group_subtitles.get("skip") and manifest.active_transcript:
+                transcript_path = str(jobs_root / manifest.job_id /
+                                      manifest.active_transcript["path"])
+            conversion_pipeline = ConversionPipeline(
+                input_path=manifest.source_path,
+                skip_subtitles=bool(group_subtitles.get("skip")),
+                no_confirm=True,
+                strict=bool(group_conversion.get("strict", False)),
+                reviewed_transcript_path=transcript_path,
+                output_dir=str(output_dir),
+                layout=group_conversion.get("layout", {}),
+            )
+            artifact_path = conversion_pipeline.run()
+            manifest.record_artifact(
+                "conversion", artifact_path, jobs_root,
+                storage_key=storage_key_for(output_root, artifact_path),
+                group_id=group_id)
+            # Reloading replaces the manifest object, so the group record is
+            # re-read from the reloaded checkpoint: the captured one still
+            # holds the pre-artifact revision and every transition would be
+            # rejected as stale.
+            manifest = JobManifest.load(manifest.job_id, jobs_root)
+            conversion_checkpoint = manifest.checkpoints["conversion"]
+            group_record = conversion_checkpoint["groups"][group_id]
+            manifest.transition_checkpoint(
+                "conversion", "awaiting_review", group_record["revision"],
+                jobs_root, group_id=group_id)
+            manifest.set_step("conversion", "awaiting_review", jobs_root,
+                              artifact_id=group_record.get("current_artifact_id"))
+            if not _effective_no_confirm(configuration, "conversion"):
+                continue
+            manifest = JobManifest.load(manifest.job_id, jobs_root)
+            conversion_checkpoint = manifest.checkpoints["conversion"]
+            group_record = conversion_checkpoint["groups"][group_id]
+            manifest.transition_checkpoint(
+                "conversion", "completed", group_record["revision"],
+                jobs_root, group_id=group_id)
+        if manifest.actionable_group("conversion") is None:
+            # Every group is terminal, so the projection writes ``completed``.
+            # A configuration edit that re-pointed platforms onto already
+            # rendered groups leaves the aggregate ``stale`` with no work left;
+            # re-deriving it follows the groups instead of staying stuck.  A
+            # group awaiting review is actionable and keeps the aggregate on
+            # its review gate.
+            manifest.derive_checkpoint_status("conversion")
+            manifest.save(jobs_root)
         if not _effective_no_confirm(configuration, "conversion"):
             return
-        manifest = JobManifest.load(manifest.job_id, jobs_root)
-        _transition(manifest, "conversion", "completed", jobs_root)
         manifest = JobManifest.load(manifest.job_id, jobs_root)
 
     if upload_skipped:
@@ -181,6 +273,12 @@ def execute_job(manifest: JobManifest, token: CancellationToken,
         return
 
     upload_checkpoint = manifest.checkpoints["upload"]
+    if upload_checkpoint["status"] == "skipped":
+        # A born-``skipped`` upload checkpoint whose participating platforms
+        # were un-skipped by a per-platform ``upload.skip: false`` override is
+        # returned to ``pending`` so the review gate below is reached.
+        _transition(manifest, "upload", "pending", jobs_root)
+        upload_checkpoint = manifest.checkpoints["upload"]
     if upload_checkpoint["status"] in {"pending", "stale"}:
         if upload_checkpoint["status"] == "stale":
             _transition(manifest, "upload", "pending", jobs_root)

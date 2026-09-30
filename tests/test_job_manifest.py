@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from clipmorph.job import JobManifest
+from clipmorph.job import JobManifest, MANIFEST_SCHEMA_VERSION
 
 
 class JobManifestTests(unittest.TestCase):
@@ -16,7 +16,7 @@ class JobManifestTests(unittest.TestCase):
             manifest.record_platform("YouTube", {"success": True},
                                      str(jobs_dir))
             loaded = JobManifest.load(manifest.job_id, str(jobs_dir))
-            self.assertEqual(loaded.schema_version, 3)
+            self.assertEqual(loaded.schema_version, MANIFEST_SCHEMA_VERSION)
             self.assertEqual(loaded.source_sha256, manifest.source_sha256)
             self.assertTrue(loaded.platforms["YouTube"]["success"])
 
@@ -54,6 +54,24 @@ class JobManifestTests(unittest.TestCase):
             self.assertEqual(loaded.artifacts[loaded.current_artifact_id]["state"], "current")
             self.assertNotEqual(loaded.artifacts[first_id]["sha256"],
                                 loaded.artifacts[loaded.current_artifact_id]["sha256"])
+
+    def test_source_artifact_does_not_move_the_display_pointer_off_a_render(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "input.mp4"
+            source.write_bytes(b"video")
+            render = Path(temp_dir) / "render.mp4"
+            render.write_bytes(b"render")
+            manifest = JobManifest.create(str(source), {}, temp_dir)
+
+            manifest.record_artifact("conversion", render, temp_dir)
+            render_id = manifest.current_artifact_id
+            manifest.record_artifact("source", source, temp_dir)
+            loaded = JobManifest.load(manifest.job_id, temp_dir)
+
+            # A ``conversion.skip`` group's source copy must not move the
+            # display pointer off the latest render nor supersede it.
+            self.assertEqual(loaded.current_artifact_id, render_id)
+            self.assertEqual(loaded.artifacts[render_id]["state"], "current")
 
     def test_manifest_keeps_mixed_platforms_as_partial_failure(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -16,7 +16,6 @@ import yaml
 from clipmorph.layout import normalize_layout
 from clipmorph.layout import resolve_layout_geometry
 from clipmorph.platforms import SUPPORTED_PLATFORMS
-from clipmorph.platforms import SUPPORTED_PLATFORMS_SET
 from clipmorph.layout import validate_layout
 
 
@@ -24,9 +23,11 @@ SUPPORTED_SOURCE_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm"}
 
 # Bumped in the same commit as any breaking app.yml schema change. This stamp is
 # independent of the job manifest schema version in clipmorph/job.py; the two
-# are never unified. `upload.schedule.mode` is an additive key, so the stamp
-# stays put.
-APP_CONFIG_VERSION = 1
+# are never unified. #203 moved `platforms` out of `upload` to the job-config
+# top level, so `upload.platforms` is no longer accepted: bumping the stamp
+# turns an existing app.yml into one actionable version error instead of an
+# `Unknown upload field(s): platforms` validation cascade.
+APP_CONFIG_VERSION = 2
 
 # Who holds a future publication for `upload.schedule`: ClipMorph's own timer
 # ("local", the default) or the platform's native scheduling ("platform").
@@ -80,7 +81,6 @@ DEFAULT_APP_CONFIGURATION = {
             "skip": False,
             "no_confirm": None,
             "content": {"title": "", "description": "", "tags": []},
-            "platforms": {"include": [], "exclude": []},
             "suggestions": {"provider": "template", "model": None},
         },
     },
@@ -386,8 +386,170 @@ def _validate_app_configuration(configuration: dict[str, Any]) -> None:
         ids.add(record["id"])
 
 
+def _check_object(value: Any, label: str, allowed: set[str]) -> dict[str, Any]:
+    """Require a dict with no unknown keys, returning it for chaining."""
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be an object")
+    unknown = set(value) - allowed
+    if unknown:
+        raise ValueError(
+            f"Unknown {label} field(s): {', '.join(sorted(unknown))}")
+    return value
+
+
+def _validate_general_section(general: Any, label: str = "general") -> None:
+    """Validate a general section (top-level or per-platform override)."""
+    general = _check_object(general, label, {"source", "no_confirm", "clean"})
+    if general.get("source") is not None:
+        validate_source_name(general["source"])
+    for key in ("no_confirm", "clean"):
+        if key in general and not isinstance(general[key], bool):
+            raise ValueError(f"{label}.{key} must be a boolean")
+
+
+def _validate_subtitles_section(subtitles: Any,
+                                label: str = "conversion.subtitles",
+                                per_platform: bool = False) -> None:
+    """Validate a subtitles section (top-level or per-platform override).
+
+    ``transcription_*`` keys drive the ONE transcript session a job produces.
+    A per-platform override of them is rejected rather than silently ignored:
+    honouring it would need one transcript group per distinct transcription
+    config, and no concrete case needs that yet (the guide's YAGNI checkpoint
+    makes protected keys the documented fallback until one does).
+    """
+    transcription_keys = {
+        "transcription_language", "transcription_model",
+        "transcription_device", "transcription_compute_type",
+    }
+    subtitles = _check_object(subtitles, label, {
+        "skip", "renderer", "no_confirm", "clean", *transcription_keys,
+    })
+    if per_platform:
+        for key in sorted(transcription_keys & set(subtitles)):
+            raise ValueError(
+                f"{label}.{key} is not allowed per platform; the job shares "
+                "one transcript session")
+    if subtitles.get("renderer", "overlay") not in {"overlay", "stacked"}:
+        raise ValueError(f"{label}.renderer must be overlay or stacked")
+    if "skip" in subtitles and not isinstance(subtitles["skip"], bool):
+        raise ValueError(f"{label}.skip must be a boolean")
+    for key in ("no_confirm", "clean"):
+        if key in subtitles and subtitles[key] is not None and not isinstance(subtitles[key], bool):
+            raise ValueError(f"{label}.{key} must be a boolean or null")
+    for key in transcription_keys:
+        if key in subtitles and not isinstance(subtitles[key], str):
+            raise ValueError(f"{label}.{key} must be a string")
+
+
+def _validate_conversion_section(conversion: Any, label: str = "conversion",
+                                 per_platform: bool = False) -> None:
+    """Validate a conversion section (top-level or per-platform override)."""
+    conversion = _check_object(conversion, label, {
+        "layout_id", "layout", "skip", "strict", "no_confirm", "clean", "subtitles",
+    })
+    for key in ("skip", "strict"):
+        if key in conversion and not isinstance(conversion[key], bool):
+            raise ValueError(f"{label}.{key} must be a boolean")
+    for key in ("no_confirm", "clean"):
+        if key in conversion and conversion[key] is not None and not isinstance(conversion[key], bool):
+            raise ValueError(f"{label}.{key} must be a boolean or null")
+    if conversion.get("layout_id") is not None and not isinstance(conversion["layout_id"], str):
+        raise ValueError(f"{label}.layout_id must be a string or null")
+    if "layout" in conversion and not isinstance(conversion["layout"], dict):
+        raise ValueError(f"{label}.layout must be an object")
+    _validate_subtitles_section(conversion.get("subtitles", {}),
+                                f"{label}.subtitles", per_platform)
+
+
+def _validate_suggestions_section(suggestions: Any,
+                                  label: str = "upload.suggestions") -> None:
+    """Validate the suggestions provider selector and generated platform rows."""
+    suggestions = _check_object(suggestions, label,
+                                {"provider", "model", *SUPPORTED_PLATFORMS})
+    if "provider" in suggestions and (
+            not isinstance(suggestions["provider"], str)
+            or not suggestions["provider"].strip()):
+        raise ValueError(f"{label}.provider must be a non-empty string")
+    if "model" in suggestions and suggestions["model"] is not None and not isinstance(
+            suggestions["model"], str):
+        raise ValueError(f"{label}.model must be a string or null")
+    for platform in SUPPORTED_PLATFORMS:
+        if platform in suggestions and not isinstance(suggestions[platform], dict):
+            raise ValueError(f"{label}.{platform} must be an object")
+
+
+def _validate_upload_section(upload: Any, label: str = "upload") -> None:
+    """Validate an upload section (top-level or per-platform override)."""
+    upload = _check_object(upload, label, {
+        "skip", "no_confirm", "schedule", "content", "suggestions",
+    })
+    if "skip" in upload and not isinstance(upload["skip"], bool):
+        raise ValueError(f"{label}.skip must be a boolean")
+    if "no_confirm" in upload and upload["no_confirm"] is not None and not isinstance(upload["no_confirm"], bool):
+        raise ValueError(f"{label}.no_confirm must be a boolean or null")
+    schedule = _check_object(upload.get("schedule", {}), f"{label}.schedule",
+                             {"publish_at", "timezone", "mode"})
+    for key, value in schedule.items():
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"{label}.schedule.{key} must be a string or null")
+    if schedule.get("mode") not in SCHEDULE_MODES:
+        raise ValueError(f"{label}.schedule.mode must be one of: local, platform")
+    publish_at = schedule.get("publish_at")
+    if publish_at is not None:
+        try:
+            parsed_publish_at = datetime.fromisoformat(publish_at)
+        except ValueError as error:
+            raise ValueError(
+                f"{label}.schedule.publish_at is not an ISO-8601 timestamp: {error}"
+            ) from error
+        if parsed_publish_at.tzinfo is None:
+            raise ValueError(
+                f"{label}.schedule.publish_at must include a UTC offset")
+    _validate_suggestions_section(upload.get("suggestions", {}),
+                                  f"{label}.suggestions")
+    content = _check_object(upload.get("content", {}), f"{label}.content",
+                            {"title", "description", "tags"})
+    for key in ("title", "description"):
+        if key in content and content[key] is not None and not isinstance(content[key], str):
+            raise ValueError(f"{label}.content.{key} must be a string or null")
+    if "tags" in content and (not isinstance(content["tags"], list)
+                             or any(not isinstance(tag, str) for tag in content["tags"])):
+        raise ValueError(f"{label}.content.tags must be a list of strings")
+
+
+def _validate_platform_entry(entry: Any, platform: str) -> None:
+    """Validate one per-platform override entry.
+
+    Platform entries carry ``general``/``conversion``/``upload`` override
+    sections (validated by the shared section validators) plus flat adapter
+    option scalars.  Structural impossibilities are rejected: nested
+    ``platforms`` (the selection map is not a mirrored section) and
+    ``general.source`` (source identity is fixed per job).
+    """
+    label = f"platforms.{platform}"
+    if not isinstance(entry, dict):
+        raise ValueError(f"{label} must be an object")
+    if "platforms" in entry:
+        raise ValueError(
+            f"{label}.platforms is not allowed; selection overrides are not "
+            "configured per platform")
+    general = entry.get("general", {})
+    if isinstance(general, dict) and "source" in general:
+        raise ValueError(
+            f"{label}.general.source is not allowed; source identity is "
+            "fixed per job")
+    if "general" in entry:
+        _validate_general_section(entry["general"], f"{label}.general")
+    if "conversion" in entry:
+        _validate_conversion_section(entry["conversion"], f"{label}.conversion",
+                                     per_platform=True)
+    if "upload" in entry:
+        _validate_upload_section(entry["upload"], f"{label}.upload")
+
+
 def validate_job_configuration(configuration: dict[str, Any]) -> None:
-    """Validate the canonical general/conversion/upload job configuration shape."""
+    """Validate the canonical general/conversion/upload/platforms job configuration shape."""
     if not isinstance(configuration, dict):
         raise ValueError("job configuration must be an object")
 
@@ -401,7 +563,7 @@ def validate_job_configuration(configuration: dict[str, Any]) -> None:
         return value
 
     root = check_object(configuration, "job configuration",
-                        {"general", "conversion", "upload"})
+                        {"general", "conversion", "upload", "platforms"})
     general = check_object(root.get("general", {}), "general",
                            {"source", "no_confirm", "clean"})
     if general.get("source") is not None:
@@ -441,7 +603,7 @@ def validate_job_configuration(configuration: dict[str, Any]) -> None:
             raise ValueError(f"conversion.subtitles.{key} must be a string")
 
     upload = check_object(root.get("upload", {}), "upload", {
-        "skip", "no_confirm", "schedule", "content", "platforms", "suggestions",
+        "skip", "no_confirm", "schedule", "content", "suggestions",
     })
     if "skip" in upload and not isinstance(upload["skip"], bool):
         raise ValueError("upload.skip must be a boolean")
@@ -473,34 +635,13 @@ def validate_job_configuration(configuration: dict[str, Any]) -> None:
     if "tags" in content and (not isinstance(content["tags"], list)
                                or any(not isinstance(tag, str) for tag in content["tags"])):
         raise ValueError("upload.content.tags must be a list of strings")
-    platforms = check_object(upload.get("platforms", {}), "upload.platforms",
-                             {"include", "exclude", *SUPPORTED_PLATFORMS})
-    for key in ("include", "exclude"):
-        values = platforms.get(key, [])
-        if not isinstance(values, list) or any(
-                not isinstance(value, str) or value not in
-                SUPPORTED_PLATFORMS_SET for value in values):
-            raise ValueError(f"upload.platforms.{key} must contain supported platform names")
+    _validate_suggestions_section(upload.get("suggestions", {}),
+                                  "upload.suggestions")
+    platforms = check_object(root.get("platforms", {}), "platforms",
+                             set(SUPPORTED_PLATFORMS))
     for platform in SUPPORTED_PLATFORMS:
-        if platform in platforms and not isinstance(platforms[platform], dict):
-            raise ValueError(f"upload.platforms.{platform} must be an object")
-    # ``upload.suggestions`` doubles as the provider selector (the optional
-    # ``provider``/``model`` scalars) and the generated per-platform rows, so a
-    # supported platform name is a legal key alongside them.
-    suggestions = check_object(upload.get("suggestions", {}),
-                               "upload.suggestions",
-                               {"provider", "model", *SUPPORTED_PLATFORMS})
-    if "provider" in suggestions and (
-            not isinstance(suggestions["provider"], str)
-            or not suggestions["provider"].strip()):
-        raise ValueError("upload.suggestions.provider must be a non-empty string")
-    if "model" in suggestions and suggestions["model"] is not None and not isinstance(
-            suggestions["model"], str):
-        raise ValueError("upload.suggestions.model must be a string or null")
-    for platform in SUPPORTED_PLATFORMS:
-        if platform in suggestions and not isinstance(suggestions[platform], dict):
-            raise ValueError(
-                f"upload.suggestions.{platform} must be an object")
+        if platform in platforms:
+            _validate_platform_entry(platforms[platform], platform)
 
 def merge_configuration(global_defaults: dict[str, Any],
                         job_overrides: dict[str, Any]) -> dict[str, Any]:
@@ -614,4 +755,50 @@ def resolve_job_configuration(
     validate_layout(layout)
     conversion["layout"] = layout
 
+    # A per-platform ``conversion`` section composes exactly like the
+    # job-level one, so a platform that names a layout is materialized here
+    # instead of on every later re-resolution: the manifest then stores one
+    # already-resolved shape, and group digests, the review summary and the
+    # render loop all read the same layout.  The job's layout is the base and
+    # the named preset wins per key, the same law inline layouts compose under.
+    for platform, entry in effective.get("platforms", {}).items():
+        platform_conversion = entry.get("conversion")
+        if not isinstance(platform_conversion, dict):
+            continue
+        platform_layout_id = platform_conversion.get("layout_id")
+        if platform_layout_id is None:
+            continue
+        matching = [record for record in (layouts or [])
+                    if record.get("id") == platform_layout_id]
+        if not matching:
+            raise ValueError(
+                f"Unknown platforms.{platform}.conversion.layout_id: "
+                f"{platform_layout_id}")
+        preset = matching[0].get("layout")
+        if not isinstance(preset, dict):
+            raise ValueError(
+                f"Layout registry entry {platform_layout_id} has no layout object")
+        platform_conversion["layout"] = merge_configuration(
+            conversion["layout"], deepcopy(preset))
+
     return effective
+
+
+def resolve_platform_configuration(
+        manifest_configuration: dict[str, Any],
+        global_defaults: dict[str, Any],
+        layouts: list[dict[str, Any]] | None,
+        platform: str) -> dict[str, Any]:
+    """Resolve one platform's effective configuration by deep-merging its
+    override sections over the job's effective configuration.
+
+    ``global_defaults`` come from the manifest's
+    ``configuration_sources["global_defaults"]`` so the result is a full
+    job-shaped effective configuration (layout materialization, title
+    derivation, etc.) exactly like ``resolve_job_configuration`` produces.
+    """
+    overrides = manifest_configuration.get("platforms", {}).get(platform, {})
+    sections = {key: overrides[key] for key in ("general", "conversion", "upload")
+                if key in overrides}
+    effective = merge_configuration(manifest_configuration, sections)
+    return resolve_job_configuration(global_defaults, effective, layouts)

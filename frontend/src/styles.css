@@ -63,3 +63,4 @@ nav { display:grid; gap:5px; }.nav-item { border:0; color:#9ca49e; background:tr
 .suggestions-head,.suggestion-head { display:flex; align-items:center; justify-content:space-between; gap:10px; }
 .suggestion-card { border:1px solid var(--line); padding:12px; display:grid; gap:10px; }
 .provider-chip { border:1px solid var(--line); color:#8b978d; font:9px 'DM Mono'; text-transform:uppercase; letter-spacing:.08em; padding:3px 7px; }
+.attempt-kind { border:1px solid var(--line); border-radius:2px; padding:1px 6px; color:#8b978d; font:9px 'DM Mono'; text-transform:uppercase; letter-spacing:.08em; }

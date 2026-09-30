@@ -19,7 +19,7 @@ from clipmorph.storage import LOCAL_BACKEND, storage_key_for
 
 
 APP_NAME = "ClipMorph"
-MANIFEST_SCHEMA_VERSION = 3
+MANIFEST_SCHEMA_VERSION = 4
 CHECKPOINT_STATES = {
     "pending", "running", "awaiting_review", "completed", "partial_failure",
     "skipped", "failed", "cancelled", "stale",
@@ -98,12 +98,27 @@ def configuration_sha256(configuration: dict[str, Any]) -> str:
 
 
 def checkpoint_configuration_hash(configuration: dict[str, Any], stage: str) -> str:
+    platforms = configuration.get("platforms", {})
+    # Per-platform override slices are part of their stage's inputs: a platform
+    # that changes its own conversion, subtitles or upload configuration must
+    # invalidate exactly the stage that consumes it.
+    per_platform_conversion = {
+        platform: entry.get("conversion", {})
+        for platform, entry in platforms.items()}
+    per_platform_subtitles = {
+        platform: entry.get("conversion", {}).get("subtitles", {})
+        for platform, entry in platforms.items()}
     dependencies = {
         "transcript": {
             "conversion.subtitles": configuration.get("conversion", {}).get("subtitles", {}),
+            "platforms.subtitles": per_platform_subtitles,
         },
-        "conversion": {"conversion": configuration.get("conversion", {})},
-        "upload": {"upload": configuration.get("upload", {})},
+        "conversion": {"conversion": configuration.get("conversion", {}),
+                       "platforms.conversion": per_platform_conversion},
+        "upload": {
+            "upload": configuration.get("upload", {}),
+            "platforms": configuration.get("platforms", {}),
+        },
     }
     if stage not in dependencies:
         raise ValueError(f"Unknown checkpoint: {stage}")
@@ -113,7 +128,7 @@ def checkpoint_configuration_hash(configuration: dict[str, Any], stage: str) -> 
 def _checkpoint_record(stage: str, configuration: dict[str, Any],
                        status: str = "pending") -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
-    return {
+    record = {
         "status": status,
         "revision": 0,
         "configuration_hash": checkpoint_configuration_hash(configuration, stage),
@@ -127,6 +142,9 @@ def _checkpoint_record(stage: str, configuration: dict[str, Any],
         "attempts": [],
         "references": {},
     }
+    if stage == "conversion":
+        record["groups"] = {}
+    return record
 
 
 @dataclass
@@ -173,6 +191,31 @@ class JobManifest:
                 "upload", finalized,
                 "skipped" if upload.get("skip") else "pending"),
         }
+        # Initialize per-group sub-checkpoints for conversion.  Each group
+        # carries its own status/revision so changing one platform's override
+        # stales only that group's artifact.  ``conversion_groups`` lives in
+        # ``clipmorph.service`` (it owns per-platform resolution) and is
+        # imported here to keep this module free of a service dependency.
+        from clipmorph.service import conversion_groups
+
+        conversion_checkpoint = checkpoints["conversion"]
+        for group in conversion_groups(finalized):
+            now = datetime.now(timezone.utc).isoformat()
+            conversion_checkpoint["groups"][group["id"]] = {
+                "status": ("skipped" if group["conversion"].get("skip")
+                           else "pending"),
+                "revision": 0,
+                "configuration_hash": configuration_sha256(group["conversion"]),
+                "artifact_hash": None,
+                "current_artifact_id": None,
+                "platforms": group["platforms"],
+                "created_at": now,
+                "started_at": None,
+                "updated_at": now,
+                "completed_at": None,
+                "invalidation_reason": None,
+                "error": None,
+            }
         manifest = cls(
             schema_version=MANIFEST_SCHEMA_VERSION,
             job_id=uuid.uuid4().hex,
@@ -232,18 +275,114 @@ class JobManifest:
                 return stage
         return None
 
+    def sync_conversion_groups(self, groups: list[dict[str, Any]]) -> None:
+        """Reconcile the stored conversion groups with the derived set.
+
+        Groups are keyed by the digest of their effective conversion section,
+        so a group whose configuration did not move keeps its status, revision
+        and artifact untouched: changing one platform's override never stales
+        another group's render.  A group that is new is added as ``pending``
+        (or ``skipped`` when its configuration skips conversion), and a group no
+        longer derived is dropped with its artifact superseded, because no
+        platform binds to it any more.
+        """
+        checkpoint = self.checkpoints.setdefault(
+            "conversion", _checkpoint_record("conversion", {}))
+        stored = checkpoint.setdefault("groups", {})
+        now = datetime.now(timezone.utc).isoformat()
+        for group_id, group in list(stored.items()):
+            if group_id not in {item["id"] for item in groups}:
+                artifact_id = group.get("current_artifact_id")
+                artifact = self.artifacts.get(artifact_id or "")
+                if artifact is not None and artifact.get("state") == "current":
+                    artifact["state"] = "superseded"
+                    artifact["superseded_at"] = now
+                del stored[group_id]
+        for group in groups:
+            if group["id"] in stored:
+                stored[group["id"]]["platforms"] = group["platforms"]
+                continue
+            stored[group["id"]] = {
+                "status": ("skipped" if group["conversion"].get("skip")
+                           else "pending"),
+                "revision": 0,
+                "configuration_hash": configuration_sha256(group["conversion"]),
+                "artifact_hash": None,
+                "current_artifact_id": None,
+                "platforms": group["platforms"],
+                "created_at": now,
+                "started_at": None,
+                "updated_at": now,
+                "completed_at": None,
+                "invalidation_reason": None,
+                "error": None,
+            }
+        self.derive_checkpoint_status("conversion")
+
+    def actionable_group(self, stage: str = "conversion") -> dict[str, Any] | None:
+        """Return the earliest group of ``stage`` that still has work to do.
+
+        Groups are held in pipeline order, so "earliest" is the first group
+        whose render has not completed.  A group waiting on review is reported
+        too: resuming past an unreviewed render would publish unreviewed bytes.
+        """
+        groups = self.checkpoints.get(stage, {}).get("groups", {})
+        for group in groups.values():
+            if group.get("status") in {
+                    "pending", "stale", "failed", "cancelled", "running",
+                    "awaiting_review", "partial_failure"}:
+                return group
+        return None
+
     def transition_checkpoint(self, stage: str, status: str,
                               expected_revision: int,
                               jobs_dir: str | Path | None = None,
                               error: dict[str, Any] | None = None,
                               invalidation_reason: dict[str, Any] | None = None,
-                              references: dict[str, Any] | None = None
+                              references: dict[str, Any] | None = None,
+                              group_id: str | None = None
                               ) -> dict[str, Any]:
         if stage not in self.checkpoints:
             raise ValueError(f"Unknown checkpoint: {stage}")
         if status not in CHECKPOINT_STATES:
             raise ValueError(f"Unknown checkpoint status: {status}")
         checkpoint = self.checkpoints[stage]
+        if group_id is not None:
+            groups = checkpoint.get("groups", {})
+            if group_id not in groups:
+                raise ValueError(f"Unknown {stage} checkpoint group: {group_id}")
+            group = groups[group_id]
+            if group["revision"] != expected_revision:
+                raise ValueError("stale checkpoint revision")
+            if status not in CHECKPOINT_TRANSITIONS[stage].get(group["status"], set()):
+                raise ValueError(
+                    f"illegal {stage} checkpoint transition: {group['status']} -> {status}")
+            now = datetime.now(timezone.utc).isoformat()
+            group["revision"] += 1
+            group["status"] = status
+            group["updated_at"] = now
+            if status == "running":
+                group["started_at"] = now
+            if status in {"completed", "failed", "partial_failure", "cancelled"}:
+                group["completed_at"] = now
+            if error is not None:
+                group["error"] = {
+                    "code": str(error.get("code", "checkpoint_error")),
+                    "message": safe_error_message(error.get("message", "")),
+                    "occurred_at": now,
+                    "attempt_id": error.get("attempt_id"),
+                    "retryable": bool(error.get("retryable", False)),
+                }
+            elif status != "failed":
+                group["error"] = None
+            if invalidation_reason is not None:
+                group["invalidation_reason"] = invalidation_reason
+            if references is not None:
+                group.setdefault("references", {}).update(references)
+            self.derive_checkpoint_status(stage)
+            self._derive_status()
+            self.save(jobs_dir)
+            return group
         if checkpoint["revision"] != expected_revision:
             raise ValueError("stale checkpoint revision")
         if status not in CHECKPOINT_TRANSITIONS[stage].get(checkpoint["status"], set()):
@@ -286,8 +425,35 @@ class JobManifest:
 
     def invalidate_checkpoint(self, stage: str, reason: dict[str, Any],
                               jobs_dir: str | Path | None = None,
-                              persist: bool = True) -> None:
+                              persist: bool = True,
+                              group_id: str | None = None) -> None:
         checkpoint = self.checkpoints[stage]
+        if group_id is not None:
+            groups = checkpoint.get("groups", {})
+            if group_id not in groups:
+                raise ValueError(f"Unknown {stage} checkpoint group: {group_id}")
+            group = groups[group_id]
+            if group["status"] == "skipped":
+                return
+            if stage == "conversion" and group.get("current_artifact_id"):
+                artifact_id = group["current_artifact_id"]
+                if artifact_id in self.artifacts:
+                    artifact = self.artifacts[artifact_id]
+                    if artifact.get("state") == "current":
+                        artifact["state"] = "stale"
+            group["revision"] += 1
+            group["status"] = "stale"
+            group["updated_at"] = datetime.now(timezone.utc).isoformat()
+            group["completed_at"] = None
+            group["invalidation_reason"] = {
+                "code": str(reason.get("code", "configuration_changed")),
+                "message": str(reason.get("message", "Inputs changed"))[:500],
+            }
+            self.derive_checkpoint_status(stage)
+            if persist:
+                self._derive_status()
+                self.save(jobs_dir)
+            return
         if checkpoint["status"] == "skipped":
             return
         if stage == "conversion" and self.current_artifact_id in self.artifacts:
@@ -324,6 +490,35 @@ class JobManifest:
                 return False
         return has_scheduled
 
+    def derive_checkpoint_status(self, stage: str) -> None:
+        """Recompute a checkpoint's aggregate status from its group records.
+
+        The aggregate is the worst-case over groups: any failed group fails
+        the stage, any cancelled group cancels it, and so on.  Checkpoints
+        without groups keep their own status unchanged.
+        """
+        checkpoint = self.checkpoints[stage]
+        groups = checkpoint.get("groups")
+        if not groups:
+            return
+        statuses = [group["status"] for group in groups.values()]
+        if "failed" in statuses:
+            checkpoint["status"] = "failed"
+        elif "cancelled" in statuses:
+            checkpoint["status"] = "cancelled"
+        elif "partial_failure" in statuses:
+            checkpoint["status"] = "partial_failure"
+        elif "running" in statuses:
+            checkpoint["status"] = "running"
+        elif "awaiting_review" in statuses:
+            checkpoint["status"] = "awaiting_review"
+        elif "stale" in statuses:
+            checkpoint["status"] = "stale"
+        elif "pending" in statuses:
+            checkpoint["status"] = "pending"
+        else:
+            checkpoint["status"] = "completed"
+
     def _derive_status(self) -> None:
         statuses = [checkpoint["status"] for checkpoint in self.checkpoints.values()]
         if "failed" in statuses:
@@ -357,9 +552,11 @@ class JobManifest:
     def set_artifact(self, artifact_path: str | Path,
                      jobs_dir: str | Path | None = None,
                      name: str = "primary",
-                     storage_key: str | None = None):
+                     storage_key: str | None = None,
+                     group_id: str | None = None):
         return self.record_artifact(
-            name, artifact_path, jobs_dir, storage_key=storage_key)
+            name, artifact_path, jobs_dir, storage_key=storage_key,
+            group_id=group_id)
 
     @staticmethod
     def artifact_root(jobs_dir: str | Path | None) -> Path:
@@ -379,9 +576,16 @@ class JobManifest:
     def record_artifact(self, name: str, artifact_path: str | Path,
                         jobs_dir: str | Path | None = None,
                         schema_version: int = MANIFEST_SCHEMA_VERSION,
-                        storage_key: str | None = None):
+                        storage_key: str | None = None,
+                        group_id: str | None = None):
         resolved_path = Path(artifact_path).resolve()
-        if self.current_artifact_id in self.artifacts:
+        # The top-level ``current_artifact_id`` is a display pointer to the
+        # LATEST render, so registering a ``conversion.skip`` group's source
+        # copy must not move it off a live render (nor supersede that render).
+        # A job with no render yet (every group skips) still advances to the
+        # first artifact so the single-group fallback keeps working.
+        advance_pointer = name != "source" or self.current_artifact_id is None
+        if advance_pointer and self.current_artifact_id in self.artifacts:
             current = self.artifacts[self.current_artifact_id]
             if current.get("state") == "current":
                 current["state"] = "superseded"
@@ -395,6 +599,15 @@ class JobManifest:
         if storage_key is None:
             storage_key = storage_key_for(
                 self.artifact_root(jobs_dir), resolved_path)
+        # The artifact's configuration_hash carries ITS GROUP's conversion
+        # hash, not the aggregate stage hash, so per-group staleness can
+        # re-derive from it.
+        conversion = self.checkpoints.get("conversion", {})
+        if group_id is not None:
+            group = conversion.get("groups", {}).get(group_id, {})
+            config_hash = group.get("configuration_hash")
+        else:
+            config_hash = conversion.get("configuration_hash")
         self.artifacts[artifact_id] = {
             "id": artifact_id,
             "revision": revision,
@@ -403,8 +616,8 @@ class JobManifest:
             # key it resolves them by. The local path is never stored.
             "storage": {"backend": LOCAL_BACKEND, "key": storage_key},
             "sha256": artifact_hash,
-            "configuration_hash": self.checkpoints.get(
-                "conversion", {}).get("configuration_hash"),
+            "configuration_hash": config_hash,
+            "group_id": group_id,
             "transcript_revision": (self.active_transcript or {}).get("revision"),
             "created_at": datetime.now(timezone.utc).isoformat(),
             "state": "current",
@@ -412,11 +625,18 @@ class JobManifest:
             "schema_version": schema_version,
             "source_sha256": self.source_sha256,
         }
-        self.current_artifact_id = artifact_id
-        conversion = self.checkpoints.get("conversion")
-        if conversion is not None:
-            conversion["artifact_hash"] = artifact_hash
-            conversion["references"]["artifact_id"] = artifact_id
+        self.current_artifact_id = (artifact_id if advance_pointer
+                                    else self.current_artifact_id)
+        conversion_checkpoint = self.checkpoints.get("conversion")
+        if conversion_checkpoint is not None:
+            conversion_checkpoint["artifact_hash"] = artifact_hash
+            conversion_checkpoint["references"]["artifact_id"] = artifact_id
+            if group_id is not None:
+                group = conversion_checkpoint.get("groups", {}).get(group_id)
+                if group is not None:
+                    group["artifact_hash"] = artifact_hash
+                    group["current_artifact_id"] = artifact_id
+                    group.setdefault("references", {})["artifact_id"] = artifact_id
         self.save(jobs_dir)
 
     def record_platform(self, platform: str, result: dict[str, Any],

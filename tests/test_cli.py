@@ -636,6 +636,87 @@ class JobCommandTests(unittest.TestCase):
                 saved.configuration["upload"]["content"]["title"],
                 "Reviewed title")
 
+    def test_job_review_group_flag_is_accepted(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            # Two conversion groups: YouTube renders, the rest skip, so
+            # accepting one group is not the same as accepting all of them.
+            manifest = seed_job(data_dir, configuration={
+                "conversion": {"skip": True},
+                "platforms": {"youtube": {"conversion": {"skip": False}}}})
+            service = JobService(data_dir)
+            try:
+                group_id, group = next(
+                    (gid, record) for gid, record
+                    in service.get_job(
+                        manifest.job_id).checkpoints[
+                            "conversion"]["groups"].items()
+                    if record["status"] == "pending")
+                manifest = service.get_job(manifest.job_id)
+                manifest.transition_checkpoint(
+                    "conversion", "running", group["revision"],
+                    service.jobs_dir, group_id=group_id)
+                manifest = service.get_job(manifest.job_id)
+                group = manifest.checkpoints["conversion"]["groups"][group_id]
+                manifest.transition_checkpoint(
+                    "conversion", "awaiting_review", group["revision"],
+                    service.jobs_dir, group_id=group_id)
+            finally:
+                service.close()
+            manifest = JobManifest.load(manifest.job_id, data_dir / "jobs")
+
+            result, _ = invoke([
+                "--data-dir", str(data_dir), "job", "review",
+                manifest.job_id, "conversion", "--accept",
+                "--group", group_id])
+
+            self.assertEqual(result, 0)
+            saved = JobManifest.load(manifest.job_id, data_dir / "jobs")
+            groups = saved.checkpoints["conversion"]["groups"]
+            self.assertEqual(groups[group_id]["status"], "completed")
+            self.assertEqual(
+                {gid for gid, record in groups.items()
+                 if record["status"] == "skipped"},
+                {gid for gid in groups if gid != group_id})
+
+    def test_job_render_group_flag_stales_only_that_group(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest = seed_job(data_dir, configuration={
+                "conversion": {"skip": False, "subtitles": {"skip": True}},
+                "platforms": {"youtube": {"conversion": {"strict": True}}}})
+            service = JobService(data_dir)
+            try:
+                saved = service.get_job(manifest.job_id)
+                group_id = next(iter(saved.checkpoints["conversion"]["groups"]))
+                # Both groups have rendered and been accepted; a rerender
+                # starts from a completed conversion.
+                for gid in list(saved.checkpoints["conversion"]["groups"]):
+                    for status in ("running", "awaiting_review", "completed"):
+                        manifest_record = service.get_job(manifest.job_id)
+                        revision = manifest_record.checkpoints["conversion"][
+                            "groups"][gid]["revision"]
+                        manifest_record.transition_checkpoint(
+                            "conversion", status, revision, service.jobs_dir,
+                            group_id=gid)
+            finally:
+                service.close()
+
+            with patch("clipmorph.workflow.execute_job") as runner:
+                result, _ = invoke([
+                    "--data-dir", str(data_dir), "job", "render",
+                    manifest.job_id, "--group", group_id])
+                self.assertEqual(result, 0, "render must not fail on --group")
+                self.assertTrue(runner.called)
+
+            saved = JobManifest.load(manifest.job_id, data_dir / "jobs")
+            groups = saved.checkpoints["conversion"]["groups"]
+            self.assertEqual(groups[group_id]["status"], "stale")
+            self.assertEqual(
+                {gid for gid, record in groups.items()
+                 if record["status"] == "completed"},
+                {gid for gid in groups if gid != group_id})
+
     def test_job_artifacts_prune_reports_the_retention_policy_result(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)

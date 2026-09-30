@@ -85,25 +85,23 @@ def native_scheduling_support(platform: str) -> bool:
     return bool(SUPPORTED_NATIVE_SCHEDULING.get(str(platform).lower(), False))
 
 
-def enabled_platforms(platforms_config: dict[str, Any] | None) -> list[str]:
-    """Resolve upload.platforms config into an ordered platform list.
+def resolve_upload_participants(job_effective: dict[str, Any]) -> list[str]:
+    """Resolve the effective per-platform ``upload.skip`` into an ordered list.
 
-    Empty or missing ``include`` means all platforms; ``exclude`` removes
-    from the included set. Duplicates are dropped while preserving order.
+    For each supported platform, participate iff the merged per-platform
+    ``upload.skip`` is false.  An absent platform entry participates under
+    the job-level ``upload.skip`` default (the #172 "omission means all"
+    contract).  A per-platform ``upload.skip: false`` overrides a job-level
+    ``upload.skip: true`` so that platform uploads anyway.
     """
-    platforms = platforms_config or {}
-    included = platforms.get("include")
-    if isinstance(included, str):
-        included = [included]
-    if not included:
-        included = SUPPORTED_PLATFORMS
-    excluded = {str(value).lower() for value in (platforms.get("exclude") or [])}
-    seen: set[str] = set()
-    resolved: list[str] = []
-    for value in included:
-        name = str(value).lower()
-        if name in excluded or name in seen:
-            continue
-        seen.add(name)
-        resolved.append(name)
-    return resolved
+    from clipmorph.configuration import merge_configuration
+
+    upload = job_effective.get("upload", {})
+    participants: list[str] = []
+    for platform in SUPPORTED_PLATFORMS:
+        platform_upload = job_effective.get("platforms", {}).get(
+            platform, {}).get("upload", {})
+        merged = merge_configuration(upload, platform_upload)
+        if not merged.get("skip", False):
+            participants.append(platform)
+    return participants

@@ -61,10 +61,10 @@ COMMANDS: dict[tuple[str, ...], tuple[tuple[str, ...], tuple[str, ...],
     ("job", "resume"): (GLOBAL_OPTIONS, (), (("job_id", True),)),
     ("job", "cancel"): (("--yes", "--json") + GLOBAL_OPTIONS, (),
                         (("job_id", True),)),
-    ("job", "review"): (("--edits", "--accept", "--reopen", "--json")
+    ("job", "review"): (("--edits", "--accept", "--reopen", "--group", "--json")
                         + GLOBAL_OPTIONS, (),
                         (("job_id", True), ("checkpoint", True))),
-    ("job", "render"): (GLOBAL_OPTIONS, (), (("job_id", True),)),
+    ("job", "render"): (("--group",) + GLOBAL_OPTIONS, (), (("job_id", True),)),
     ("job", "upload"): (("--platform", "--attempt-id", "--artifact-id",
                          "--confirm-historical-artifact", "--json")
                         + GLOBAL_OPTIONS, (), (("upload_args", False),)),

@@ -24,8 +24,9 @@ from clipmorph.job import configuration_sha256
 from clipmorph.job import safe_error_message
 from clipmorph.job import source_sha256
 from clipmorph.metrics import append_snapshot, collect_platform_metrics, load_snapshots
-from clipmorph.platforms import enabled_platforms
 from clipmorph.platforms import native_scheduling_support
+from clipmorph.platforms import resolve_upload_participants
+from clipmorph.platforms import SUPPORTED_PLATFORMS
 from clipmorph.platforms import SUPPORTED_PLATFORMS_SET
 from clipmorph.storage import ArtifactStorage, LocalArtifactStorage, make_storage
 
@@ -103,16 +104,143 @@ def _parse_utc_timestamp(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _layouts_with_registry_backfill(configuration: dict[str, Any],
+                                    layouts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return the layout registry plus the job's own materialized layout.
+
+    ``resolve_job_configuration`` rejects a ``conversion.layout_id`` that is no
+    longer registered, so re-resolving a stored job must see the layout the job
+    was created with.  Appending that missing entry is the same backfill
+    ``update_job_configuration`` performs.
+    """
+    resolved = list(layouts)
+    registered = {record.get("id") for record in resolved}
+    conversion = configuration.get("conversion", {})
+    layout_id = conversion.get("layout_id")
+    if layout_id and layout_id not in registered:
+        resolved.append({"id": layout_id, "name": layout_id,
+                         "layout": conversion.get("layout", {})})
+    return resolved
+
+
+def conversion_groups(job_effective: dict[str, Any]) -> list[dict[str, Any]]:
+    """Group platforms by the digest of their distinct effective conversion config.
+
+    Each group record carries the group id (the first 12 hex chars of the
+    conversion-section hash), the deep-merged conversion section, and the
+    platform names that resolve to it.  A platform with no conversion override
+    inherits the job-level conversion section verbatim, so a job with no
+    per-platform overrides yields exactly one group.
+
+    The job's effective configuration is already fully resolved -- layout
+    presets included, per platform -- so the digest is taken directly from it
+    and every caller agrees on the ids without a registry argument.
+    """
+    groups: dict[str, dict[str, Any]] = {}
+    for platform in SUPPORTED_PLATFORMS:
+        conversion = merge_configuration(
+            job_effective.get("conversion", {}),
+            job_effective.get("platforms", {}).get(platform, {}).get(
+                "conversion", {}))
+        group_id = configuration_sha256(conversion)[:12]
+        if group_id not in groups:
+            groups[group_id] = {"id": group_id, "conversion": conversion,
+                                "platforms": []}
+        groups[group_id]["platforms"].append(platform)
+    return list(groups.values())
+
+
+def _platform_group_id(platform: str,
+                       groups: list[dict[str, Any]]) -> str | None:
+    """Return the conversion group id that one platform resolves to."""
+    for group in groups:
+        if platform in group["platforms"]:
+            return group["id"]
+    return None
+
+
+def _group_current_artifact(manifest: JobManifest, group_id: str | None) -> str | None:
+    """Return the artifact one conversion group last rendered.
+
+    A group that never rendered its own artifact (a skipped stage still
+    registers the source copy on the manifest) falls back to the manifest's
+    latest artifact, so a job with one group behaves exactly as it did before
+    groups existed.
+    """
+    group = manifest.checkpoints.get("conversion", {}).get("groups", {}).get(
+        group_id) if group_id is not None else None
+    if group is not None and group.get("current_artifact_id"):
+        return group["current_artifact_id"]
+    return manifest.current_artifact_id
+
+
+def _select_upload_platforms(job_effective: dict[str, Any],
+                             requested: list[str] | None) -> list[str]:
+    """Resolve the ordered platform list one upload submission targets.
+
+    ``None`` means every participating platform.  An explicit list must name
+    only supported platforms that actually participate, so submitting to a
+    platform the configuration skips is a hard error rather than a silent
+    no-op.  Both the pre-detection pass and the locked pass call this so the
+    detection scope can never diverge from what gets submitted.
+    """
+    participants = resolve_upload_participants(job_effective)
+    if requested is None:
+        return participants
+    if any(platform not in SUPPORTED_PLATFORMS_SET for platform in requested):
+        raise ValueError("upload platforms are empty or unsupported")
+    skipped = [platform for platform in requested if platform not in participants]
+    if skipped:
+        raise ValueError(
+            f"platform(s) {', '.join(sorted(skipped))} are skipped; "
+            "re-enable them in the configuration")
+    if len(set(requested)) != len(requested):
+        raise ValueError("upload platforms must not contain duplicates")
+    return [platform for platform in participants if platform in requested]
+
+
 def _stage_skipped(configuration: dict[str, Any], stage: str) -> bool:
+    """Report whether a stage is skipped for EVERY effective per-platform section.
+
+    A stage is skipped only when every participating platform's effective
+    section is skipped; any participating platform un-skips the checkpoint.
+    """
     conversion = configuration.get("conversion", {})
     if stage == "transcript":
-        return bool(conversion.get("skip") or
-                    conversion.get("subtitles", {}).get("skip"))
-    if stage == "conversion":
-        return bool(conversion.get("skip"))
-    if stage == "upload":
-        return bool(configuration.get("upload", {}).get("skip"))
-    raise ValueError(f"Unknown checkpoint: {stage}")
+        job_skip = bool(conversion.get("skip") or
+                        conversion.get("subtitles", {}).get("skip"))
+    elif stage == "conversion":
+        job_skip = bool(conversion.get("skip"))
+    elif stage == "upload":
+        job_skip = bool(configuration.get("upload", {}).get("skip"))
+    else:
+        raise ValueError(f"Unknown checkpoint: {stage}")
+    # Check per-platform overrides: if any participating platform's effective
+    # section is NOT skipped, the stage is not skipped.  A platform that does
+    # not participate in upload (its effective ``upload.skip`` is true) must
+    # not force conversion or transcription to run.
+    for platform in resolve_upload_participants(configuration):
+        platform_entry = configuration.get("platforms", {}).get(platform, {})
+        if stage == "upload":
+            platform_skip = platform_entry.get("upload", {}).get("skip")
+            effective_skip = platform_skip if platform_skip is not None else job_skip
+        elif stage == "conversion":
+            platform_skip = platform_entry.get("conversion", {}).get("skip")
+            effective_skip = platform_skip if platform_skip is not None else job_skip
+        else:  # transcript
+            platform_conversion = platform_entry.get("conversion", {})
+            platform_subtitles = platform_conversion.get("subtitles", {})
+            platform_skip = platform_conversion.get("skip")
+            platform_subs_skip = platform_subtitles.get("skip")
+            if platform_skip is not None:
+                effective_skip = bool(platform_skip)
+            elif platform_subs_skip is not None:
+                effective_skip = bool(platform_subs_skip)
+            else:
+                effective_skip = job_skip
+        if not effective_skip:
+            return False
+    return True
 
 
 class CancellationToken:
@@ -338,8 +466,28 @@ class JobService:
 
     def _fail_interrupted_checkpoint(self, manifest: JobManifest,
                                      stage: str) -> None:
-        """Move one running checkpoint to failed with the structured reason."""
+        """Move one running checkpoint to failed with the structured reason.
+
+        A checkpoint with groups heals PER GROUP: one interrupted conversion
+        group must not fail the groups that already finished.  The aggregate
+        still fails when it is left ``running`` afterwards, which covers a
+        group-less checkpoint and an aggregate whose groups all healed.
+        """
+        for group_id, group in list(
+                (manifest.checkpoints[stage].get("groups") or {}).items()):
+            if group["status"] != "running":
+                continue
+            try:
+                manifest.transition_checkpoint(
+                    stage, "failed", group["revision"], self.jobs_dir,
+                    error=dict(INTERRUPTED_ERROR), group_id=group_id)
+            except ValueError as error:
+                logger.warning(
+                    "Could not fail interrupted %s group %s of %s: %s",
+                    stage, group_id, manifest.job_id, error)
         checkpoint = manifest.checkpoints[stage]
+        if checkpoint["status"] != "running":
+            return
         try:
             manifest.transition_checkpoint(
                 stage, "failed", checkpoint["revision"], self.jobs_dir,
@@ -425,23 +573,36 @@ class JobService:
                     "snapshot is missing", manifest.job_id, artifact_id)
                 continue
             self._schedule_attempts(
-                manifest.job_id, [item["attempt_id"] for item in group],
-                artifact["storage"]["key"], snapshot,
-                [item["platform"] for item in group],
+                manifest.job_id,
+                [{
+                    "attempt_ids": [item["attempt_id"] for item in group],
+                    "platforms": [item["platform"] for item in group],
+                    "artifact_key": artifact["storage"]["key"],
+                    "upload_config": snapshot,
+                }],
                 _parse_utc_timestamp(stamp))
             armed += len(group)
         return armed
 
-    def _schedule_attempts(self, job_id: str, attempt_ids: list[str],
-                           artifact_key: str, upload_config: dict[str, Any],
-                           platforms: list[str], publish_at: datetime) -> Timer:
-        """Run one upload attempt group at publish_at on a daemon timer."""
+    def _schedule_attempts(self, job_id: str,
+                           bindings: list[dict[str, Any]],
+                           publish_at: datetime) -> Timer:
+        """Run one group of bound upload attempts at publish_at on a timer."""
         delay = max(
             0.0,
             (publish_at - datetime.now(timezone.utc)).total_seconds())
-        handle = Timer(delay, self._run_upload_attempts,
-                       args=(job_id, list(attempt_ids), artifact_key,
-                             deepcopy(upload_config), list(platforms)))
+        payload = [
+            {
+                "attempt_ids": list(binding["attempt_ids"]),
+                "platforms": list(binding["platforms"]),
+                "artifact_key": binding["artifact_key"],
+                "upload_config": deepcopy(binding["upload_config"]),
+            }
+            for binding in bindings
+        ]
+        attempt_ids = [attempt_id for binding in payload
+                       for attempt_id in binding["attempt_ids"]]
+        handle = Timer(delay, self._run_upload_attempts, args=(job_id, payload))
         handle.daemon = True
         with self._lock:
             self._scheduled_timers.setdefault(
@@ -797,8 +958,8 @@ class JobService:
             if expected_revision != active_revision:
                 raise ValueError("stale transcript revision")
             checkpoint = manifest.checkpoints["transcript"]
-            if (expected_checkpoint_revision is not None and
-                    checkpoint["revision"] != expected_checkpoint_revision):
+            if (expected_checkpoint_revision is not None
+                    and checkpoint["revision"] != expected_checkpoint_revision):
                 raise ValueError("stale checkpoint revision")
 
             next_session = deepcopy(session)
@@ -882,6 +1043,13 @@ class JobService:
                 })
             updated = resolve_job_configuration({}, updated, layouts)
 
+            # Re-derive the conversion groups from the patched configuration
+            # before the invalidation cascade: a group whose effective
+            # conversion section moved is a different group id, so the stored
+            # set is reconciled here and the cascade below re-runs only what
+            # actually changed.
+            manifest.sync_conversion_groups(conversion_groups(updated))
+
             old_hashes = {
                 stage: manifest.checkpoints[stage]["configuration_hash"]
                 for stage in ("transcript", "conversion", "upload")
@@ -911,6 +1079,32 @@ class JobService:
                     checkpoint["status"] = "pending"
                     checkpoint["updated_at"] = datetime.now(timezone.utc).isoformat()
                     checkpoint["invalidation_reason"] = reason
+                elif (stage == "conversion"
+                      and manifest.checkpoints[stage].get("groups")):
+                    # Grouped conversion was reconciled by
+                    # ``sync_conversion_groups`` (a moved group is a new group
+                    # id, so an unchanged group keeps its status and artifact).
+                    # Move the aggregate to ``stale`` without staling a
+                    # group-bound artifact through the global display pointer;
+                    # a non-group-bound artifact (the legacy/global one) is
+                    # still staled so a job-level conversion edit rerenders it.
+                    checkpoint = manifest.checkpoints[stage]
+                    if checkpoint["status"] != "skipped":
+                        checkpoint["revision"] += 1
+                        checkpoint["status"] = "stale"
+                        checkpoint["updated_at"] = datetime.now(
+                            timezone.utc).isoformat()
+                        checkpoint["completed_at"] = None
+                        checkpoint["invalidation_reason"] = reason
+                        bound = {
+                            group.get("current_artifact_id")
+                            for group in checkpoint.get("groups", {}).values()}
+                        artifact_id = manifest.current_artifact_id
+                        artifact = manifest.artifacts.get(artifact_id or "")
+                        if (artifact_id and artifact_id not in bound
+                                and artifact is not None
+                                and artifact.get("state") == "current"):
+                            artifact["state"] = "stale"
                 else:
                     manifest.invalidate_checkpoint(stage, reason, persist=False)
             if manifest.status == "completed" and reopen:
@@ -920,22 +1114,48 @@ class JobService:
             return manifest
 
     def accept_checkpoint(self, job_id: str, stage: str,
-                          expected_revision: int) -> JobManifest:
+                          expected_revision: int,
+                          group_id: str | None = None) -> JobManifest:
+        """Accept one review gate, addressing one group or all of them.
+
+        ``group_id`` names a single conversion group; omitting it accepts every
+        group still awaiting review, which is the whole checkpoint for a job
+        that renders one group. The expected revision is matched against the
+        addressed group when one is named and against the aggregate otherwise.
+        """
         if stage not in {"transcript", "conversion"}:
             raise ValueError("only transcript and conversion checkpoints require acceptance")
         with self._lock:
             manifest = self.get_job(job_id)
             checkpoint = manifest.checkpoints[stage]
-            if checkpoint["revision"] != expected_revision:
-                raise ValueError("stale checkpoint revision")
-            if checkpoint["status"] != "awaiting_review":
-                raise ValueError("checkpoint is not awaiting review")
-            checkpoint["revision"] += 1
-            checkpoint["status"] = "completed"
             now = datetime.now(timezone.utc).isoformat()
-            checkpoint["completed_at"] = now
-            checkpoint["updated_at"] = now
-            if stage == "conversion" and manifest.checkpoints["upload"]["status"] == "pending":
+            groups = checkpoint.get("groups", {})
+            if group_id is not None:
+                if group_id not in groups:
+                    raise ValueError(f"unknown {stage} checkpoint group: {group_id}")
+                addressed = [groups[group_id]]
+                revision_owner = groups[group_id]
+            elif groups:
+                addressed = list(groups.values())
+                revision_owner = checkpoint
+            else:
+                addressed = [checkpoint]
+                revision_owner = checkpoint
+            if revision_owner["revision"] != expected_revision:
+                raise ValueError("stale checkpoint revision")
+            awaiting = [item for item in addressed
+                        if item["status"] == "awaiting_review"]
+            if not awaiting:
+                raise ValueError("checkpoint is not awaiting review")
+            for item in awaiting:
+                item["revision"] += 1
+                item["status"] = "completed"
+                item["completed_at"] = now
+                item["updated_at"] = now
+            if groups:
+                manifest.derive_checkpoint_status(stage)
+            if (stage == "conversion"
+                    and manifest.checkpoints["upload"]["status"] == "pending"):
                 upload = manifest.checkpoints["upload"]
                 upload["revision"] += 1
                 upload["status"] = "awaiting_review"
@@ -957,8 +1177,37 @@ class JobService:
             if manifest.status == "completed" and not reopen:
                 raise ValueError("completed job requires explicit reopen confirmation")
 
-            updated = merge_configuration(
-                manifest.configuration, {"upload": upload_configuration})
+            # The upload draft payload is {upload, platforms}: the upload
+            # section carries content/schedule, and the platforms map carries
+            # per-platform participation overrides (upload.skip, content).
+            # Callers may pass either the bare upload section (CLI, delete)
+            # or the full {upload, platforms} draft payload (web).
+            draft = dict(upload_configuration)
+            platforms_patch = draft.pop("platforms", {})
+            upload_section = draft.pop("upload", draft)
+            patch = {"upload": upload_section}
+            if platforms_patch:
+                if not isinstance(platforms_patch, dict):
+                    raise ValueError("platforms must be an object")
+                for platform, entry in platforms_patch.items():
+                    if not isinstance(entry, dict):
+                        raise ValueError(
+                            f"platforms.{platform} must be an object")
+                    # The draft owns upload-time fields: the mirrored ``upload``
+                    # section plus that platform's flat adapter options.  The
+                    # ``general``/``conversion`` mirrored sections flow through
+                    # the composition review (``job review conversion`` / PATCH
+                    # /configuration) so their group re-derivation is not
+                    # bypassed.
+                    disallowed = set(entry) & {"general", "conversion"}
+                    if disallowed:
+                        raise ValueError(
+                            "upload draft may not edit "
+                            f"platforms.{platform}.{{"
+                            f"{', '.join(sorted(disallowed))}}}; "
+                            "edit the composition instead")
+                patch["platforms"] = platforms_patch
+            updated = merge_configuration(manifest.configuration, patch)
             updated = self._resolve_upload_configuration_locked(updated)
             manifest.configuration = updated
             checkpoint = manifest.checkpoints["upload"]
@@ -1103,11 +1352,9 @@ class JobService:
             if checkpoint["status"] != "awaiting_review":
                 raise ValueError("upload checkpoint is not awaiting review")
 
-            platform_settings = manifest.configuration.get(
-                "upload", {}).get("platforms", {})
-            include = platforms or platform_settings.get("include")
-            selected = enabled_platforms(
-                {**platform_settings, "include": include})
+            selected = [platform for platform in (
+                platforms or resolve_upload_participants(manifest.configuration))
+                if platform in SUPPORTED_PLATFORMS_SET]
             if not selected:
                 raise ValueError("upload platforms are empty or unsupported")
 
@@ -1212,99 +1459,197 @@ class JobService:
             return {"upload": manifest.configuration["upload"],
                     "checkpoint": manifest.checkpoints["upload"]}
 
+    def upload_draft_summary(self, job_id: str) -> dict[str, dict[str, Any]]:
+        """Summarize, per platform, what the current upload draft will deliver.
+
+        This is READ-ONLY and it is the single source of truth for "what does
+        this platform receive": the upload draft only edits ``upload`` slices,
+        so the effective conversion slice, the artifact that slice is bound to
+        and whether the platform participates all come from the job
+        configuration.  Re-deriving per-platform resolution in each client would
+        mean a second implementation of the same merge rules.
+        """
+        from clipmorph.configuration import resolve_platform_configuration
+
+        manifest = self.get_job(job_id)
+        defaults = manifest.configuration_sources.get("global_defaults", {})
+        layouts = _layouts_with_registry_backfill(
+            manifest.configuration,
+            list(load_app_configuration(self.app_config_path).get("layouts", [])))
+        participants = resolve_upload_participants(manifest.configuration)
+        derived = conversion_groups(manifest.configuration)
+        summaries: dict[str, dict[str, Any]] = {}
+        for platform in SUPPORTED_PLATFORMS:
+            effective = resolve_platform_configuration(
+                manifest.configuration, defaults, layouts, platform)
+            group_id = _platform_group_id(platform, derived)
+            artifact_id = _group_current_artifact(manifest, group_id)
+            artifact = manifest.artifacts.get(artifact_id or "", {})
+            summaries[platform] = {
+                "participates": platform in participants,
+                "group_id": group_id,
+                # A group that skipped conversion uploads the untouched source;
+                # every other group uploads the rendered vertical.
+                "kind": ("source" if artifact.get("kind") == "source"
+                         else "vertical"),
+                "conversion": effective.get("conversion", {}),
+                "upload": effective.get("upload", {}),
+                "artifact_id": artifact_id,
+                "artifact_sha256": artifact.get("sha256"),
+            }
+        return summaries
+
+    def _platform_upload_snapshot(self, manifest: JobManifest,
+                                  platform: str) -> dict[str, Any]:
+        """Freeze one platform's effective upload slice plus its flat options.
+
+        Each attempt carries its OWN snapshot: a mixed-config submission must
+        upload platform B with platform B's title and adapter options, never
+        with platform A's.  The flat adapter options are stored ALREADY prefixed
+        (``youtube_privacy_status``) under ``platform_options``, so
+        ``upload_attempts.content_options`` folds them in verbatim.  Prefixing
+        at freeze time is also what lets two platforms with identical effective
+        configuration produce byte-identical snapshots and share one staged
+        artifact and one pipeline call.
+        """
+        from clipmorph.configuration import resolve_platform_configuration
+
+        configuration = manifest.configuration
+        global_defaults = manifest.configuration_sources.get("global_defaults", {})
+        layouts = _layouts_with_registry_backfill(
+            configuration, list(load_app_configuration(
+                self.app_config_path).get("layouts", [])))
+        effective = resolve_platform_configuration(
+            configuration, global_defaults, layouts, platform)
+        snapshot = deepcopy(effective.get("upload", {}))
+        snapshot["platform_options"] = {
+            f"{platform}_{key}": deepcopy(value)
+            for key, value in configuration.get("platforms", {}).get(
+                platform, {}).items()
+            if key not in ("general", "conversion", "upload")}
+        return snapshot
+
+    def _attempt_bindings(self, manifest: JobManifest, selected: list[str],
+                          artifact_id: str | None,
+                          confirm_historical_artifact: bool,
+                          platform_snapshots: dict[str, dict[str, Any]] | None,
+                          ) -> dict[str, dict[str, Any]]:
+        """Resolve each target platform to its group artifact and its snapshot.
+
+        A platform uploads the artifact of the conversion group its own
+        effective configuration resolves to, so a mixed submission sends the
+        rendered vertical to the platforms that render and the untouched source
+        to the platforms that skip.  ``artifact_id`` overrides that binding
+        explicitly.  ``is_historical`` is compared against THAT group's current
+        artifact: one platform's fresh group artifact is not historical just
+        because another group rendered more recently.
+        """
+        derived = conversion_groups(manifest.configuration)
+        bindings: dict[str, dict[str, Any]] = {}
+        for platform in selected:
+            group_id = _platform_group_id(platform, derived)
+            current_id = _group_current_artifact(manifest, group_id)
+            target_id = artifact_id or current_id
+            artifact = manifest.artifacts.get(target_id) if target_id else None
+            if artifact is None:
+                raise ValueError("selected artifact is unavailable")
+            if (target_id != current_id
+                    and (not confirm_historical_artifact or not artifact_id)):
+                raise ValueError("historical artifact requires explicit confirmation")
+            if platform_snapshots is not None and platform in platform_snapshots:
+                snapshot = deepcopy(platform_snapshots[platform])
+            else:
+                snapshot = self._platform_upload_snapshot(manifest, platform)
+            bindings[platform] = {
+                "group_id": group_id,
+                "artifact_id": target_id,
+                "artifact": artifact,
+                "upload_config": snapshot,
+            }
+        return bindings
+
+    def _verify_artifact_bytes(self, artifact: dict[str, Any]) -> None:
+        """Raise unless the registered bytes still hash to the manifest value."""
+        try:
+            actual = self._staged_artifact_sha256(artifact["storage"]["key"])
+        except FileNotFoundError as error:
+            raise ValueError("selected artifact bytes are unavailable") from error
+        if not artifact.get("sha256") or actual != artifact["sha256"]:
+            raise ValueError("selected artifact hash does not match manifest")
+
     def submit_upload(self, job_id: str, platforms: list[str] | None = None,
                       artifact_id: str | None = None,
                       confirm_historical_artifact: bool = False,
-                      configuration_snapshot: dict[str, Any] | None = None,
                       retry_of: str | None = None,
-                      honor_schedule: bool = True) -> dict[str, Any]:
+                      honor_schedule: bool = True,
+                      platform_snapshots: dict[str, dict[str, Any]] | None = None
+                      ) -> dict[str, Any]:
         # Resolve the submission outside the lock so platform-side existing-post
         # detection (network I/O) never runs while the service lock is held. The
-        # artifact hash is verified here too, so detection never runs for bytes
-        # that will be rejected anyway.
+        # artifact bytes are verified here too, so detection never runs for
+        # bytes that will be rejected anyway.
         pre_manifest = self.get_job(job_id)
-        pre_artifact_id = artifact_id or pre_manifest.current_artifact_id
-        pre_artifact = (pre_manifest.artifacts.get(pre_artifact_id)
-                        if pre_artifact_id else None)
-        if pre_artifact is None:
-            raise ValueError("selected artifact is unavailable")
-        pre_storage_key = pre_artifact["storage"]["key"]
-        try:
-            pre_actual_hash = self._staged_artifact_sha256(pre_storage_key)
-        except FileNotFoundError as error:
-            raise ValueError("selected artifact bytes are unavailable") from error
-        if (not pre_artifact.get("sha256")
-                or pre_actual_hash != pre_artifact["sha256"]):
-            raise ValueError("selected artifact hash does not match manifest")
-        pre_config = deepcopy(
-            configuration_snapshot if configuration_snapshot is not None
-            else pre_manifest.configuration.get("upload", {}))
-        pre_settings = pre_config.get("platforms", {})
-        pre_include = platforms or pre_settings.get("include")
-        pre_selected = enabled_platforms({**pre_settings, "include": pre_include})
-        pre_sha = pre_artifact.get("sha256")
-        existing_posts, detection_unavailable = self._detect_existing_posts(
-            pre_selected, pre_sha)
+        pre_selected = _select_upload_platforms(pre_manifest.configuration, platforms)
+        pre_bindings = self._attempt_bindings(
+            pre_manifest, pre_selected, artifact_id,
+            confirm_historical_artifact, platform_snapshots)
+        for binding in pre_bindings.values():
+            self._verify_artifact_bytes(binding["artifact"])
+        existing_posts, detection_unavailable = self._detect_existing_posts({
+            platform: binding["artifact"].get("sha256")
+            for platform, binding in pre_bindings.items()})
 
         with self._lock:
             manifest = self.get_job(job_id)
             checkpoint = manifest.checkpoints["upload"]
             if checkpoint["status"] != "awaiting_review":
                 raise ValueError("upload checkpoint is not awaiting review")
-            selected_artifact_id = artifact_id or manifest.current_artifact_id
-            artifact = (manifest.artifacts.get(selected_artifact_id)
-                        if selected_artifact_id else None)
-            if artifact is None:
-                raise ValueError("selected artifact is unavailable")
-            is_historical = selected_artifact_id != manifest.current_artifact_id
-            if is_historical and (not confirm_historical_artifact or not artifact_id):
-                raise ValueError("historical artifact requires explicit confirmation")
-            artifact_key = artifact["storage"]["key"]
-            try:
-                actual_artifact_hash = self._staged_artifact_sha256(artifact_key)
-            except FileNotFoundError as error:
-                raise ValueError("selected artifact bytes are unavailable") from error
-            if not artifact.get("sha256") or actual_artifact_hash != artifact["sha256"]:
-                raise ValueError("selected artifact hash does not match manifest")
-
-            upload_config = deepcopy(
-                configuration_snapshot if configuration_snapshot is not None
-                else manifest.configuration.get("upload", {}))
-            platform_settings = upload_config.get("platforms", {})
-            include = platforms or platform_settings.get("include")
-            selected = enabled_platforms(
-                {**platform_settings, "include": include})
-            supported = SUPPORTED_PLATFORMS_SET
-            if not selected or any(platform not in supported for platform in selected):
+            selected = _select_upload_platforms(manifest.configuration, platforms)
+            if not selected:
                 raise ValueError("upload platforms are empty or unsupported")
-            if len(set(selected)) != len(selected):
-                raise ValueError("upload platforms must not contain duplicates")
+            bindings = self._attempt_bindings(
+                manifest, selected, artifact_id, confirm_historical_artifact,
+                platform_snapshots)
+            for binding in bindings.values():
+                self._verify_artifact_bytes(binding["artifact"])
 
-            scheduled_for = self._resolve_publish_at(
-                upload_config, honor_schedule)
-            schedule_mode = self._resolve_schedule_mode(
-                upload_config, scheduled_for)
-            upload_hash = configuration_sha256(upload_config)
-            content_hash = configuration_sha256(upload_config.get("content", {}))
+            schedule_plan: dict[str, tuple[datetime | None, str]] = {}
+            platform_scheduled: list[str] = []
+            for platform, binding in bindings.items():
+                publish_at = self._resolve_publish_at(
+                    binding["upload_config"], honor_schedule)
+                mode = self._resolve_schedule_mode(
+                    binding["upload_config"], publish_at)
+                if publish_at is not None and mode == "platform":
+                    platform_scheduled.append(platform)
+                schedule_plan[platform] = (publish_at, mode)
+            if platform_scheduled:
+                # Strict by decision: every platform that cannot hold the
+                # future publication is named before any attempt exists, rather
+                # than silently falling back to ClipMorph's own timer.
+                self._reject_unsupported_schedule_platforms(platform_scheduled)
             if retry_of is None:
-                self._reject_duplicate_active_attempt(
-                    manifest, selected, artifact.get("sha256"), content_hash)
-            if schedule_mode == "platform":
-                # Strict by decision: a platform that cannot hold the future
-                # publication is refused before any attempt exists, rather than
-                # silently falling back to ClipMorph's own timer.
-                self._reject_unsupported_schedule_platforms(selected)
+                for platform, binding in bindings.items():
+                    self._reject_duplicate_active_attempt(
+                        manifest, [platform], binding["artifact"].get("sha256"),
+                        configuration_sha256(
+                            binding["upload_config"].get("content", {})))
             now = datetime.now(timezone.utc).isoformat()
             attempts: list[dict[str, Any]] = []
+            scheduled_for: datetime | None = None
             for platform in selected:
+                binding = bindings[platform]
+                snapshot = binding["upload_config"]
                 attempt = {
                     "attempt_id": uuid.uuid4().hex,
                     "platform": platform,
-                    "artifact_id": selected_artifact_id,
-                    "artifact_hash": artifact.get("sha256"),
-                    "configuration_snapshot": upload_config,
-                    "configuration_hash": upload_hash,
-                    "content_hash": content_hash,
+                    "group_id": binding["group_id"],
+                    "artifact_id": binding["artifact_id"],
+                    "artifact_hash": binding["artifact"].get("sha256"),
+                    "configuration_snapshot": snapshot,
+                    "configuration_hash": configuration_sha256(snapshot),
+                    "content_hash": configuration_sha256(
+                        snapshot.get("content", {})),
                     "created_at": now,
                     "started_at": None,
                     "completed_at": None,
@@ -1313,10 +1658,13 @@ class JobService:
                 }
                 if retry_of is not None:
                     attempt["retry_of"] = retry_of
-                if scheduled_for is not None:
-                    attempt["scheduled_publish_at"] = scheduled_for.isoformat()
-                    attempt["scheduled_via"] = schedule_mode
+                publish_at, mode = schedule_plan[platform]
+                if publish_at is not None:
+                    attempt["scheduled_publish_at"] = publish_at.isoformat()
+                    attempt["scheduled_via"] = mode
                     attempt["status"] = "scheduled"
+                    scheduled_for = publish_at if scheduled_for is None else max(
+                        scheduled_for, publish_at)
                 if platform in existing_posts:
                     post_id = existing_posts[platform]
                     attempt["status"] = "published"
@@ -1345,8 +1693,9 @@ class JobService:
                     }
                 attempts.append(attempt)
                 manifest.upload_attempts.append(attempt)
-            checkpoint["artifact_hash"] = artifact.get("sha256")
-            checkpoint["references"]["artifact_id"] = selected_artifact_id
+            checkpoint["artifact_hash"] = manifest.current_artifact_id and (
+                manifest.artifacts.get(manifest.current_artifact_id, {}).get("sha256"))
+            checkpoint["references"]["artifact_id"] = manifest.current_artifact_id
             checkpoint["references"]["attempt_ids"] = [
                 item["attempt_id"] for item in attempts]
             if all(item["status"] == "published" for item in attempts):
@@ -1363,42 +1712,67 @@ class JobService:
                 manifest.transition_checkpoint(
                     "upload", "running", checkpoint["revision"], self.jobs_dir)
 
-        attempt_ids = [attempt["attempt_id"] for attempt in attempts
-                       if attempt["status"] != "published"]
-        upload_platforms = [platform for platform in selected
-                            if platform not in existing_posts]
-        scheduled_config = upload_config
-        if scheduled_for is not None and schedule_mode == "platform":
-            # The platform holds the publication from the moment the upload
-            # lands, so submission is immediate: the resolved instant rides the
-            # ordinary per-platform override shape (which is what becomes the
-            # adapter's ``scheduled_publish_at`` keyword), while the attempt's
-            # frozen snapshot keeps recording the configuration the user
-            # accepted.
-            scheduled_config = deepcopy(upload_config)
-            overrides = scheduled_config.setdefault("platforms", {})
-            for platform in upload_platforms:
-                platform_overrides = overrides.get(platform)
-                platform_overrides = (deepcopy(platform_overrides)
-                                      if isinstance(platform_overrides, dict)
-                                      else {})
-                platform_overrides["scheduled_publish_at"] = (
-                    scheduled_for.isoformat())
-                overrides[platform] = platform_overrides
-        if scheduled_for is not None and schedule_mode == "local" and attempt_ids:
-            self._schedule_attempts(
-                job_id, attempt_ids, artifact_key, upload_config,
-                upload_platforms, scheduled_for)
-        elif attempt_ids:
+        pending = [attempt for attempt in attempts
+                   if attempt["status"] != "published"]
+        # Coalesce by (artifact, frozen upload slice): platforms that share both
+        # ride one staged copy through one pipeline call.
+        bindings_out: list[dict[str, Any]] = []
+        for attempt in pending:
+            artifact_key = manifest.artifacts[attempt["artifact_id"]][
+                "storage"]["key"]
+            match = next((item for item in bindings_out
+                          if item["artifact_key"] == artifact_key
+                          and item["snapshot_hash"]
+                          == attempt["configuration_hash"]), None)
+            if match is None:
+                match = {
+                    "artifact_key": artifact_key,
+                    "snapshot_hash": attempt["configuration_hash"],
+                    "upload_config": attempt["configuration_snapshot"],
+                    "attempt_ids": [],
+                    "platforms": [],
+                    "scheduled_publish_at": attempt.get("scheduled_publish_at"),
+                    "scheduled_via": attempt.get("scheduled_via"),
+                }
+                bindings_out.append(match)
+            match["attempt_ids"].append(attempt["attempt_id"])
+            match["platforms"].append(attempt["platform"])
+        immediate: list[dict[str, Any]] = []
+        local_by_time: dict[str, list[dict[str, Any]]] = {}
+        for binding in bindings_out:
+            if (binding["scheduled_via"] == "local"
+                    and binding["scheduled_publish_at"] is not None):
+                local_by_time.setdefault(
+                    binding["scheduled_publish_at"], []).append(binding)
+                continue
+            if binding["scheduled_via"] == "platform":
+                # The platform holds the publication from the moment the upload
+                # lands, so submission is immediate: the resolved instant rides
+                # the frozen snapshot's flat options, which become the adapter's
+                # ``scheduled_publish_at`` keyword. The attempt's own snapshot
+                # keeps recording the configuration the user accepted.
+                dispatch_config = deepcopy(binding["upload_config"])
+                options = dispatch_config.setdefault("platform_options", {})
+                for platform in binding["platforms"]:
+                    options[f"{platform}_scheduled_publish_at"] = (
+                        binding["scheduled_publish_at"])
+                binding = dict(binding, upload_config=dispatch_config)
+            immediate.append(binding)
+        for stamp, group in local_by_time.items():
+            self._schedule_attempts(job_id, group, _parse_utc_timestamp(stamp))
+        if immediate:
             future = self.executor.submit(
-                self._run_upload_attempts, job_id, attempt_ids,
-                artifact_key, scheduled_config, upload_platforms)
+                self._run_upload_attempts, job_id, immediate)
             with self._lock:
                 self._futures[f"upload:{job_id}"] = future
+        scheduled_via = None
+        if scheduled_for is not None:
+            scheduled_via = next(
+                (attempt.get("scheduled_via") for attempt in attempts
+                 if attempt.get("scheduled_via")), "local")
         return {"job_id": job_id, "attempts": attempts,
                 "scheduled": scheduled_for is not None,
-                "scheduled_via": (schedule_mode
-                                  if scheduled_for is not None else None),
+                "scheduled_via": scheduled_via,
                 "status_url": f"/api/v1/jobs/{job_id}",
                 "detection": {
                     "existing_posts": existing_posts,
@@ -1426,25 +1800,27 @@ class JobService:
                     f"(attempt {attempt['attempt_id']})")
 
     def _detect_existing_posts(
-            self, platforms: list[str],
-            artifact_sha: str | None) -> tuple[dict[str, str], list[str]]:
+            self, platform_shas: dict[str, str | None]
+            ) -> tuple[dict[str, str], list[str]]:
         """Run platform-side existing-post detection outside the service lock.
 
         Returns ``(found, unavailable)``: ``found`` maps a platform to the id
-        of an existing post carrying the artifact marker; ``unavailable``
-        lists platforms whose detection hook could not run (for example a
-        token that lacks the read scope). Detection is best-effort and never
-        blocks a submission.
+        of an existing post carrying that platform's own artifact marker;
+        ``unavailable`` lists platforms whose detection hook could not run (for
+        example a token that lacks the read scope).  Each platform is checked
+        against ITS OWN bound artifact, because a mixed submission can hand
+        different platforms different bytes.  Detection is best-effort and
+        never blocks a submission.
         """
         from clipmorph.platforms import PLATFORM_TITLE
         from clipmorph.upload_pipeline import UploadPipeline
 
         found: dict[str, str] = {}
         unavailable: list[str] = []
-        if not artifact_sha:
-            return found, unavailable
-        pipeline = UploadPipeline(**{platform: True for platform in platforms})
-        for platform in platforms:
+        pipeline = UploadPipeline(**{platform: True for platform in platform_shas})
+        for platform, artifact_sha in platform_shas.items():
+            if not artifact_sha:
+                continue
             adapter = pipeline.enabled_platforms.get(
                 PLATFORM_TITLE.get(platform, platform))
             if adapter is None:
@@ -1492,7 +1868,7 @@ class JobService:
             raise ValueError(
                 "upload.schedule.mode platform is not enabled for: "
                 f"{', '.join(culprits)}\n"
-                "See quality/research/scheduling_probe.py — run it with "
+                "See quality/research/scheduling_probe.py â€” run it with "
                 "sandbox tokens, then flip SUPPORTED_NATIVE_SCHEDULING in "
                 "clipmorph/platforms.py.")
 
@@ -1536,11 +1912,20 @@ class JobService:
         with self._lock:
             return dict(self._live_progress.get(job_id, {}))
 
-    def _run_upload_attempts(self, job_id: str, attempt_ids: list[str],
-                             artifact_key: str, upload_config: dict[str, Any],
-                             platforms: list[str]) -> None:
+    def _run_upload_attempts(self, job_id: str,
+                             bindings: list[dict[str, Any]]) -> None:
+        """Run one submission's attempts, one pipeline call per bound artifact.
+
+        ``bindings`` is the list of ``{attempt_ids, platforms, artifact_key,
+        upload_config}`` records the submission produced.  Platforms that render
+        a vertical and platforms that upload the source ride different bindings,
+        so each pipeline call only ever sees attempts that share one artifact
+        and one frozen upload slice.
+        """
         from clipmorph.upload_attempts import execute_upload_pipeline
         from clipmorph.upload_attempts import normalize_results
+        attempt_ids = [attempt_id for binding in bindings
+                       for attempt_id in binding["attempt_ids"]]
         with self._lock:
             manifest = self.get_job(job_id)
             now = datetime.now(timezone.utc).isoformat()
@@ -1567,33 +1952,11 @@ class JobService:
             # Nothing this group can still do: the checkpoint keeps whatever
             # state the cancel left it in.
             return
-        try:
-            staged_path = self._stage_artifact(artifact_key)
-        except Exception as error:
-            # Staging is the precondition of the transport, so a storage
-            # failure fails the attempts the way an upload failure does and is
-            # recorded with its own code.
-            message = safe_error_message(error)
-            self._record_manifest_error(job_id, "staging_failed", message)
-            now = datetime.now(timezone.utc).isoformat()
-            results = {platform: {
-                "success": False,
-                "error": f"artifact staging failed: {message}",
-                "started_at": now, "completed_at": now} for platform in platforms}
-        else:
-            try:
-                results = execute_upload_pipeline(
-                    platforms, str(staged_path), upload_config,
-                    progress_callback=self._on_progress(job_id))
-            except Exception as error:
-                now = datetime.now(timezone.utc).isoformat()
-                results = {platform: {"success": False, "error": str(error),
-                                      "started_at": now, "completed_at": now}
-                           for platform in platforms}
-            finally:
-                self._release_staging(staged_path)
-
-        normalized_results = normalize_results(results)
+        merged: dict[str, Any] = {}
+        for binding in bindings:
+            merged.update(self._run_upload_binding(job_id, binding,
+                                                   execute_upload_pipeline))
+        normalized_results = normalize_results(merged)
         with self._lock:
             manifest = self.get_job(job_id)
             success_count = 0
@@ -1683,6 +2046,35 @@ class JobService:
             # restart (or a later submission) starts from empty.
             self._live_progress.pop(job_id, None)
 
+    def _run_upload_binding(self, job_id: str, binding: dict[str, Any],
+                            execute_upload_pipeline: Callable) -> dict[str, Any]:
+        """Stage one bound artifact, run its pipeline, and release the copy."""
+        platforms = binding["platforms"]
+        try:
+            staged_path = self._stage_artifact(binding["artifact_key"])
+        except Exception as error:
+            # Staging is the precondition of the transport, so a storage
+            # failure fails the attempts the way an upload failure does and is
+            # recorded with its own code.
+            message = safe_error_message(error)
+            self._record_manifest_error(job_id, "staging_failed", message)
+            now = datetime.now(timezone.utc).isoformat()
+            return {platform: {
+                "success": False,
+                "error": f"artifact staging failed: {message}",
+                "started_at": now, "completed_at": now} for platform in platforms}
+        try:
+            return execute_upload_pipeline(
+                platforms, str(staged_path), binding["upload_config"],
+                progress_callback=self._on_progress(job_id))
+        except Exception as error:
+            now = datetime.now(timezone.utc).isoformat()
+            return {platform: {"success": False, "error": str(error),
+                               "started_at": now, "completed_at": now}
+                    for platform in platforms}
+        finally:
+            self._release_staging(staged_path)
+
     def _record_manifest_error(self, job_id: str, code: str,
                                message: str) -> None:
         """Append one coded error to a job's manifest."""
@@ -1708,7 +2100,12 @@ class JobService:
         target_artifact_id = artifact_id or previous_artifact_id
         if target_artifact_id != previous_artifact_id:
             raise ValueError("retry artifact does not match failed attempt")
-        if target_artifact_id != manifest.current_artifact_id and (
+        # Historical means "not this platform's current group artifact", not
+        # "not the manifest's latest render": another group rendering later
+        # does not make this platform's own artifact stale.
+        group_id = previous.get("group_id")
+        current_id = _group_current_artifact(manifest, group_id)
+        if target_artifact_id != current_id and (
                 not confirm_historical_artifact or artifact_id != target_artifact_id):
             raise ValueError("historical artifact retry requires matching ID and confirmation")
         artifact = manifest.artifacts.get(target_artifact_id)
@@ -1742,7 +2139,8 @@ class JobService:
         retry_result = self.submit_upload(
             job_id, [platform], target_artifact_id,
             confirm_historical_artifact=confirm_historical_artifact,
-            configuration_snapshot=previous["configuration_snapshot"],
+            platform_snapshots={
+                platform.lower(): previous["configuration_snapshot"]},
             retry_of=attempt_id, honor_schedule=False)
         return retry_result
 
@@ -1750,9 +2148,12 @@ class JobService:
         """Prune superseded artifacts per the app.yml retention policy.
 
         Candidates are non-source artifacts in the `superseded` state, aged from
-        `superseded_at` (falling back to `created_at`). `current` and `stale`
-        artifacts are never touched, so a rerender target always survives. Every
-        knob defaults to null, which makes this a no-op until a policy is set.
+        `superseded_at` (falling back to `created_at`), minus any artifact a
+        live conversion group still binds to: `current_artifact_id` points at
+        the LATEST render only, so it is a display pointer rather than the sole
+        reference. `current` and `stale` artifacts are never touched, so a
+        rerender target always survives. Every knob defaults to null, which
+        makes this a no-op until a policy is set.
         """
         policy = load_app_configuration(
             self.app_config_path).get("retention", {}).get("artifacts", {})
@@ -1762,6 +2163,8 @@ class JobService:
         if max_age_days is None and max_bytes is None:
             return {"pruned": []}
 
+        bound = {group.get("current_artifact_id") for group in (
+            manifest.checkpoints.get("conversion", {}).get("groups") or {}).values()}
         now = datetime.now(timezone.utc)
         total_bytes = 0
         obsolete: list[tuple[str, datetime, int]] = []
@@ -1770,7 +2173,8 @@ class JobService:
             if artifact.get("state") != "deleted":
                 total_bytes += size
             if (artifact.get("state") != "superseded"
-                    or artifact.get("kind") == "source"):
+                    or artifact.get("kind") == "source"
+                    or artifact_id in bound):
                 continue
             stamp = artifact.get("superseded_at") or artifact.get("created_at")
             try:
@@ -2168,7 +2572,53 @@ class JobService:
                         if _attempt_on_or_after(item, cutoff)]
         return attempts
 
+    def rerender_job(self, job_id: str, group_id: str | None = None) -> JobManifest:
+        """Stale the addressed conversion group so a resume re-renders it.
+
+        ``group_id`` names one group; omitting it stales every group, which is
+        a full rerender.  Each addressed group is left ``stale`` and the
+        conversion loop re-renders it in pipeline order, so a resume picks up
+        the earliest actionable group.  The upload checkpoint follows: a
+        rerender supersedes the accepted upload, so an armed schedule is
+        disarmed and the upload checkpoint is invalidated.
+        """
+        reason = {"code": "rerender", "message": "Conversion rerendered"}
+        with self._lock:
+            manifest = self.get_job(job_id)
+            checkpoint = manifest.checkpoints["conversion"]
+            groups = checkpoint.get("groups", {})
+            if group_id is not None and group_id not in groups:
+                raise ValueError(f"unknown conversion checkpoint group: {group_id}")
+            if groups:
+                for gid in ([group_id] if group_id is not None else list(groups)):
+                    manifest.invalidate_checkpoint(
+                        "conversion", reason, self.jobs_dir, persist=False,
+                        group_id=gid)
+            else:
+                if checkpoint["status"] == "completed":
+                    manifest.transition_checkpoint(
+                        "conversion", "stale", checkpoint["revision"],
+                        self.jobs_dir)
+                    checkpoint = manifest.checkpoints["conversion"]
+                if checkpoint["status"] in {"stale", "failed", "cancelled"}:
+                    manifest.transition_checkpoint(
+                        "conversion", "pending", checkpoint["revision"],
+                        self.jobs_dir)
+            # A rerender supersedes the accepted upload, so an armed schedule
+            # must not post the artifact it replaces.
+            self._discard_scheduled_uploads_locked(manifest)
+            manifest.invalidate_checkpoint("upload", reason, self.jobs_dir)
+            manifest.save(self.jobs_dir)
+            return manifest
+
     def resume_job(self, job_id: str, runner: Callable) -> JobManifest:
+        """Queue a job's next run, which starts at the earliest actionable group.
+
+        The runner walks the conversion groups in pipeline order and stops at
+        the first one that still needs work (``JobManifest.actionable_group``),
+        so a partially rendered job resumes where it left off rather than
+        re-rendering groups that already completed.
+        """
         manifest = self.get_job(job_id)
         if (manifest.current_checkpoint is not None and
                 manifest.checkpoints[manifest.current_checkpoint]["status"] == "awaiting_review"):

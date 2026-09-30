@@ -8,13 +8,13 @@ import json
 from pathlib import Path
 import time
 import uuid
-from typing import NoReturn
+from typing import NoReturn, Optional
 
 from clipmorph import __version__
 from clipmorph.auth import credential_status, load_auth_config, persist_auth_credentials
 from clipmorph.configuration import discover_source_names, load_app_configuration
 from clipmorph.configuration import save_app_configuration
-from clipmorph.job import default_data_dir, resolve_output_dir
+from clipmorph.job import default_data_dir, JobManifest, resolve_output_dir
 from clipmorph.metrics import compare_metrics, join_dimensions
 from clipmorph.platforms import SUPPORTED_PLATFORMS, is_supported_platform
 from clipmorph.service import JobService
@@ -405,12 +405,26 @@ def create_app(data_dir: str | Path | None = None,
         revision = payload.get("expected_revision")
         if not isinstance(revision, int):
             fail(422, "revision_required", "expected_revision is required")
+        group_id = payload.get("group")
         try:
-            return asdict(service.accept_checkpoint(job_id, stage, revision))
+            return asdict(service.accept_checkpoint(
+                job_id, stage, revision, group_id=group_id))
         except FileNotFoundError:
             fail(404, "not_found", "job not found")
         except ValueError as error:
             service_failure(error)
+
+    def upload_draft_response(job_id: str, manifest: JobManifest) -> dict:
+        """The one upload-draft body every draft route returns.
+
+        ``platform_summaries`` is READ-ONLY: it reports the effective
+        conversion slice, the bound artifact and the participation state of
+        each platform, so review shows what every platform will receive.
+        """
+        return {"upload": manifest.configuration["upload"],
+                "platforms": manifest.configuration.get("platforms", {}),
+                "platform_summaries": service.upload_draft_summary(job_id),
+                "checkpoint": manifest.checkpoints["upload"]}
 
     @app.get("/api/v1/jobs/{job_id}/checkpoints/upload")
     def get_upload_draft(job_id: str):
@@ -418,8 +432,7 @@ def create_app(data_dir: str | Path | None = None,
             manifest = service.get_job(job_id)
         except FileNotFoundError:
             fail(404, "not_found", "job not found")
-        return {"upload": manifest.configuration["upload"],
-                "checkpoint": manifest.checkpoints["upload"]}
+        return upload_draft_response(job_id, manifest)
 
     @app.put("/api/v1/jobs/{job_id}/checkpoints/upload")
     def put_upload_draft(job_id: str, payload: dict):
@@ -427,15 +440,17 @@ def create_app(data_dir: str | Path | None = None,
         upload = payload.get("upload")
         if not isinstance(revision, int) or not isinstance(upload, dict):
             fail(422, "invalid_request", "expected_revision and upload object are required")
+        draft = dict(payload)
+        draft.pop("expected_revision", None)
+        draft.pop("reopen", None)
         try:
             manifest = service.update_upload_draft(
-                job_id, upload, revision, reopen=bool(payload.get("reopen", False)))
+                job_id, draft, revision, reopen=bool(payload.get("reopen", False)))
         except FileNotFoundError:
             fail(404, "not_found", "job not found")
         except ValueError as error:
             service_failure(error)
-        return {"upload": manifest.configuration["upload"],
-                "checkpoint": manifest.checkpoints["upload"]}
+        return upload_draft_response(job_id, manifest)
 
     @app.delete("/api/v1/jobs/{job_id}/checkpoints/upload")
     def delete_upload_draft(job_id: str, expected_revision: int,
@@ -446,8 +461,7 @@ def create_app(data_dir: str | Path | None = None,
             fail(404, "not_found", "job not found")
         except ValueError as error:
             service_failure(error)
-        return {"upload": manifest.configuration["upload"],
-                "checkpoint": manifest.checkpoints["upload"]}
+        return upload_draft_response(job_id, manifest)
 
     @app.post("/api/v1/jobs/{job_id}/checkpoints/upload/suggest", status_code=202)
     def suggest_upload_metadata(job_id: str, payload: dict):
@@ -537,27 +551,10 @@ def create_app(data_dir: str | Path | None = None,
         return {"job_id": job_id, "status_url": f"/api/v1/jobs/{job_id}"}
 
     @app.post("/api/v1/jobs/{job_id}/render", status_code=202)
-    def render_job(job_id: str):
+    def render_job(job_id: str, payload: Optional[dict] = None):
+        group = (payload or {}).get("group")
         try:
-            manifest = service.get_job(job_id)
-            checkpoint = manifest.checkpoints["conversion"]
-            if checkpoint["status"] == "completed":
-                manifest.transition_checkpoint(
-                    "conversion", "stale", checkpoint["revision"], service.jobs_dir)
-                manifest = service.get_job(job_id)
-                checkpoint = manifest.checkpoints["conversion"]
-                manifest.transition_checkpoint(
-                    "conversion", "pending", checkpoint["revision"], service.jobs_dir)
-                manifest = service.get_job(job_id)
-                # A rerender supersedes the accepted upload, so an armed
-                # schedule must not post the artifact it replaces.
-                service.discard_scheduled_uploads(job_id)
-                service.get_job(job_id).invalidate_checkpoint(
-                    "upload", {"code": "rerender", "message": "Conversion rerendered"},
-                    service.jobs_dir)
-            elif checkpoint["status"] in {"failed", "cancelled", "stale"}:
-                manifest.transition_checkpoint(
-                    "conversion", "pending", checkpoint["revision"], service.jobs_dir)
+            service.rerender_job(job_id, group)
             from clipmorph.workflow import execute_job
             service.resume_job(job_id, lambda job, token: execute_job(
                 job, token, service.jobs_dir, service.app_config_path))

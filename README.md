@@ -109,6 +109,29 @@ filename is arbitrary. See
 [Layered configuration](docs/CONFIG_LAYERS.md) for the schema and resolution
 rules.
 
+A top-level `platforms` block is a third tier: each entry carries
+`general`/`conversion`/`upload` override sections that deep-merge over the
+job's own effective configuration, plus that platform's flat adapter options.
+`platforms.<platform>.upload.skip` decides participation, so an absent entry
+means the platform participates:
+
+```yaml
+conversion:
+  layout_id: <vertical-preset-uuid>
+platforms:
+  youtube:
+    conversion: {skip: true}     # 16:9 VOD: the untouched original uploads
+    upload:
+      content: {title: 'Full stream VOD'}
+  tiktok:
+    privacy_level: PUBLIC_TO_EVERYONE
+    upload:
+      content: {title: 'The one moment that ended it'}
+```
+
+Platforms whose effective `conversion` section is identical share one render,
+so three vertical targets cost one conversion.
+
 ## Supported media and workflow constraints
 
 - Input formats: commonly MP4/MOV/MKV/AVI/WebM files
@@ -164,6 +187,7 @@ rules.
   - Centralized platform capability policy with blockers, warnings, and metadata transforms
   - Platform-specific parameter mapping and duration/size guards
   - Automatic retry with backoff plus per-platform retries bound to the failed attempt
+  - Per-platform configuration overrides: each platform entry carries full job-config override sections (`general`, `conversion`, `upload`) that deep-merge over the job's effective configuration, so one job can produce divergent per-platform output (e.g. TikTok receives the 9:16 short while YouTube receives the full-length original)
 
 - **Local dashboard**
   - `clipmorph web` serving a FastAPI dashboard at `127.0.0.1:8000`

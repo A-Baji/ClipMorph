@@ -10,6 +10,7 @@ import yaml
 from clipmorph.configuration import APP_CONFIG_VERSION, save_app_configuration
 from clipmorph.metrics import append_snapshot
 from clipmorph.service import JobService
+from clipmorph.service import conversion_groups
 from clipmorph.upload_pipeline.platforms.base import BaseUploadPipeline
 
 try:
@@ -241,7 +242,8 @@ class WebApiTests(unittest.TestCase):
             service = JobService(data_dir)
             manifest = service.create_job(source.name, {
                 "conversion": {"skip": True, "subtitles": {"skip": True}},
-                "upload": {"platforms": {"include": ["youtube"]}},
+                "upload": {"skip": True},
+                "platforms": {"youtube": {"upload": {"skip": False}}},
             })
             artifact_dir = data_dir / "output" / manifest.job_id
             artifact_dir.mkdir(parents=True)
@@ -313,7 +315,8 @@ class WebApiTests(unittest.TestCase):
             service = JobService(data_dir)
             manifest = service.create_job(source.name, {
                 "conversion": {"skip": True, "subtitles": {"skip": True}},
-                "upload": {"platforms": {"include": ["youtube"]}},
+                "upload": {"skip": True},
+                "platforms": {"youtube": {"upload": {"skip": False}}},
             })
             # A terminal status ends the SSE stream after one event.
             manifest.set_status("completed", service.jobs_dir)
@@ -346,7 +349,8 @@ class WebApiTests(unittest.TestCase):
             service = JobService(data_dir)
             manifest = service.create_job(source.name, {
                 "conversion": {"skip": True, "subtitles": {"skip": True}},
-                "upload": {"platforms": {"include": ["youtube"]}},
+                "upload": {"skip": True},
+                "platforms": {"youtube": {"upload": {"skip": False}}},
             })
             artifact_dir = data_dir / "output" / manifest.job_id
             artifact_dir.mkdir(parents=True)
@@ -383,7 +387,8 @@ class WebApiTests(unittest.TestCase):
             service = JobService(data_dir)
             manifest = service.create_job(source.name, {
                 "conversion": {"skip": True, "subtitles": {"skip": True}},
-                "upload": {"platforms": {"include": ["youtube"]}},
+                "upload": {"skip": True},
+                "platforms": {"youtube": {"upload": {"skip": False}}},
             })
             artifact_dir = data_dir / "output" / manifest.job_id
             artifact_dir.mkdir(parents=True)
@@ -436,7 +441,8 @@ class WebApiTests(unittest.TestCase):
             service = JobService(data_dir)
             manifest = service.create_job(source.name, {
                 "conversion": {"skip": True, "subtitles": {"skip": True}},
-                "upload": {"platforms": {"include": ["youtube"]}},
+                "upload": {"skip": True},
+                "platforms": {"youtube": {"upload": {"skip": False}}},
             })
             artifact_dir = data_dir / "output" / manifest.job_id
             artifact_dir.mkdir(parents=True)
@@ -495,8 +501,13 @@ class WebApiTests(unittest.TestCase):
             service = JobService(data_dir)
             manifest = service.create_job(source.name, {
                 "conversion": {"skip": True, "subtitles": {"skip": True}},
-                "upload": {"platforms": {"include": ["facebook"],
-                                         "facebook": {"content_kind": "video"}}},
+                "platforms": {
+                    "youtube": {"upload": {"skip": True}},
+                    "instagram": {"upload": {"skip": True}},
+                    "tiktok": {"upload": {"skip": True}},
+                    "twitter": {"upload": {"skip": True}},
+                    "facebook": {"content_kind": "video"},
+                },
             })
             artifact_dir = data_dir / "output" / manifest.job_id
             artifact_dir.mkdir(parents=True)
@@ -536,7 +547,12 @@ class WebApiTests(unittest.TestCase):
             service = JobService(data_dir)
             manifest = service.create_job(source.name, {
                 "conversion": {"skip": True, "subtitles": {"skip": True}},
-                "upload": {"platforms": {"include": ["youtube"]}},
+                "platforms": {
+                    "instagram": {"upload": {"skip": True}},
+                    "tiktok": {"upload": {"skip": True}},
+                    "twitter": {"upload": {"skip": True}},
+                    "facebook": {"upload": {"skip": True}},
+                },
             })
             artifact_dir = data_dir / "output" / manifest.job_id
             artifact_dir.mkdir(parents=True)
@@ -594,7 +610,8 @@ class WebApiTests(unittest.TestCase):
             service = JobService(data_dir)
             manifest = service.create_job(source.name, {
                 "conversion": {"skip": True, "subtitles": {"skip": True}},
-                "upload": {"platforms": {"include": ["youtube"]}},
+                "upload": {"skip": True},
+                "platforms": {"youtube": {"upload": {"skip": False}}},
             })
             artifact_dir = data_dir / "output" / manifest.job_id
             artifact_dir.mkdir(parents=True)
@@ -640,9 +657,222 @@ class WebApiTests(unittest.TestCase):
                 path = f"/api/v1/jobs/{manifest.job_id}/checkpoints/transcript/accept"
                 accepted = client.post(path, json={"expected_revision": 2})
                 self.assertEqual(accepted.status_code, 200)
-                stale = client.post(path, json={"expected_revision": 2})
-                self.assertEqual(stale.status_code, 409)
-                self.assertEqual(stale.json()["error"]["code"], "conflict")
+
+    def test_upload_draft_put_accepts_platforms_key(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"source")
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {
+                "conversion": {"skip": True, "subtitles": {"skip": True}}})
+            upload_cp = manifest.checkpoints["upload"]
+            manifest.transition_checkpoint(
+                "upload", "awaiting_review", upload_cp["revision"],
+                service.jobs_dir)
+            service.close()
+
+            with TestClient(create_app(data_dir)) as client:
+                job_id = manifest.job_id
+                # Re-read the manifest to get the current revision.
+                current = client.get(f"/api/v1/jobs/{job_id}").json()
+                revision = current["checkpoints"]["upload"]["revision"]
+                response = client.put(
+                    f"/api/v1/jobs/{job_id}/checkpoints/upload",
+                    json={
+                        "expected_revision": revision,
+                        "upload": {"content": {"title": "New title"}},
+                        "platforms": {
+                            "youtube": {"upload": {"skip": False}},
+                            "tiktok": {"upload": {"skip": True}},
+                        },
+                    })
+                self.assertEqual(response.status_code, 200, response.text)
+                body = response.json()
+                self.assertEqual(body["upload"]["content"]["title"], "New title")
+                self.assertIn("platforms", body)
+                self.assertEqual(
+                    body["platforms"]["youtube"]["upload"]["skip"], False)
+                self.assertEqual(
+                    body["platforms"]["tiktok"]["upload"]["skip"], True)
+
+    def test_explicit_submission_to_skipped_platform_returns_422(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"source")
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {
+                "conversion": {"skip": True, "subtitles": {"skip": True}},
+                "upload": {"skip": True},
+                "platforms": {"youtube": {"upload": {"skip": True}}}})
+            # Register a source artifact so the upload checkpoint can be
+            # transitioned to awaiting_review.
+            manifest.record_artifact("source", source, service.jobs_dir)
+            # Move the upload checkpoint out of skipped so it can be
+            # transitioned to awaiting_review.
+            manifest = service.get_job(manifest.job_id)
+            upload_cp = manifest.checkpoints["upload"]
+            manifest.transition_checkpoint(
+                "upload", "pending", upload_cp["revision"], service.jobs_dir)
+            manifest = service.get_job(manifest.job_id)
+            upload_cp = manifest.checkpoints["upload"]
+            manifest.transition_checkpoint(
+                "upload", "awaiting_review", upload_cp["revision"],
+                service.jobs_dir)
+            service.close()
+
+            with TestClient(create_app(data_dir)) as client:
+                job_id = manifest.job_id
+                response = client.post(
+                    f"/api/v1/jobs/{job_id}/upload",
+                    json={"platforms": ["youtube"]})
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertIn("skipped", response.json()["error"]["message"])
+
+    def test_conversion_accept_accepts_one_group(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"source")
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {
+                "conversion": {"skip": False, "subtitles": {"skip": True}},
+                # A different effective conversion section, so the job renders
+                # twice and has two groups to accept independently.
+                "platforms": {"youtube": {"conversion": {"strict": True}}}})
+            groups = manifest.checkpoints["conversion"]["groups"]
+            self.assertEqual(len(groups), 2)
+            # Drive both groups to the review gate; a group transition matches
+            # that group's own revision.
+            for group_id in list(groups):
+                for status in ("running", "awaiting_review"):
+                    manifest = service.get_job(manifest.job_id)
+                    revision = manifest.checkpoints["conversion"]["groups"][
+                        group_id]["revision"]
+                    manifest.transition_checkpoint(
+                        "conversion", status, revision, service.jobs_dir,
+                        group_id=group_id)
+            service.close()
+
+            with TestClient(create_app(data_dir)) as client:
+                job_id = manifest.job_id
+                current = client.get(f"/api/v1/jobs/{job_id}").json()
+                groups = current["checkpoints"]["conversion"]["groups"]
+                group_id = next(iter(groups))
+                # The expected revision belongs to the addressed group.
+                response = client.post(
+                    f"/api/v1/jobs/{job_id}/checkpoints/conversion/accept",
+                    json={"expected_revision": groups[group_id]["revision"],
+                          "group": group_id})
+                self.assertEqual(response.status_code, 200, response.text)
+                groups = service.get_job(job_id).checkpoints["conversion"]["groups"]
+                self.assertEqual(groups[group_id]["status"], "completed")
+                others = {key: value["status"]
+                          for key, value in groups.items() if key != group_id}
+                self.assertEqual(set(others.values()), {"awaiting_review"})
+
+    def test_render_stales_only_the_named_group(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"source")
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {
+                "conversion": {"skip": False, "subtitles": {"skip": True}},
+                "platforms": {"youtube": {"conversion": {"strict": True}}}})
+            groups = manifest.checkpoints["conversion"]["groups"]
+            self.assertEqual(len(groups), 2)
+            for group_id in list(groups):
+                for status in ("running", "awaiting_review", "completed"):
+                    manifest = service.get_job(manifest.job_id)
+                    revision = manifest.checkpoints["conversion"]["groups"][
+                        group_id]["revision"]
+                    manifest.transition_checkpoint(
+                        "conversion", status, revision, service.jobs_dir,
+                        group_id=group_id)
+            service.close()
+
+            with TestClient(create_app(data_dir)) as client:
+                job_id = manifest.job_id
+                groups = service.get_job(job_id).checkpoints["conversion"]["groups"]
+                group_id = next(iter(groups))
+                # The render route takes the addressed group in the body, the
+                # same binding the accept route uses.
+                with patch.object(JobService, "resume_job",
+                                  return_value=service.get_job(job_id)):
+                    response = client.post(
+                        f"/api/v1/jobs/{job_id}/render",
+                        json={"group": group_id})
+                self.assertEqual(response.status_code, 202, response.text)
+                after = service.get_job(job_id).checkpoints["conversion"]["groups"]
+                self.assertEqual(after[group_id]["status"], "stale")
+                others = {key: value["status"]
+                          for key, value in after.items() if key != group_id}
+                self.assertEqual(set(others.values()), {"completed"})
+
+    def test_upload_draft_reports_per_platform_summaries(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"source")
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {
+                "conversion": {"skip": False, "subtitles": {"skip": True}},
+                "upload": {"content": {"title": "Job title"}},
+                "platforms": {
+                    "youtube": {"conversion": {"skip": True},
+                                "upload": {"skip": True}},
+                    "tiktok": {"privacy_level": "SELF_ONLY"},
+                }})
+            # The group that skips conversion binds the registered source copy,
+            # which is what its upload attempt would send; the rendering group
+            # binds its own render.
+            groups = conversion_groups(manifest.configuration)
+            skip_group = next(group["id"] for group in groups
+                              if group["conversion"].get("skip"))
+            render_group = next(group["id"] for group in groups
+                                if group["id"] != skip_group)
+            manifest.record_artifact("source", source, service.jobs_dir,
+                                     group_id=skip_group)
+            render_dir = data_dir / "output" / manifest.job_id
+            render_dir.mkdir(parents=True)
+            render_path = render_dir / "vertical.mp4"
+            render_path.write_bytes(b"rendered artifact")
+            manifest.record_artifact("primary", render_path, service.jobs_dir,
+                                     group_id=render_group)
+            manifest = service.get_job(manifest.job_id)
+            upload_cp = manifest.checkpoints["upload"]
+            manifest.transition_checkpoint(
+                "upload", "awaiting_review", upload_cp["revision"],
+                service.jobs_dir)
+            service.close()
+
+            with TestClient(create_app(data_dir)) as client:
+                job_id = manifest.job_id
+                draft = client.get(
+                    f"/api/v1/jobs/{job_id}/checkpoints/upload").json()
+                summaries = draft["platform_summaries"]
+                self.assertEqual(set(summaries),
+                                 {"youtube", "instagram", "tiktok", "twitter",
+                                  "facebook"})
+                # YouTube skips the upload entirely; the others participate.
+                self.assertFalse(summaries["youtube"]["participates"])
+                self.assertTrue(summaries["tiktok"]["participates"])
+                # YouTube renders nothing, so it would upload the source.
+                self.assertEqual(summaries["youtube"]["kind"], "source")
+                self.assertEqual(summaries["tiktok"]["kind"], "vertical")
+                self.assertNotEqual(
+                    summaries["youtube"]["group_id"],
+                    summaries["tiktok"]["group_id"])
+                self.assertEqual(
+                    summaries["tiktok"]["upload"]["content"]["title"],
+                    "Job title")
 
     def _reviewed_upload_job(self, data_dir: Path):
         """Create a job at the upload review gate."""
@@ -657,6 +887,33 @@ class WebApiTests(unittest.TestCase):
             "upload", "awaiting_review",
             manifest.checkpoints["upload"]["revision"], service.jobs_dir)
         return service, manifest
+
+    def test_upload_draft_rejects_a_per_platform_conversion_override(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = self._reviewed_upload_job(data_dir)
+            revision = service.get_job(
+                manifest.job_id).checkpoints["upload"]["revision"]
+            service.close()
+
+            with TestClient(create_app(data_dir)) as client:
+                job_id = manifest.job_id
+                # ``platforms.<p>.conversion`` flows through the composition
+                # review, not the upload draft.
+                rejected = client.put(
+                    f"/api/v1/jobs/{job_id}/checkpoints/upload",
+                    json={"expected_revision": revision,
+                          "upload": {"content": {"title": "x"}},
+                          "platforms": {"tiktok": {"conversion": {"skip": True}}}})
+                self.assertEqual(rejected.status_code, 422, rejected.text)
+
+                # The upload slice remains editable at the same revision.
+                accepted = client.put(
+                    f"/api/v1/jobs/{job_id}/checkpoints/upload",
+                    json={"expected_revision": revision,
+                          "upload": {"content": {"title": "x"}},
+                          "platforms": {"tiktok": {"upload": {"skip": False}}}})
+                self.assertEqual(accepted.status_code, 200, accepted.text)
 
     def test_suggest_route_writes_block_and_get_carries_it(self):
         with tempfile.TemporaryDirectory() as temp_dir:

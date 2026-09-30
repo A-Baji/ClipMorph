@@ -77,8 +77,10 @@ class ArtifactRetentionTests(unittest.TestCase):
         self.assertNotIn("deleted_at", after.artifacts[first])
 
     def test_age_pruning_tombstones_only_superseded_past_threshold_artifacts(self):
-        old = self._render("primary", 10)
+        # The source copy is recorded first so a later render supersedes it:
+        # a source recorded after a render no longer moves the display pointer.
         source_copy = self._render("source", 10)
+        old = self._render("primary", 10)
         recent = self._render("primary", 10)
         self._backdate(old, days=-120)
         self._backdate(source_copy, days=-400)
@@ -98,6 +100,29 @@ class ArtifactRetentionTests(unittest.TestCase):
             saved.artifacts[old]["storage"]["key"]))
         self.assertTrue(self.service._storage.exists(
             saved.artifacts[recent]["storage"]["key"]))
+
+    def test_age_pruning_never_touches_a_artifact_a_conversion_group_binds(self):
+        # `current_artifact_id` is a display pointer at the LATEST render, so
+        # re-rendering one group supersedes the artifact another group still
+        # binds to.  Retention must not recycle bytes a live group needs.
+        groups = self.manifest.checkpoints["conversion"]["groups"]
+        group_id = next(iter(groups))
+        bound = self._render("primary", 10)
+        groups[group_id]["current_artifact_id"] = bound
+        self.manifest.save(self.service.jobs_dir)
+        latest = self._render("primary", 10)
+        self.assertEqual(self._saved().artifacts[bound]["state"], "superseded")
+        self._backdate(bound, days=-200)
+        self._policy(artifacts={"max_age_days": 1})
+
+        result = self.service.enforce_retention(self.manifest.job_id)
+
+        saved = self._saved()
+        self.assertEqual(result["pruned"], [])
+        self.assertEqual(saved.artifacts[bound]["state"], "superseded")
+        self.assertTrue(self.service._storage.exists(
+            saved.artifacts[bound]["storage"]["key"]))
+        self.assertEqual(saved.artifacts[latest]["state"], "current")
 
     def test_age_pruning_never_touches_a_stale_artifact(self):
         first = self._render("primary", 10)

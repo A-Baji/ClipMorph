@@ -21,7 +21,6 @@ from clipmorph.platforms import (
     SUPPORTED_NATIVE_SCHEDULING,
     SUPPORTED_PLATFORMS,
     build_platform_default_config,
-    enabled_platforms,
     is_supported_platform,
     native_scheduling_support,
 )
@@ -127,17 +126,52 @@ class PlatformRegistryTests(unittest.TestCase):
         self.assertEqual(PLATFORM_DEFAULT_CONFIG["facebook"]["content_kind"],
                          "reel")
 
-    def test_empty_include_means_all_and_exclude_prunes(self):
-        self.assertEqual(enabled_platforms({}), list(SUPPORTED_PLATFORMS))
+    def test_resolve_upload_participants_absence_default(self):
+        from clipmorph.platforms import resolve_upload_participants
+        config = {
+            "general": {"source": "clip.mp4"},
+            "conversion": {},
+            "upload": {"skip": False},
+        }
         self.assertEqual(
-            enabled_platforms({"include": []}), list(SUPPORTED_PLATFORMS))
-        self.assertEqual(
-            enabled_platforms({"include": ["YouTube"], "exclude": ["youtube"]}),
-            [])
+            resolve_upload_participants(config), list(SUPPORTED_PLATFORMS))
 
-    def test_include_selection_is_ordered_and_deduplicated(self):
-        resolved = enabled_platforms({"include": ["twitter", "youtube", "youtube"]})
-        self.assertEqual(resolved, ["twitter", "youtube"])
+    def test_resolve_upload_participants_per_platform_skip(self):
+        from clipmorph.platforms import resolve_upload_participants
+        config = {
+            "general": {"source": "clip.mp4"},
+            "conversion": {},
+            "upload": {"skip": False},
+            "platforms": {
+                "youtube": {"upload": {"skip": True}},
+                "tiktok": {"upload": {"skip": True}},
+            },
+        }
+        self.assertEqual(
+            resolve_upload_participants(config),
+            ["instagram", "twitter", "facebook"])
+
+    def test_resolve_upload_participants_global_skip_with_override(self):
+        from clipmorph.platforms import resolve_upload_participants
+        config = {
+            "general": {"source": "clip.mp4"},
+            "conversion": {},
+            "upload": {"skip": True},
+            "platforms": {
+                "youtube": {"upload": {"skip": False}},
+            },
+        }
+        self.assertEqual(
+            resolve_upload_participants(config), ["youtube"])
+
+    def test_resolve_upload_participants_all_skipped(self):
+        from clipmorph.platforms import resolve_upload_participants
+        config = {
+            "general": {"source": "clip.mp4"},
+            "conversion": {},
+            "upload": {"skip": True},
+        }
+        self.assertEqual(resolve_upload_participants(config), [])
 
     def test_runtime_summary_maps_overrides_onto_defaults(self):
         summary = summarize_runtime_configuration({

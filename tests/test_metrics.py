@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import requests
 
 from clipmorph.job import JobManifest
+from clipmorph.job import MANIFEST_SCHEMA_VERSION
 from clipmorph.metrics import (
     append_snapshot,
     collect_platform_metrics,
@@ -172,7 +173,7 @@ class MetricsDimensionJoinTests(unittest.TestCase):
     def _manifest(self, **kwargs):
         from clipmorph.job import JobManifest as Manifest
         values = dict(
-            schema_version=3,
+            schema_version=MANIFEST_SCHEMA_VERSION,
             job_id="test-job",
             source_path="/tmp/clip.mp4",
             source_sha256="abc",
@@ -290,7 +291,7 @@ class CompareMetricsTests(unittest.TestCase):
     def _seed_job(self, job_dir, snapshots, configuration=None,
                   attempts=None, artifacts=None):
         manifest = JobManifest(
-            schema_version=3,
+            schema_version=MANIFEST_SCHEMA_VERSION,
             job_id=job_dir.name,
             source_path="/tmp/clip.mp4",
             source_sha256="abc",

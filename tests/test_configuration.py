@@ -12,12 +12,14 @@ from clipmorph.configuration import load_job_records
 from clipmorph.configuration import merge_source_configurations
 from clipmorph.configuration import merge_configuration
 from clipmorph.configuration import resolve_job_configuration
+from clipmorph.configuration import resolve_platform_configuration
 from clipmorph.configuration import save_app_configuration
 from clipmorph.configuration import discover_source_names
 from clipmorph.job import JobManifest
 from clipmorph.job import MANIFEST_SCHEMA_VERSION
 from clipmorph.service import JobService
 from clipmorph.service import CancellationToken
+from clipmorph.service import conversion_groups
 from clipmorph.transcript import create_edit_session
 from clipmorph.workflow import _effective_no_confirm, execute_job
 
@@ -126,6 +128,7 @@ class JobConfigurationTests(unittest.TestCase):
             {"conversion": {"camera": {"x": 1}}},
             {"content": {"title": "Flat title"}},
             {"upload": {"platforms": {"unknown": {}}}},
+            {"platforms": {"unknown": {}}},
         ]
         for configuration in invalid:
             with self.subTest(configuration=configuration):
@@ -213,6 +216,212 @@ class JobConfigurationTests(unittest.TestCase):
                 "upload": {"suggestions": {"model": 123}},
             })
 
+    def test_per_platform_resolution_merges_override_sections(self):
+        from clipmorph.configuration import resolve_platform_configuration
+        manifest_config = {
+            "general": {"source": "clip.mp4"},
+            "conversion": {"layout_id": None, "skip": False,
+                           "subtitles": {"skip": False, "renderer": "overlay",
+                                          "transcription_model": "tiny"}},
+            "upload": {"skip": False, "content": {"title": "Job title"}},
+            "platforms": {
+                "youtube": {
+                    "category": "22",
+                    "conversion": {"skip": True},
+                    "upload": {"content": {"title": "Full stream VOD"}},
+                },
+                "tiktok": {
+                    "privacy_level": "PUBLIC_TO_EVERYONE",
+                    "upload": {"skip": True},
+                },
+            },
+        }
+        global_defaults = {
+            "general": {"source": None},
+            "conversion": {"layout_id": None, "skip": False,
+                           "subtitles": {"skip": False, "renderer": "overlay",
+                                          "transcription_model": "tiny"}},
+            "upload": {"skip": False, "content": {"title": ""}},
+        }
+        youtube = resolve_platform_configuration(
+            manifest_config, global_defaults, [], "youtube")
+        self.assertTrue(youtube["conversion"]["skip"])
+        self.assertEqual(youtube["upload"]["content"]["title"], "Full stream VOD")
+        self.assertEqual(youtube["platforms"]["youtube"]["category"], "22")
+
+        tiktok = resolve_platform_configuration(
+            manifest_config, global_defaults, [], "tiktok")
+        self.assertFalse(tiktok["conversion"]["skip"])
+        self.assertTrue(tiktok["platforms"]["tiktok"]["upload"]["skip"])
+
+    def test_per_platform_resolution_rejects_protected_keys(self):
+        # Protected-key validation happens during resolve_job_configuration,
+        # which resolve_platform_configuration calls internally.
+        invalid = [
+            {"platforms": {"youtube": {"platforms": {}}}},
+            {"platforms": {"youtube": {"general": {"source": "other.mp4"}}}},
+        ]
+        for configuration in invalid:
+            with self.subTest(configuration=configuration):
+                with self.assertRaisesRegex(ValueError, "platforms|source identity"):
+                    resolve_job_configuration({}, configuration)
+
+    def test_per_platform_upload_skip_must_be_boolean(self):
+        invalid = [
+            {"platforms": {"youtube": {"upload": {"skip": "yes"}}}},
+            {"platforms": {"youtube": {"upload": {"skip": 1}}}},
+        ]
+        for configuration in invalid:
+            with self.subTest(configuration=configuration):
+                with self.assertRaisesRegex(ValueError, "skip.*boolean"):
+                    resolve_job_configuration({}, configuration)
+
+    def test_per_platform_conversion_schema_violations_fail(self):
+        invalid = [
+            {"platforms": {"youtube": {"conversion": {"skip": "yes"}}}},
+            {"platforms": {"youtube": {"conversion": {"subtitles": {"renderer": "bad"}}}}},
+            {"platforms": {"youtube": {"conversion": {"layout_id": 123}}}},
+        ]
+        for configuration in invalid:
+            with self.subTest(configuration=configuration):
+                with self.assertRaisesRegex(ValueError, "conversion"):
+                    resolve_job_configuration({}, configuration)
+
+    def test_conversion_groups_identical_configs_share_one_group(self):
+        from clipmorph.service import conversion_groups
+        config = {
+            "general": {"source": "clip.mp4"},
+            "conversion": {"layout_id": None, "skip": False,
+                           "subtitles": {"skip": False}},
+            "upload": {"skip": False},
+            "platforms": {
+                "youtube": {"upload": {"skip": False}},
+                "tiktok": {"upload": {"skip": False}},
+            },
+        }
+        groups = conversion_groups(config)
+        self.assertEqual(len(groups), 1)
+        # All platforms without a conversion override share the job-level
+        # conversion config, so they all land in the same group.
+        self.assertEqual(
+            set(groups[0]["platforms"]),
+            {"youtube", "instagram", "tiktok", "twitter", "facebook"})
+
+    def test_conversion_groups_distinct_configs_produce_two_groups(self):
+        from clipmorph.service import conversion_groups
+        config = {
+            "general": {"source": "clip.mp4"},
+            "conversion": {"layout_id": None, "skip": False,
+                           "subtitles": {"skip": False}},
+            "upload": {"skip": False},
+            "platforms": {
+                "youtube": {"conversion": {"skip": True}},
+                "tiktok": {"conversion": {"skip": False}},
+            },
+        }
+        groups = conversion_groups(config)
+        self.assertEqual(len(groups), 2)
+        skip_group = next(g for g in groups if g["conversion"].get("skip"))
+        render_group = next(g for g in groups if not g["conversion"].get("skip"))
+        self.assertEqual(skip_group["platforms"], ["youtube"])
+        # Platforms without a conversion override inherit the job-level
+        # config, so they join the render group.
+        self.assertEqual(
+            set(render_group["platforms"]),
+            {"instagram", "tiktok", "twitter", "facebook"})
+
+    def test_per_platform_layout_id_is_materialized_and_names_the_group(self):
+        from clipmorph.service import conversion_groups
+        preset = {"crop": {"enabled": True,
+                           "source": {"x": 0, "y": 140, "width": 1280,
+                                      "height": 440},
+                           "sizing": {"mode": "fit",
+                                      "dimensions": {"width": 1080,
+                                                     "height": 1920}},
+                           "composition": {"mode": "overlay",
+                                           "placement": "top"}}}
+        layouts = [{"id": "vertical", "name": "vertical", "layout": preset}]
+        resolved = resolve_job_configuration({}, {
+            "general": {"source": "clip.mp4"},
+            "conversion": {"subtitles": {"skip": True}},
+            "platforms": {"tiktok": {"conversion": {"layout_id": "vertical"}}},
+        }, layouts)
+        # The manifest stores one already-resolved shape, so the group digest
+        # every later derivation takes is stable: a platform that names a
+        # layout is hashed on the layout it will actually render.
+        platform_conversion = resolved["platforms"]["tiktok"]["conversion"]
+        self.assertEqual(platform_conversion["layout"]["crop"],
+                         preset["crop"])
+        group = next(item for item in conversion_groups(resolved)
+                     if "tiktok" in item["platforms"])
+        self.assertEqual(group["conversion"]["layout"]["crop"],
+                         preset["crop"])
+        # Re-resolving the stored configuration is idempotent.
+        again = resolve_platform_configuration(resolved, {}, layouts, "tiktok")
+        self.assertEqual(
+            again["platforms"]["tiktok"]["conversion"]["layout"]["crop"],
+            preset["crop"])
+
+    def test_per_platform_unknown_layout_id_is_rejected(self):
+        with self.assertRaisesRegex(
+                ValueError,
+                r"Unknown platforms\.tiktok\.conversion\.layout_id: nope"):
+            resolve_job_configuration({}, {
+                "general": {"source": "clip.mp4"},
+                "platforms": {"tiktok": {"conversion": {"layout_id": "nope"}}},
+            }, [])
+
+    def test_per_platform_override_changes_only_the_stage_that_consumes_it(self):
+        from clipmorph.job import checkpoint_configuration_hash
+        base = {"general": {"source": "clip.mp4"},
+                "conversion": {"subtitles": {"skip": True}},
+                "upload": {"skip": False},
+                "platforms": {"tiktok": {}}}
+        conversion_edit = merge_configuration(base, {
+            "platforms": {"tiktok": {"conversion": {"strict": True}}}})
+        self.assertNotEqual(checkpoint_configuration_hash(base, "conversion"),
+                            checkpoint_configuration_hash(conversion_edit,
+                                                          "conversion"))
+        upload_edit = merge_configuration(base, {
+            "platforms": {"tiktok": {"upload": {"content": {"title": "x"}}}}})
+        self.assertEqual(checkpoint_configuration_hash(base, "conversion"),
+                         checkpoint_configuration_hash(upload_edit, "conversion"))
+        self.assertNotEqual(checkpoint_configuration_hash(base, "upload"),
+                            checkpoint_configuration_hash(upload_edit, "upload"))
+
+    def test_per_platform_transcription_keys_are_rejected(self):
+        # The job produces ONE transcript session, so a per-platform
+        # transcription override has nothing to bind to.  It is refused rather
+        # than silently ignored.
+        for key in ("transcription_language", "transcription_model",
+                    "transcription_device", "transcription_compute_type"):
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(
+                        ValueError, "one transcript session"):
+                    resolve_job_configuration({}, {
+                        "general": {"source": "clip.mp4"},
+                        "platforms": {
+                            "youtube": {"conversion": {"subtitles": {key: "x"}}},
+                        },
+                    })
+
+    def test_conversion_group_ids_match_the_group_section_digest(self):
+        from clipmorph.job import configuration_sha256
+        from clipmorph.service import conversion_groups
+        config = {
+            "general": {"source": "clip.mp4"},
+            "conversion": {"skip": False, "subtitles": {"skip": False}},
+            "upload": {"skip": False},
+            "platforms": {
+                "youtube": {"conversion": {"strict": True}},
+                "tiktok": {"upload": {"content": {"title": "Other"}}},
+            },
+        }
+        groups = conversion_groups(config)
+        for group in groups:
+            self.assertEqual(
+                group["id"], configuration_sha256(group["conversion"])[:12])
+
     def test_resolver_materializes_minimal_selected_caption_renderer(self):
         configuration = resolve_job_configuration(
             {}, {"general": {"source": "clip.mp4"}})
@@ -296,11 +505,11 @@ class AppConfigurationTests(unittest.TestCase):
             path = Path(temp_dir) / "app.yml"
             path.write_text("source_dir: sources\n", encoding="utf-8")
 
-            with self.assertRaisesRegex(ValueError, "config_version must be 1"):
+            with self.assertRaisesRegex(ValueError, f"config_version must be {APP_CONFIG_VERSION}"):
                 load_app_configuration(path)
 
             path.write_text("config_version: 99\n", encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "config_version must be 1"):
+            with self.assertRaisesRegex(ValueError, f"config_version must be {APP_CONFIG_VERSION}"):
                 load_app_configuration(path)
 
     def test_app_configuration_stamps_the_version_on_write(self):
@@ -319,7 +528,7 @@ class AppConfigurationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "app.yml"
 
-            with self.assertRaisesRegex(ValueError, "config_version must be 1"):
+            with self.assertRaisesRegex(ValueError, f"config_version must be {APP_CONFIG_VERSION}"):
                 save_app_configuration(path, {"config_version": 99})
             self.assertFalse(path.exists())
 
@@ -802,7 +1011,8 @@ class JobServiceRevisionTests(unittest.TestCase):
             try:
                 manifest = service.create_job(source.name, {
                     "conversion": {"skip": True, "subtitles": {"skip": True}},
-                    "upload": {"platforms": {"include": ["youtube"]}},
+                    "upload": {"skip": True},
+                    "platforms": {"youtube": {"upload": {"skip": False}}},
                 })
                 service.get_job(manifest.job_id).set_artifact(
                     str(artifact), service.jobs_dir)
@@ -845,7 +1055,11 @@ class JobServiceRevisionTests(unittest.TestCase):
             try:
                 manifest = service.create_job(source.name, {
                     "conversion": {"skip": True, "subtitles": {"skip": True}},
-                    "upload": {"platforms": {"include": ["youtube", "tiktok"]}},
+                    "upload": {"skip": True},
+                    "platforms": {
+                        "youtube": {"upload": {"skip": False}},
+                        "tiktok": {"upload": {"skip": False}},
+                    },
                 })
                 manifest.set_artifact(str(first_artifact), service.jobs_dir)
                 manifest = service.update_upload_draft(
@@ -907,7 +1121,8 @@ class JobServiceRevisionTests(unittest.TestCase):
             try:
                 manifest = service.create_job(source.name, {
                     "conversion": {"skip": True, "subtitles": {"skip": True}},
-                    "upload": {"platforms": {"include": ["youtube"]}},
+                    "upload": {"skip": True},
+                    "platforms": {"youtube": {"upload": {"skip": False}}},
                 })
                 manifest.set_artifact(str(artifact), service.jobs_dir)
                 manifest = service.update_upload_draft(
@@ -966,6 +1181,215 @@ class JobServiceRevisionTests(unittest.TestCase):
                 self.assertEqual(
                     updated.artifacts[updated.current_artifact_id]["state"], "stale")
                 self.assertEqual(updated.checkpoints["conversion"]["status"], "stale")
+            finally:
+                service.close()
+
+    def test_platform_conversion_edit_re_derives_only_the_changed_group(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            (data_dir / "sources").mkdir()
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"video")
+            first = data_dir / "first.mp4"
+            first.write_bytes(b"first render")
+            second = data_dir / "second.mp4"
+            second.write_bytes(b"second render")
+            service = JobService(data_dir)
+            try:
+                manifest = service.create_job(source.name, {
+                    "conversion": {"skip": False, "subtitles": {"skip": True}},
+                    "platforms": {
+                        "youtube": {"conversion": {"strict": True}},
+                        "tiktok": {"conversion": {"strict": True}},
+                    },
+                })
+                groups = manifest.checkpoints["conversion"]["groups"]
+                self.assertEqual(len(groups), 2)
+                # Render both groups, the way the workflow does.
+                for index, group_id in enumerate(groups):
+                    group = groups[group_id]
+                    manifest.transition_checkpoint(
+                        "conversion", "running", group["revision"],
+                        service.jobs_dir, group_id=group_id)
+                    manifest.record_artifact(
+                        "conversion", first if index == 0 else second,
+                        service.jobs_dir, group_id=group_id)
+                    manifest = service.get_job(manifest.job_id)
+                    group = manifest.checkpoints["conversion"]["groups"][group_id]
+                    manifest.transition_checkpoint(
+                        "conversion", "completed", group["revision"],
+                        service.jobs_dir, group_id=group_id)
+                kept = next(group_id for group_id, group in
+                            manifest.checkpoints["conversion"]["groups"].items()
+                            if "tiktok" in group["platforms"])
+                kept_artifact = manifest.checkpoints["conversion"]["groups"][
+                    kept]["current_artifact_id"]
+                kept_state = manifest.artifacts[kept_artifact]["state"]
+                unchanged = next(group_id for group_id, group in
+                                 manifest.checkpoints["conversion"]["groups"].items()
+                                 if "instagram" in group["platforms"])
+                unchanged_artifact = manifest.checkpoints["conversion"]["groups"][
+                    unchanged]["current_artifact_id"]
+                unchanged_state = manifest.artifacts[unchanged_artifact]["state"]
+
+                updated = service.update_job_configuration(
+                    manifest.job_id,
+                    {"platforms": {"tiktok": {"conversion": {"strict": False}}}},
+                    manifest.current_configuration_hash)
+
+                derived = {group["id"] for group in conversion_groups(
+                    updated.configuration)}
+                stored = updated.checkpoints["conversion"]["groups"]
+                self.assertEqual(set(stored), derived)
+                # YouTube keeps the group it already rendered: the override
+                # that moved is TikTok's, and its digest is unchanged, so the
+                # record, its status and its artifact all survive.
+                self.assertEqual(stored[kept]["platforms"], ["youtube"])
+                self.assertEqual(stored[kept]["status"], "completed")
+                self.assertEqual(stored[kept]["current_artifact_id"],
+                                 kept_artifact)
+                self.assertEqual(updated.artifacts[kept_artifact]["state"],
+                                 kept_state)
+                # The group that did not move keeps its artifact's state too:
+                # the aggregate invalidation must not stale it.
+                self.assertEqual(updated.artifacts[unchanged_artifact]["state"],
+                                 unchanged_state)
+                # TikTok's new digest is a new group, and the conversion stage
+                # is stale so exactly that group re-renders.
+                fresh = next(group for group_id, group in stored.items()
+                             if group_id != kept)
+                # TikTok now resolves to the group the other two platforms
+                # already rendered, so that group simply gains a member and
+                # keeps its completed render.
+                self.assertEqual(fresh["platforms"],
+                                 ["instagram", "tiktok", "twitter", "facebook"])
+                self.assertEqual(fresh["status"], "completed")
+                self.assertIsNotNone(fresh["current_artifact_id"])
+                self.assertEqual(updated.checkpoints["conversion"]["status"],
+                                 "stale")
+                self.assertEqual(updated.checkpoints["upload"]["status"],
+                                 "stale")
+            finally:
+                service.close()
+
+    def test_render_loop_completes_a_stage_no_group_still_needs(self):
+        # A configuration edit can re-point platforms onto groups that are
+        # already rendered: the stage is invalidated but nothing is left to
+        # render, and the aggregate must not stay stuck at ``stale``.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            (data_dir / "sources").mkdir()
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"video")
+            rendered = data_dir / "render.mp4"
+            rendered.write_bytes(b"render")
+            service = JobService(data_dir)
+            fake_runner = type("FakeRunner", (), {
+                "get_video_info": lambda _self, _path: {
+                    "format": {"duration": "3"},
+                    "streams": [{"codec_type": "video", "width": 1920,
+                                 "height": 1080}],
+                },
+            })()
+            try:
+                manifest = service.create_job(source.name, {
+                    "conversion": {"skip": False, "subtitles": {"skip": True}},
+                    "platforms": {
+                        "youtube": {"conversion": {"strict": True}},
+                    },
+                })
+                pipeline = type("FakePipeline", (), {
+                    "__init__": lambda self, **kwargs: None,
+                    "run": lambda self: str(rendered),
+                })()
+                with patch("clipmorph.workflow.configure_ffmpeg"), \
+                        patch("clipmorph.workflow.FFmpegRunner", return_value=fake_runner), \
+                        patch("clipmorph.workflow.PreflightValidator"), \
+                        patch("clipmorph.conversion_pipeline.ConversionPipeline",
+                              return_value=pipeline):
+                    execute_job(manifest, CancellationToken(), service.jobs_dir)
+                manifest = service.get_job(manifest.job_id)
+                manifest = service.accept_checkpoint(
+                    manifest.job_id, "conversion",
+                    manifest.checkpoints["conversion"]["revision"])
+                self.assertEqual(manifest.checkpoints["conversion"]["status"],
+                                 "completed")
+                # Move TikTok onto the already-rendered default group: the
+                # stage is invalidated but no group is left to render.
+                manifest = service.update_job_configuration(
+                    manifest.job_id,
+                    {"platforms": {"tiktok": {"conversion": {"strict": True}}}},
+                    manifest.current_configuration_hash)
+                self.assertEqual(manifest.checkpoints["conversion"]["status"],
+                                 "stale")
+                with patch("clipmorph.workflow.configure_ffmpeg"), \
+                        patch("clipmorph.workflow.FFmpegRunner", return_value=fake_runner), \
+                        patch("clipmorph.workflow.PreflightValidator"):
+                    execute_job(manifest, CancellationToken(), service.jobs_dir)
+                saved = service.get_job(manifest.job_id)
+                self.assertEqual(saved.checkpoints["conversion"]["status"],
+                                 "completed")
+                self.assertEqual(saved.errors, [])
+            finally:
+                service.close()
+
+    def test_workflow_renders_the_render_group_and_binds_the_skip_group(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            (data_dir / "sources").mkdir()
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"video")
+            rendered = data_dir / "render.mp4"
+            rendered.write_bytes(b"render")
+            service = JobService(data_dir)
+            fake_runner = type("FakeRunner", (), {
+                "get_video_info": lambda _self, _path: {
+                    "format": {"duration": "3"},
+                    "streams": [{"codec_type": "video", "width": 1920,
+                                 "height": 1080}],
+                },
+            })()
+            try:
+                manifest = service.create_job(source.name, {
+                    "conversion": {"skip": False, "subtitles": {"skip": True}},
+                    "platforms": {
+                        "youtube": {"conversion": {"skip": True}},
+                        "tiktok": {"conversion": {"strict": True}},
+                    },
+                })
+                pipeline = type("FakePipeline", (), {
+                    "__init__": lambda self, **kwargs: None,
+                    "run": lambda self: str(rendered),
+                })()
+                with patch("clipmorph.workflow.configure_ffmpeg"), \
+                        patch("clipmorph.workflow.FFmpegRunner", return_value=fake_runner), \
+                        patch("clipmorph.workflow.PreflightValidator"), \
+                        patch("clipmorph.conversion_pipeline.ConversionPipeline",
+                              return_value=pipeline):
+                    execute_job(manifest, CancellationToken(), service.jobs_dir)
+
+                saved = service.get_job(manifest.job_id)
+                groups = saved.checkpoints["conversion"]["groups"]
+                # youtube skips, tiktok renders, and the two platforms without a
+                # conversion override share the job-level render group.
+                self.assertEqual(len(groups), 3)
+                skipped = next(group for group in groups.values()
+                               if group["platforms"] == ["youtube"])
+                rendered_group = next(group for group in groups.values()
+                                      if "tiktok" in group["platforms"])
+                # The skipping group stays skipped -- ``skipped -> completed``
+                # is not a legal transition -- and binds the untouched source.
+                self.assertEqual(skipped["status"], "skipped")
+                self.assertEqual(
+                    saved.artifacts[skipped["current_artifact_id"]]["kind"],
+                    "source")
+                self.assertEqual(rendered_group["status"], "awaiting_review")
+                self.assertEqual(
+                    saved.artifacts[rendered_group["current_artifact_id"]]["kind"],
+                    "conversion")
+                self.assertEqual(saved.checkpoints["conversion"]["status"],
+                                 "awaiting_review")
+                self.assertEqual(saved.errors, [])
             finally:
                 service.close()
 
