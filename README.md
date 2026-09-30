@@ -1,6 +1,6 @@
 # ClipMorph
 
-A powerful CLI tool for converting gaming videos into short-form content and automatically uploading to YouTube Shorts, Instagram Reels, TikTok, and Twitter/X.
+A powerful CLI tool for converting gaming videos into short-form content and automatically uploading to YouTube Shorts, Instagram Reels, TikTok, Twitter/X, and Facebook Reels.
 
 ## Installation
 
@@ -139,7 +139,7 @@ so three vertical targets cost one conversion.
 - Uploads: support partial failures without dropping platform state in the job manifest
 - Dry runs: validate source selection and configuration without creating jobs
 - Retry handling: pipeline retries and partial-failure reporting are available for uploads
-- Cleanup: use `--clean` to remove generated artifacts after a successful run
+- Cleanup: generated artifacts are tracked in each job's artifact registry; prune superseded or local copies from the dashboard artifacts view, or configure the `retention.artifacts` section in `app.yml` to age them out automatically
 
 ## Troubleshooting
 
@@ -152,9 +152,9 @@ so three vertical targets cost one conversion.
 
 ### Transcription problems
 
-- Reduce model demand with `--transcription-model` and `--transcription-device cpu`.
-- Use the `--transcription-language auto` or a specific language code as needed.
-- If a requested GPU device is unavailable, ClipMorph falls back to CPU automatically.
+- Transcription is configured in `app.yml`, not CLI flags: reduce model demand with `job_defaults.conversion.subtitles.transcription_model` (e.g. `tiny`) and `job_defaults.conversion.subtitles.transcription_device: cpu` (per-job `conversion.subtitles` overrides work the same way).
+- Set `job_defaults.conversion.subtitles.transcription_language` to `auto` or a specific language code as needed.
+- If a requested GPU device is unavailable, ClipMorph falls back to CPU automatically; run `clipmorph doctor` to see the device that was actually resolved.
 
 ### OAuth and upload problems
 
@@ -183,7 +183,7 @@ so three vertical targets cost one conversion.
   - Blurred background support
 
 - **Multi-platform upload**
-  - Parallel uploads to YouTube, Instagram, TikTok, and Twitter
+  - Parallel uploads to YouTube, Instagram, TikTok, Twitter, and Facebook
   - Centralized platform capability policy with blockers, warnings, and metadata transforms
   - Platform-specific parameter mapping and duration/size guards
   - Automatic retry with backoff plus per-platform retries bound to the failed attempt

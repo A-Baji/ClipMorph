@@ -13,6 +13,24 @@ from clipmorph.conversion_pipeline.transcribe import (
 
 
 class TranscriptionConfigTests(unittest.TestCase):
+    def test_conversion_never_transcribes_without_reviewed_session(self):
+        """The pipeline takes transcripts only from the transcript checkpoint.
+
+        A missing reviewed session with subtitles enabled must fail fast
+        instead of silently transcribing audio (the removed legacy branch).
+        """
+        runner = SimpleNamespace(
+            validate_input_file=lambda _path: None,
+            extract_audio=lambda _path: "audio.wav",
+            cleanup_temp_files=lambda: None,
+        )
+        pipeline = ConversionPipeline(
+            "input.mp4", skip_subtitles=False, reviewed_transcript_path=None)
+        pipeline.ffmpeg_runner = runner
+
+        with self.assertRaisesRegex(ValueError, "reviewed transcript"):
+            pipeline.run()
+
     def test_conversion_does_not_forward_transcription_options_to_editor(self):
         runner = SimpleNamespace(
             validate_input_file=lambda _path: None,
@@ -33,12 +51,9 @@ class TranscriptionConfigTests(unittest.TestCase):
                            ConversionPipeline,
                            "_validate_output",
                            return_value=1024,
-                       ), patch(
-                           "clipmorph.conversion_pipeline.convert.TranscriptionPipeline"
-                       ) as transcription_type:
+                       ):
             self.assertEqual(pipeline.run(), "output.mp4")
 
-        transcription_type.assert_not_called()
         self.assertNotIn("transcription_language",
                          editor.call_args.kwargs)
 

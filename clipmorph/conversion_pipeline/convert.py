@@ -2,11 +2,7 @@ import logging
 import os
 from typing import List, Tuple
 
-from better_profanity import profanity
-
 from clipmorph.conversion_pipeline.edit import EditingPipeline
-from clipmorph.conversion_pipeline.transcribe import TranscriptionPipeline
-from clipmorph.conversion_pipeline.transcribe import write_srt_file
 from clipmorph.ffmpeg import FFmpegError
 from clipmorph.ffmpeg import FFmpegRunner
 from clipmorph.job import source_sha256
@@ -15,32 +11,14 @@ from clipmorph.transcript import load_edit_session
 
 class ConversionPipeline:
 
-    def __init__(self, input_path, skip_subtitles=False, no_confirm=False,
-                 strict=False, **kwargs):
+    def __init__(self, input_path, skip_subtitles=False, **kwargs):
         self.input_path = input_path
         self.skip_subtitles = skip_subtitles
-        self.no_confirm = no_confirm
-        self.strict = strict
         self.kwargs = kwargs
-        self.transcription_language = kwargs.get('transcription_language', 'en')
-        self.transcription_model = kwargs.get('transcription_model', 'large-v3')
-        self.transcription_device = kwargs.get('transcription_device', 'auto')
-        self.transcription_compute_type = kwargs.get('transcription_compute_type', 'float16')
         self.reviewed_transcript_path = kwargs.get('reviewed_transcript_path')
         self.ffmpeg_runner = FFmpegRunner()
         self.segments = []
         self.warnings = []
-
-    def _detect_profanity(self, segments, custom_words=None):
-        """Detect profanity in transcribed segments and return intervals to mute"""
-        profanity.load_censor_words(custom_words, whitelist_words=["god"])
-        profane_intervals = []
-        for seg in segments:
-            for word_info in seg['words']:
-                if profanity.contains_profanity(word_info['word']):
-                    profane_intervals.append(
-                        (word_info['start'], word_info['end']))
-        return profane_intervals
 
     def _mute_audio(self, intervals: List[Tuple[float, float]],
                     audio_path: str) -> str:
@@ -81,12 +59,6 @@ class ConversionPipeline:
         self.ffmpeg_runner.run_ffmpeg(cmd)
         return output_path
 
-    def _censor_subtitles(self, segments):
-        """Censor profane words in subtitle segments."""
-        for segment in segments:
-            segment["text"] = profanity.censor(segment["text"])
-        return segments
-
     def _apply_word_annotations(self, segments):
         """Apply saved per-word replacements without changing segment timing."""
         for segment in segments:
@@ -106,104 +78,6 @@ class ConversionPipeline:
         if session["source_sha256"] != source_sha256(self.input_path):
             raise ValueError("Reviewed transcript source does not match input video")
         return session["segments"]
-
-    def _log_subtitles(self, segments):
-        """Log the generated subtitles for user review."""
-        if not segments:
-            logging.info("No subtitles were generated.")
-            return
-
-        print("\n" + "=" * 60)
-        print(f"Generated {len(segments)} subtitle segments:")
-        print("=" * 60)
-
-        for i, segment in enumerate(segments[:20], 1):
-            start_time = segment.get('start', 0)
-            end_time = segment.get('end', 0)
-            text = segment.get('text', '').strip()
-            speaker = segment.get('speaker', '')
-
-            # Format time as MM:SS
-            start_min, start_sec = divmod(int(start_time), 60)
-            end_min, end_sec = divmod(int(end_time), 60)
-
-            # Add speaker label if available
-            speaker_label = f"{speaker}: " if speaker else ""
-
-            print(
-                f"{i:2d}. [{start_min:02d}:{start_sec:02d}-{end_min:02d}:{end_sec:02d}] {speaker_label}{text}"
-            )
-
-        if len(segments) > 20:
-            print(f"... and {len(segments) - 20} more segments")
-
-        print("=" * 60)
-
-    def _ask_subtitle_confirmation(self):
-        """Ask user if they want to include subtitles and select which ones to omit."""
-        while True:
-            response = input(
-                "\nProceed with generated subtitles or select lines to omit? (y/n/select): "
-            ).strip().lower()
-
-            if response in ['n', 'no']:
-                return False
-
-            if response in ['y', 'yes']:
-                return True
-
-            if response == 'select':
-                while True:
-                    omit_input = input(
-                        "\nEnter line numbers to omit (e.g., 1,3-5,7) or press Enter to keep all: "
-                    ).strip()
-
-                    if not omit_input:
-                        return True
-
-                    try:
-                        # Parse the input string into a set of line numbers
-                        omit_numbers = set()
-                        for part in omit_input.split(','):
-                            if '-' in part:
-                                start, end = map(int, part.split('-'))
-                                omit_numbers.update(range(start, end + 1))
-                            else:
-                                omit_numbers.add(int(part))
-
-                        # Validate line numbers are in range
-                        invalid_numbers = [
-                            i for i in omit_numbers
-                            if i < 1 or i > len(self.segments)
-                        ]
-                        if invalid_numbers:
-                            print(
-                                f"Invalid line numbers: {', '.join(map(str, invalid_numbers))}."
-                            )
-                            print(
-                                f"Please enter numbers between 1 and {len(self.segments)}."
-                            )
-                            continue
-
-                        # Mark segments for removal
-                        for i in sorted(omit_numbers, reverse=True):
-                            del self.segments[i - 1]
-
-                        logging.info(
-                            f"Omitted {len(omit_numbers)} subtitle segments")
-                        print("\nUpdated subtitles:")
-                        self._log_subtitles(self.segments)
-                        return True
-
-                    except ValueError:
-                        print(
-                            "Invalid format. Please use numbers and ranges (e.g., 1,3-5,7)"
-                        )
-                        continue
-
-            print(
-                "Please enter 'y' for yes, 'n' for no, or 'select' to choose lines to omit."
-            )
 
     def _validate_output(self, output_path: str):
         """Validate the generated output file."""
@@ -233,9 +107,16 @@ class ConversionPipeline:
             audio_path = self.ffmpeg_runner.extract_audio(self.input_path)
 
             muted_audio_path = audio_path
-            use_subtitles = False
 
-            if self.reviewed_transcript_path:
+            if self.skip_subtitles:
+                logging.info("Skipping subtitles (conversion.subtitles.skip)")
+            else:
+                if not self.reviewed_transcript_path:
+                    raise ValueError(
+                        "conversion.subtitles is enabled but no reviewed "
+                        "transcript session exists; the pipeline takes "
+                        "transcripts only from the transcript checkpoint "
+                        "(never transcribes audio itself)")
                 logging.info("Loading reviewed transcript edit session...")
                 self.segments = self._load_reviewed_segments()
                 self.segments = self._apply_word_annotations(self.segments)
@@ -249,69 +130,6 @@ class ConversionPipeline:
                 ]
                 if intervals:
                     muted_audio_path = self._mute_audio(intervals, audio_path)
-                use_subtitles = True
-            elif not self.skip_subtitles:
-                logging.info("Transcribing audio...")
-                try:
-                    self.segments = TranscriptionPipeline(
-                        audio_path,
-                        language=self.transcription_language,
-                        model_name=self.transcription_model,
-                        device=self.transcription_device,
-                        compute_type=self.transcription_compute_type,
-                    ).run()
-
-                    if self.segments:
-                        # Log subtitles for user review
-                        self._log_subtitles(self.segments)
-
-                        # Ask for confirmation unless --no-confirm is set
-                        if self.no_confirm:
-                            use_subtitles = True
-                            logging.info(
-                                "Auto-confirming subtitle addition (--no-confirm flag)"
-                            )
-                        else:
-                            use_subtitles = self._ask_subtitle_confirmation()
-
-                        if use_subtitles:
-                            logging.info("Processing subtitles...")
-                            subtitle_path = self.ffmpeg_runner.create_temp_file('.srt')
-                            write_srt_file(self.segments, subtitle_path)
-
-                            logging.info("Detecting profanity in audio...")
-                            intervals = self._detect_profanity(self.segments)
-
-                            if intervals:
-                                logging.info(
-                                    "Muting profane audio segments...")
-                                muted_audio_path = self._mute_audio(
-                                    intervals, audio_path)
-                            else:
-                                logging.info(
-                                    "No profanity detected, using original audio..."
-                                )
-
-                            logging.info("Censoring subtitles...")
-                            self.segments = self._censor_subtitles(
-                                self.segments)
-                        else:
-                            logging.info(
-                                "Skipping subtitle overlay as requested by user."
-                            )
-                            self.segments = []
-                    else:
-                        logging.warning(
-                            "No subtitles were generated from transcription.")
-
-                except Exception as e:
-                    warning = f"Transcription failed: {e}. Continuing without subtitles."
-                    self.warnings.append(warning)
-                    logging.warning(warning)
-                    if self.strict:
-                        raise
-            else:
-                logging.info("Skipping transcription (conversion.subtitles.skip)")
 
             logging.info("Editing video...")
 
