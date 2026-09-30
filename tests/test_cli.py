@@ -284,6 +284,7 @@ class CliHumanOutputTests(unittest.TestCase):
             obsolete_id = next(
                 artifact_id for artifact_id, artifact in manifest.artifacts.items()
                 if artifact["state"] == "superseded")
+            kept_id = manifest.current_artifact_id
             manifest.artifacts[obsolete_id]["superseded_at"] = "2000-01-01T00:00:00+00:00"
             manifest.save(jobs_dir)
             service.close()
@@ -299,7 +300,7 @@ class CliHumanOutputTests(unittest.TestCase):
             self.assertFalse((artifact_dir / "obsolete.mp4").exists())
             saved = JobManifest.load(manifest.job_id, data_dir / "jobs")
             self.assertEqual(saved.artifacts[obsolete_id]["state"], "deleted")
-            self.assertTrue(saved.artifact_path.endswith("kept.mp4"))
+            self.assertEqual(saved.artifacts[kept_id]["state"], "current")
 
     def test_layout_list_renders_registry_records(self):
         with tempfile.TemporaryDirectory() as temp_dir:

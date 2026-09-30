@@ -16,7 +16,7 @@ class JobManifestTests(unittest.TestCase):
             manifest.record_platform("YouTube", {"success": True},
                                      str(jobs_dir))
             loaded = JobManifest.load(manifest.job_id, str(jobs_dir))
-            self.assertEqual(loaded.schema_version, 2)
+            self.assertEqual(loaded.schema_version, 3)
             self.assertEqual(loaded.source_sha256, manifest.source_sha256)
             self.assertTrue(loaded.platforms["YouTube"]["success"])
 

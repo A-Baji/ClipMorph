@@ -138,7 +138,7 @@ class DoctorJsonTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual([check["id"] for check in payload["checks"]], [
             "ffmpeg", "ffprobe", "app_config", "source_dir", "output_dir",
-            "layouts", "fonts", "credentials", "device",
+            "layouts", "fonts", "credentials", "device", "artifacts_storage",
         ])
         for check in payload["checks"]:
             self.assertEqual(check["status"], "ok")
@@ -191,7 +191,7 @@ class DoctorSourceMediaTests(unittest.TestCase):
         records = _by_id(payload)
         self.assertEqual(records["source_media"]["status"], "failed")
         self.assertIn("Input file does not exist", records["source_media"]["detail"])
-        self.assertEqual(len(payload["checks"]), 10)
+        self.assertEqual(len(payload["checks"]), 11)
 
     def test_source_media_ok_with_fake_runner(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -205,7 +205,7 @@ class DoctorSourceMediaTests(unittest.TestCase):
         records = {check["id"]: check for check in checks}
         self.assertEqual(records["source_media"]["status"], "ok")
         self.assertEqual(records["source_media"]["detail"], "1920x1080, 12.5s")
-        self.assertEqual(len(checks), 10)
+        self.assertEqual(len(checks), 11)
 
     def test_source_media_rejects_unsupported_extension(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -280,6 +280,76 @@ class DoctorCredentialsTests(unittest.TestCase):
         self.assertEqual(records["credentials"]["status"], "warning")
         self.assertIn("youtube", records["credentials"]["detail"])
         self.assertIn("hugging_face", records["credentials"]["detail"])
+
+
+class _PretendStorage:
+    """Stand-in backend reporting whatever verdict a case needs."""
+
+    def __init__(self, status="ok", detail="pretend backend at gs://bucket"):
+        self._health = (status, detail)
+
+    def health(self):
+        return self._health
+
+
+class DoctorStorageTests(unittest.TestCase):
+    def _artifacts_storage(self, payload):
+        return {check["id"]: check for check in payload}["artifacts_storage"]
+
+    def test_configured_backend_probe_is_reported(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = _seed_data_dir(temp_dir)
+            with doctor_patches(), patch(
+                    "clipmorph.storage.make_storage",
+                    return_value=_PretendStorage()) as make_storage:
+                checks = run_checks(data_dir, data_dir / "app.yml")
+
+        record = self._artifacts_storage(checks)
+        self.assertEqual(record["status"], "ok")
+        self.assertEqual(record["detail"], "pretend backend at gs://bucket")
+        # The backend is built from the loaded app.yml and the active data dir.
+        configuration, data_dir_arg = make_storage.call_args.args
+        self.assertEqual(configuration["storage"], {"backend": "local"})
+        self.assertEqual(data_dir_arg, data_dir)
+
+    def test_backend_probe_failure_fails_the_check_and_the_run(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = _seed_data_dir(temp_dir)
+            pretend = _PretendStorage("failed", "bucket is not writable")
+            with doctor_patches(all_credentials_configured=True), patch(
+                    "clipmorph.storage.make_storage", return_value=pretend):
+                code, payload = _invoke_json(["--data-dir", str(data_dir), "doctor"])
+
+        self.assertEqual(code, 1)
+        record = _by_id(payload)["artifacts_storage"]
+        self.assertEqual(record["status"], "failed")
+        self.assertEqual(record["detail"], "bucket is not writable")
+
+    def test_unbuildable_backend_reports_unavailable_without_failing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = _seed_data_dir(temp_dir)
+            with doctor_patches(all_credentials_configured=True), patch(
+                    "clipmorph.storage.make_storage",
+                    side_effect=ValueError("unknown storage backend: gcs")):
+                code, payload = _invoke_json(["--data-dir", str(data_dir), "doctor"])
+
+        record = _by_id(payload)["artifacts_storage"]
+        self.assertEqual(record["status"], "unavailable")
+        self.assertEqual(record["detail"], "unknown storage backend: gcs")
+        # Unavailable is a missing capability, not a broken environment.
+        self.assertEqual(code, 0)
+
+    def test_local_probe_recycles_its_file_inside_the_output_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = _seed_data_dir(temp_dir)
+            with doctor_patches(all_credentials_configured=True):
+                code, payload = _invoke_json(["--data-dir", str(data_dir), "doctor"])
+
+            record = _by_id(payload)["artifacts_storage"]
+            self.assertEqual(code, 0)
+            self.assertEqual(record["status"], "ok")
+            self.assertIn(str(data_dir / "output"), record["detail"])
+            self.assertEqual(list((data_dir / "output").iterdir()), [])
 
 
 class DoctorSurfaceTests(unittest.TestCase):

@@ -14,10 +14,12 @@ from platformdirs import user_data_dir
 import yaml
 
 from clipmorph.configuration import atomic_write_text
+from clipmorph.configuration import load_app_configuration
+from clipmorph.storage import LOCAL_BACKEND, storage_key_for
 
 
 APP_NAME = "ClipMorph"
-MANIFEST_SCHEMA_VERSION = 2
+MANIFEST_SCHEMA_VERSION = 3
 CHECKPOINT_STATES = {
     "pending", "running", "awaiting_review", "completed", "partial_failure",
     "skipped", "failed", "cancelled", "stale",
@@ -143,7 +145,6 @@ class JobManifest:
     upload_attempts: list[dict[str, Any]] = field(default_factory=list)
     errors: list[dict[str, Any]] = field(default_factory=list)
     status: str = "created"
-    artifact_path: str | None = None
     artifacts: dict[str, dict[str, Any]] = field(default_factory=dict)
     steps: dict[str, dict[str, Any]] = field(default_factory=dict)
     platforms: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -355,12 +356,30 @@ class JobManifest:
 
     def set_artifact(self, artifact_path: str | Path,
                      jobs_dir: str | Path | None = None,
-                     name: str = "primary"):
-        return self.record_artifact(name, artifact_path, jobs_dir)
+                     name: str = "primary",
+                     storage_key: str | None = None):
+        return self.record_artifact(
+            name, artifact_path, jobs_dir, storage_key=storage_key)
+
+    @staticmethod
+    def artifact_root(jobs_dir: str | Path | None) -> Path:
+        """Resolve the artifact root configured beside ``jobs_dir``.
+
+        The manifest writes backend-neutral keys, so the root that produces
+        them is the workspace's ``app.yml:output_dir``. Callers that already
+        resolved that root pass their own key instead.
+        """
+        if jobs_dir is None:
+            return resolve_output_dir(None, None).resolve()
+        data_dir = Path(jobs_dir).parent
+        configuration = load_app_configuration(data_dir / "app.yml")
+        return resolve_output_dir(
+            configuration.get("output_dir"), data_dir).resolve()
 
     def record_artifact(self, name: str, artifact_path: str | Path,
                         jobs_dir: str | Path | None = None,
-                        schema_version: int = MANIFEST_SCHEMA_VERSION):
+                        schema_version: int = MANIFEST_SCHEMA_VERSION,
+                        storage_key: str | None = None):
         resolved_path = Path(artifact_path).resolve()
         if self.current_artifact_id in self.artifacts:
             current = self.artifacts[self.current_artifact_id]
@@ -373,11 +392,16 @@ class JobManifest:
                         for item in self.artifacts.values()), default=0) + 1
         artifact_id = uuid.uuid4().hex
         artifact_hash = source_sha256(resolved_path) if resolved_path.is_file() else None
+        if storage_key is None:
+            storage_key = storage_key_for(
+                self.artifact_root(jobs_dir), resolved_path)
         self.artifacts[artifact_id] = {
             "id": artifact_id,
             "revision": revision,
             "kind": name,
-            "path": str(resolved_path),
+            # One canonical reference: the backend that owns the bytes and the
+            # key it resolves them by. The local path is never stored.
+            "storage": {"backend": LOCAL_BACKEND, "key": storage_key},
             "sha256": artifact_hash,
             "configuration_hash": self.checkpoints.get(
                 "conversion", {}).get("configuration_hash"),
@@ -389,7 +413,6 @@ class JobManifest:
             "source_sha256": self.source_sha256,
         }
         self.current_artifact_id = artifact_id
-        self.artifact_path = str(resolved_path)
         conversion = self.checkpoints.get("conversion")
         if conversion is not None:
             conversion["artifact_hash"] = artifact_hash

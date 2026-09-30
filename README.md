@@ -21,7 +21,7 @@ clipmorph web
 ```
 
 `app.yml` defaults to the ClipMorph data directory. Configure `source_dir`,
-`output_dir`, `job_defaults`, `retention`, and named layouts there. The file
+`output_dir`, `job_defaults`, `retention`, `storage`, and named layouts there. The file
 carries a `config_version` stamp; a missing or mismatched stamp is rejected with
 one actionable error, and `clipmorph init` run beside an existing `app.yml`
 regenerates a template to copy your settings back into. Job configuration is
@@ -120,7 +120,7 @@ rules.
 
 ## Troubleshooting
 
-- Run `clipmorph doctor` for a one-shot, read-only health check of this machine (FFmpeg, app configuration, directories, layouts, fonts, credentials, transcription device) before deeper debugging; add `--json` for a machine-readable report.
+- Run `clipmorph doctor` for a one-shot, read-only health check of this machine (FFmpeg, app configuration, directories, layouts, fonts, credentials, transcription device, artifact storage) before deeper debugging; add `--json` for a machine-readable report.
 
 ### FFmpeg problems
 

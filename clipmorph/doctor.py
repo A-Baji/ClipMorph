@@ -1,11 +1,14 @@
 """Read-only environment health checks for the ``clipmorph doctor`` command.
 
 Every check returns one record ``{"id", "status", "detail"}`` where status is
-``ok``, ``warning``, or ``failed``. The doctor never writes manifests, never
-mutates files, and never contacts network services: directory writability is
-asserted with permission and disk-space probes only, and no probe file is ever
-created. Heavy imports stay lazy inside the individual check functions so the
-``--help`` and ``init`` paths remain dependency-free.
+``ok``, ``warning``, or ``failed``; a storage backend that cannot be built or
+reached reports ``unavailable``. The doctor never writes manifests and never
+contacts network services: directory writability is asserted with permission
+and disk-space probes only, and the artifact-storage check writes and recycles
+a single probe object inside the storage root so the backend's own write path is
+exercised, leaving nothing behind. Heavy imports stay lazy inside the
+individual check functions so the ``--help`` and ``init`` paths remain
+dependency-free.
 """
 
 from __future__ import annotations
@@ -154,6 +157,24 @@ def _check_device() -> dict[str, str]:
         return _record("device", "warning", f"cuda probe failed: {error}")
 
 
+def _check_artifacts_storage(configuration: dict[str, Any],
+                             data_dir: Path) -> dict[str, str]:
+    """Exercise the configured artifact storage backend once.
+
+    Construction failures (an unknown backend, a missing dependency) are
+    reported as ``unavailable``, mirroring how the device check treats an
+    absent optional import; the backend itself reports its own probe result.
+    """
+    from clipmorph.storage import make_storage
+
+    try:
+        storage = make_storage(configuration, data_dir)
+    except Exception as error:
+        return _record("artifacts_storage", "unavailable", str(error))
+    status, detail = storage.health()
+    return _record("artifacts_storage", status, detail)
+
+
 def _check_source_media(source: Path) -> dict[str, str]:
     from clipmorph.configuration import SUPPORTED_SOURCE_EXTENSIONS
     from clipmorph.ffmpeg import FFmpegError, FFmpegRunner
@@ -193,7 +214,8 @@ def run_checks(data_dir: str | Path, app_config_path: str | Path,
 
     Check ids, in order: ``ffmpeg``, ``ffprobe``, ``app_config``,
     ``source_dir``, ``output_dir``, ``layouts``, ``fonts``, ``credentials``,
-    ``device``, and ``source_media`` (only when ``source_probe`` is given).
+    ``device``, ``artifacts_storage`` (only when app.yml loaded), and
+    ``source_media`` (only when ``source_probe`` is given).
     """
     data_dir = Path(data_dir)
     app_config_path = Path(app_config_path)
@@ -217,6 +239,8 @@ def run_checks(data_dir: str | Path, app_config_path: str | Path,
     checks.append(_check_fonts())
     checks.append(_check_credentials())
     checks.append(_check_device())
+    if configuration is not None:
+        checks.append(_check_artifacts_storage(configuration, data_dir))
     if source_probe is not None:
         checks.append(_check_source_media(Path(source_probe)))
     return checks

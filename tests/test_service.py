@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from clipmorph.job import JobManifest
 from clipmorph.service import JobService
+from clipmorph.storage import LocalArtifactStorage
 
 
 class JobServiceTests(unittest.TestCase):
@@ -115,7 +116,7 @@ class DeferredUploadTests(unittest.TestCase):
                 service._run_upload_attempts(
                     manifest.job_id, [attempt["attempt_id"]],
                     service.get_job(manifest.job_id).artifacts[
-                        attempt["artifact_id"]]["path"],
+                        attempt["artifact_id"]]["storage"]["key"],
                     {"platforms": {"include": ["youtube"]}}, ["youtube"])
 
             saved = service.get_job(manifest.job_id)
@@ -163,7 +164,7 @@ class DeferredUploadTests(unittest.TestCase):
                 service._run_upload_attempts(
                     manifest.job_id, [attempt["attempt_id"]],
                     service.get_job(manifest.job_id).artifacts[
-                        attempt["artifact_id"]]["path"],
+                        attempt["artifact_id"]]["storage"]["key"],
                     {"platforms": {"include": ["youtube"]}}, ["youtube"])
                 failed = service.get_job(manifest.job_id).upload_attempts[0]
                 failed["status"] = "failed"
@@ -173,6 +174,10 @@ class DeferredUploadTests(unittest.TestCase):
                            side_effect=_upload_results(["youtube"])) as pipeline:
                     retried = service.retry_upload(
                         manifest.job_id, "youtube", failed["attempt_id"])
+                    # The retry runs on the executor, so wait for the attempt
+                    # to finish before reading its recorded result.
+                    service._futures[
+                        f"upload:{manifest.job_id}"].result(timeout=5)
 
                 pipeline.assert_called_once()
                 self.assertFalse(retried["scheduled"])
@@ -448,6 +453,98 @@ class DeferredUploadTests(unittest.TestCase):
             saved = service.get_job(manifest.job_id)
             self.assertEqual(saved.upload_attempts[0]["status"], "cancelled")
             self.assertIsNotNone(saved.upload_attempts[0]["completed_at"])
+
+
+class _ArmedStagingStorage(LocalArtifactStorage):
+    """Local backend whose ``stage`` starts failing once ``armed`` is set."""
+
+    def __init__(self, root):
+        super().__init__(root)
+        self.armed = False
+
+    def stage(self, key, destination_dir):
+        if self.armed:
+            raise OSError("artifact storage is offline")
+        return super().stage(key, destination_dir)
+
+
+def _upload_results_capturing_staged(platforms, captured):
+    """A mocked upload pipeline recording the staged file it was handed."""
+    def execute(_platforms, artifact_path, *_args, **_kwargs):
+        staged = Path(artifact_path)
+        captured.append((staged, staged.read_bytes()))
+        stamp = datetime.now(timezone.utc).isoformat()
+        return {platform: {"success": True, "result": f"{platform} ok",
+                           "started_at": stamp, "completed_at": stamp}
+                for platform in platforms}
+
+    return execute
+
+
+class ArtifactStagingTests(unittest.TestCase):
+    def test_upload_reads_a_staged_copy_that_is_released_afterwards(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = _reviewed_job(data_dir)
+            self.addCleanup(service.close)
+            registered = service.artifact_path(
+                service.get_job(manifest.job_id).artifacts[
+                    manifest.current_artifact_id])
+            captured = []
+
+            with patch("clipmorph.upload_attempts.execute_upload_pipeline",
+                       side_effect=_upload_results_capturing_staged(
+                           ["youtube"], captured)):
+                service.submit_upload(manifest.job_id, ["youtube"])
+                service._futures[f"upload:{manifest.job_id}"].result(timeout=5)
+
+            staged, staged_bytes = captured[0]
+            # The adapter reads a private copy, never the registered bytes.
+            self.assertNotEqual(staged, registered)
+            self.assertEqual(staged_bytes, registered.read_bytes())
+            self.assertEqual(service.get_job(manifest.job_id).upload_attempts[0]
+                             ["status"], "published")
+            # Verification and upload copies are both released.
+            self.assertFalse(staged.exists())
+            self.assertFalse(staged.parent.exists())
+            leftovers = (sorted(service._staging_dir.rglob("*"))
+                         if service._staging_dir.exists() else [])
+            self.assertEqual(leftovers, [])
+
+    def test_staging_failure_fails_the_attempt_and_records_a_manifest_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = _reviewed_job(data_dir)
+            self.addCleanup(service.close)
+            service._storage = _ArmedStagingStorage(service._storage.root)
+            publish_at = (datetime.now(timezone.utc)
+                          + timedelta(hours=1)).isoformat()
+
+            with patch("clipmorph.upload_attempts.execute_upload_pipeline") as pipeline:
+                result = service.submit_upload(
+                    manifest.job_id, ["youtube"],
+                    configuration_snapshot={
+                        "platforms": {"include": ["youtube"]},
+                        "schedule": {"publish_at": publish_at}})
+                # Hold the attempt back, then fail only its staging copy.
+                service._scheduled_timers[f"upload:{manifest.job_id}"][0].cancel()
+                service._storage.armed = True
+                attempt = result["attempts"][0]
+                service._run_upload_attempts(
+                    manifest.job_id, [attempt["attempt_id"]],
+                    service.get_job(manifest.job_id).artifacts[
+                        attempt["artifact_id"]]["storage"]["key"],
+                    {"platforms": {"include": ["youtube"]}}, ["youtube"])
+
+            pipeline.assert_not_called()
+            saved = service.get_job(manifest.job_id)
+            self.assertEqual(saved.upload_attempts[0]["status"], "failed")
+            self.assertIn("artifact staging failed",
+                          saved.upload_attempts[0]["result"]["message"])
+            self.assertFalse(saved.platforms["youtube"]["success"])
+            self.assertEqual(saved.checkpoints["upload"]["status"], "failed")
+            self.assertEqual(saved.errors[-1]["code"], "staging_failed")
+            self.assertIn("artifact storage is offline", saved.errors[-1]["message"])
 
 
 def _upload_results_reporting_progress(platforms, percents):

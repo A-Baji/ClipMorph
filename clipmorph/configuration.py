@@ -33,7 +33,7 @@ DEFAULT_BACKUP_KEEP_N = 5
 
 APP_CONFIGURATION_FIELDS = {
     "config_version", "source_dir", "output_dir", "job_defaults", "layouts",
-    "retention",
+    "retention", "storage",
 }
 
 RETENTION_FIELDS = {
@@ -79,6 +79,9 @@ DEFAULT_APP_CONFIGURATION = {
     "retention": {
         "artifacts": {"max_age_days": None, "max_bytes": None},
         "backups": {"keep_n": None},
+    },
+    "storage": {
+        "backend": "local",
     },
 }
 
@@ -336,6 +339,15 @@ def _validate_retention(retention: Any) -> None:
                     f"retention.{section}.{key} must be a positive integer or null")
 
 
+def _validate_storage(storage: Any) -> None:
+    """Validate the artifact storage backend selection."""
+    if not isinstance(storage, dict):
+        raise ValueError("storage must be an object")
+    backend = storage.get("backend")
+    if backend != "local":
+        raise ValueError(f"unknown storage backend: {backend}")
+
+
 def _validate_app_configuration(configuration: dict[str, Any]) -> None:
     require_app_config_version(configuration)
     for path_key in ("source_dir", "output_dir"):
@@ -348,6 +360,7 @@ def _validate_app_configuration(configuration: dict[str, Any]) -> None:
     if not isinstance(layouts, list):
         raise ValueError("layouts must be a list")
     _validate_retention(configuration.get("retention", {}))
+    _validate_storage(configuration.get("storage", {}))
     ids: set[str] = set()
     for record in layouts:
         if (not isinstance(record, dict) or not isinstance(record.get("id"), str)
