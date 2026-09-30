@@ -643,6 +643,20 @@ def create_app(data_dir: str | Path | None = None,
             # because the failure happens before it is saved.
             fail(409, "conflict", f"artifact bytes could not be recycled: {error}")
 
+    @app.get("/api/v1/jobs/{job_id}/metrics")
+    def get_metrics(job_id: str):
+        try:
+            return service.list_metrics(job_id)
+        except FileNotFoundError:
+            fail(404, "not_found", "job not found")
+
+    @app.post("/api/v1/jobs/{job_id}/metrics/pull", status_code=202)
+    def pull_metrics(job_id: str):
+        try:
+            return service.pull_metrics(job_id)
+        except FileNotFoundError:
+            fail(404, "not_found", "job not found")
+
     @app.get("/api/v1/jobs/{job_id}/events")
     def job_events(job_id: str):
         def events():
