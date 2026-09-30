@@ -18,6 +18,8 @@ from typing import Any
 
 import requests
 
+from clipmorph.job import JobManifest
+
 logger = logging.getLogger(__name__)
 
 # Retry configuration matching BaseUploadPipeline.
@@ -370,3 +372,150 @@ def collect_platform_metrics(
                 if post_id:
                     results[post_id] = {}
     return results
+
+
+def _attempt_for_post(manifest: JobManifest,
+                      platform_post_id: Any) -> dict | None:
+    """Return the published attempt for one platform post, if any."""
+    if not platform_post_id:
+        return None
+    for attempt in manifest.upload_attempts:
+        result = attempt.get("result") or {}
+        if result.get("platform_post_id") == platform_post_id:
+            return attempt
+    return None
+
+
+def _attempt_artifact(manifest: JobManifest, attempt: dict) -> dict:
+    """Return the artifact record for one attempt, if any."""
+    artifact_id = attempt.get("artifact_id")
+    if artifact_id is None:
+        return {}
+    return manifest.artifacts.get(str(artifact_id), {})
+
+
+def join_dimensions(snapshot: dict, manifest: JobManifest) -> dict:
+    """Join one snapshot record to the dimensions its manifest owns.
+
+    Reads ``duration_seconds`` from the snapshot's pull-time stamp (falling
+    back to the attempt's artifact record), ``title`` from the attempt's
+    configuration snapshot, and ``layout_id``/``subtitles_renderer`` from the
+    job configuration. ``platform_overrides`` stays null until #203 lands.
+    """
+    attempt = _attempt_for_post(manifest, snapshot.get("platform_post_id"))
+    duration = snapshot.get("duration_seconds")
+    if duration is None and attempt is not None:
+        duration = _attempt_artifact(manifest, attempt).get("duration_seconds")
+    title = None
+    if attempt is not None:
+        title = ((attempt.get("configuration_snapshot") or {})
+                 .get("upload", {}).get("content", {}).get("title"))
+    conversion = (manifest.configuration or {}).get("conversion", {}) or {}
+    subtitles = conversion.get("subtitles", {}) or {}
+    return {
+        "duration_seconds": duration,
+        "title": title,
+        "layout_id": conversion.get("layout_id"),
+        "subtitles_renderer": subtitles.get("renderer"),
+        "platform_overrides": None,
+    }
+
+
+def duration_bucket(seconds: int | float | None) -> str:
+    """Return the fixed half-open duration bucket for one clip length.
+
+    Buckets are ``<30s``, ``[30,60)``, ``[60,180)``, and ``>180s`` (180 and
+    above); ``None`` maps to ``"unknown"``.
+    """
+    if seconds is None:
+        return "unknown"
+    if seconds < 30:
+        return "<30s"
+    if seconds < 60:
+        return "[30,60)"
+    if seconds < 180:
+        return "[60,180)"
+    return ">180s"
+
+
+def _metric_deltas(first: dict, latest: dict) -> dict[str, int | None]:
+    """First → latest delta per metric; null when not computable."""
+    before = first.get("metrics") or {}
+    after = latest.get("metrics") or {}
+    deltas: dict[str, int | None] = {}
+    for name in sorted(set(before) | set(after)):
+        old = before.get(name)
+        new = after.get(name)
+        if isinstance(old, int) and isinstance(new, int):
+            deltas[name] = new - old
+        else:
+            deltas[name] = None
+    return deltas
+
+
+def _comparison_rows(job_id: str, snapshots: list[dict],
+                     manifest: JobManifest,
+                     platform: str | None) -> list[dict]:
+    """Build the comparison rows for one job's snapshots."""
+    posts: dict[tuple[Any, Any], list[dict]] = {}
+    for record in snapshots:
+        post_id = record.get("platform_post_id")
+        if not post_id:
+            continue
+        posts.setdefault((record.get("platform"), post_id), []).append(record)
+    rows: list[dict] = []
+    for (platform_name, post_id), history in posts.items():
+        if platform is not None and platform_name != platform:
+            continue
+        first, latest = history[0], history[-1]
+        dimensions = join_dimensions(latest, manifest)
+        metrics = latest.get("metrics") or {}
+        deltas = _metric_deltas(first, latest)
+        rows.append({
+            "job_id": job_id,
+            "platform": platform_name,
+            "platform_post_id": post_id,
+            "platform_url": latest.get("platform_url"),
+            "captured_at": latest.get("captured_at"),
+            "unavailable": latest.get("unavailable", False),
+            "unavailable_reason": latest.get("unavailable_reason"),
+            "metrics": metrics,
+            "deltas": deltas,
+            "views": metrics.get("views"),
+            "likes": metrics.get("likes"),
+            "comments": metrics.get("comments"),
+            "views_delta": deltas.get("views"),
+            "likes_delta": deltas.get("likes"),
+            "duration_bucket": duration_bucket(dimensions["duration_seconds"]),
+            **dimensions,
+        })
+    return rows
+
+
+def compare_metrics(jobs_dir: str | Path,
+                    platform: str | None = None,
+                    limit: int = 100) -> list[dict]:
+    """Build cross-job comparison rows from stored snapshots.
+
+    One row per published platform post: the latest snapshot per
+    ``(platform, platform_post_id)``, dimensions joined from the job manifest,
+    and first → latest deltas for the table metrics. Sorted by ``captured_at``
+    descending and bounded to ``limit`` rows. Read-only; no pull is triggered.
+    """
+    root = Path(jobs_dir)
+    rows: list[dict] = []
+    if not root.is_dir():
+        return rows
+    for job_dir in sorted(root.iterdir()):
+        if not job_dir.is_dir():
+            continue
+        snapshots = load_snapshots(job_dir)
+        if not snapshots:
+            continue
+        try:
+            manifest = JobManifest.load(job_dir.name, root)
+        except (OSError, ValueError):
+            continue
+        rows.extend(_comparison_rows(job_dir.name, snapshots, manifest, platform))
+    rows.sort(key=lambda row: row.get("captured_at") or "", reverse=True)
+    return rows[:max(0, limit)]

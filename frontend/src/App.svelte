@@ -1,6 +1,6 @@
 <script>
   const platforms = ['youtube', 'instagram', 'tiktok', 'twitter'];
-  const nav = ['Queue', 'New Job', 'Captions', 'Layouts', 'Uploads', 'Settings'];
+  const nav = ['Queue', 'New Job', 'Captions', 'Layouts', 'Uploads', 'Metrics', 'Settings'];
   let activeView = 'Queue';
   let jobs = [];
   let sources = [];
@@ -9,6 +9,8 @@
   let uploadAttempts = [];
   let uploadProgress = {};
   let metricSnapshots = [];
+  let metricComparison = [];
+  let metricFilterPlatform = '';
   let progressStream = null;
   let selectedJobId = '';
   let selectedSources = [];
@@ -203,7 +205,7 @@
       api(`/api/v1/jobs/${selectedJobId}`),
       api(`/api/v1/jobs/${selectedJobId}/artifacts`),
       api(`/api/v1/jobs/${selectedJobId}/uploads`),
-      api(`/api/v1/jobs/${selectedJobId}/metrics`),
+      api(`/api/v1/jobs/${selectedJobId}/metrics?include=dimensions`),
     ]);
     jobs = jobs.map((item) => item.job_id === selectedJobId ? job : item);
     artifacts = artifactList;
@@ -223,9 +225,52 @@
     if (!selectedJob) return;
     try {
       const result = await api(`/api/v1/jobs/${selectedJob.job_id}/metrics/pull`, { method: 'POST' });
-      metricSnapshots = await api(`/api/v1/jobs/${selectedJob.job_id}/metrics`);
+      metricSnapshots = await api(`/api/v1/jobs/${selectedJob.job_id}/metrics?include=dimensions`);
       flash(`Metrics refreshed (${result.pulled || 0} snapshots)`);
     } catch (error) { errors = [error.message]; }
+  }
+
+  async function loadMetrics() {
+    try {
+      const params = new URLSearchParams();
+      if (metricFilterPlatform) params.set('platform', metricFilterPlatform);
+      const query = params.toString();
+      metricComparison = await api(`/api/v1/metrics/comparison${query ? '?' + query : ''}`);
+    } catch (error) { errors = [error.message]; }
+  }
+
+  function groupMetricPosts(snapshots) {
+    const posts = {};
+    for (const snapshot of snapshots || []) {
+      const key = `${snapshot.platform}:${snapshot.platform_post_id}`;
+      if (!posts[key]) posts[key] = [];
+      posts[key].push(snapshot);
+    }
+    return Object.values(posts).map((history) => ({
+      platform: history[0].platform,
+      platform_post_id: history[0].platform_post_id,
+      platform_url: history[history.length - 1].platform_url,
+      first: history[0],
+      latest: history[history.length - 1],
+    }));
+  }
+
+  function metricRows(post) {
+    const names = [...new Set([
+      ...(post.first.metrics ? Object.keys(post.first.metrics) : []),
+      ...(post.latest.metrics ? Object.keys(post.latest.metrics) : []),
+    ])];
+    return names.map((name) => {
+      const before = post.first.metrics?.[name];
+      const after = post.latest.metrics?.[name];
+      const delta = (typeof before === 'number' && typeof after === 'number') ? after - before : null;
+      return { name, value: after ?? before ?? null, delta };
+    });
+  }
+
+  function formatDelta(delta) {
+    if (delta === null || delta === undefined) return '—';
+    return delta > 0 ? '+' + delta : String(delta);
   }
 
   async function setView(view) {
@@ -233,6 +278,7 @@
     if (view === 'New Job') await loadSources();
     if (view === 'Uploads' && selectedJob) await loadJobDetails();
     if (view === 'Captions' && selectedJob) await loadTranscript();
+    if (view === 'Metrics') await loadMetrics();
     activeView = view;
   }
 
@@ -620,6 +666,29 @@
                 <div class="platform-row"><span class="platform-icon">{stage[0].toUpperCase()}</span><span>{stage}</span><span class="upload-pending">{selectedJob.checkpoints?.[stage]?.status}</span></div>
               {/each}
             </div>
+            <div class="metrics-panel">
+              <div class="platform-head"><span>METRICS</span><span>first → latest</span></div>
+              {#if !metricSnapshots.length}
+                <div class="empty-inline">No metrics yet. Pull fresh data to see engagement.</div>
+              {:else}
+                {#each groupMetricPosts(metricSnapshots) as post}
+                  <div class="metric-delta-card">
+                    <div class="metric-delta-head">
+                      <span class="platform-icon {post.platform}">{post.platform[0].toUpperCase()}</span>
+                      <b>{post.platform}</b>
+                      {#if post.platform_url}<a class="text-button" href={post.platform_url} target="_blank">View post</a>{/if}
+                    </div>
+                    {#if post.latest.unavailable}
+                      <small class="schedule-note">unavailable: {post.latest.unavailable_reason}</small>
+                    {:else}
+                      {#each metricRows(post) as row}
+                        <div class="metric-delta-row"><span>{row.name}</span><b>{row.value}</b><span class:delta-positive={row.delta > 0} class:delta-negative={row.delta < 0}>{formatDelta(row.delta)}</span></div>
+                      {/each}
+                    {/if}
+                  </div>
+                {/each}
+              {/if}
+            </div>
             {#if overallUploadPercent !== null}
               <div class="upload-overall">
                 <div class="upload-overall-label">Upload {overallUploadPercent}% overall</div>
@@ -725,6 +794,47 @@
           <span class="card-index">ARTIFACTS</span>{#each artifacts as artifact}<div class="saved-row"><div><b>{artifact.display_name || artifact.kind} · r{artifact.revision}</b><small>{artifact.state} · {artifact.sha256 || 'unavailable'}</small></div><a class="text-button" href={`/api/v1/jobs/${selectedJob.job_id}/artifacts/${artifact.id}/preview`} target="_blank">Preview</a><a class="text-button" href={`/api/v1/jobs/${selectedJob.job_id}/artifacts/${artifact.id}/download`}>Download</a><button class="quiet-action" onclick={() => renameArtifact(artifact)} aria-label="Rename artifact">✎</button><button class="quiet-action" onclick={() => deleteArtifact(artifact)} aria-label="Delete artifact">×</button></div>{/each}
         </div><div class="form-card"><span class="card-index">ATTEMPT HISTORY</span><div class="field-row"><label class="field-label">Status<select bind:value={uploadFilterStatus} onchange={applyUploadFilters}><option value="">All</option>{['pending', 'scheduled', 'running', 'published', 'failed', 'cancelled'].map((s) => `<option value="${s}">${s}</option>`).join('')}</select></label><label class="field-label">Platform<select bind:value={uploadFilterPlatform} onchange={applyUploadFilters}><option value="">All</option>{platforms.map((p) => `<option value="${p}">${p}</option>`).join('')}</select></label><label class="field-label">Since<input type="datetime-local" bind:value={uploadFilterSince} onchange={applyUploadFilters} /></label></div>{#each filteredUploadAttempts as attempt}<div class="saved-row"><div><b>{attempt.platform} · {attempt.status}</b><small>{attempt.configuration_snapshot?.content?.title} · {attempt.artifact_hash}</small>{#if scheduleLabel(attempt)}<small class="schedule-note">{scheduleLabel(attempt)}</small>{/if}{#if attemptUrl(attempt)}<a class="text-button" href={attemptUrl(attempt)} target="_blank">View post</a>{/if}</div><div class="attempt-progress">{#if uploadProgress[selectedJobId]?.[attempt.platform] !== undefined}<span class="attempt-progress-live">{uploadProgress[selectedJobId][attempt.platform]}%</span>{:else if attempt.result?.progress_percent !== undefined}<span class="attempt-progress-final">{attempt.result.progress_percent}%</span>{/if}</div>{#if attempt.status === 'failed'}<button class="text-button" onclick={() => retryUpload(attempt)}>Retry</button>{/if}</div>{/each}</div>
         <div class="form-card"><span class="card-index">METRICS</span>{#if !metricSnapshots.length}<div class="empty-inline">No metrics yet. Pull fresh data to see engagement.</div>{/if}{#each metricSnapshots as snapshot}<div class="saved-row"><div><b>{snapshot.platform} · {snapshot.captured_at}</b>{#if snapshot.unavailable}<small class="schedule-note">{snapshot.unavailable_reason}</small>{:else}<small>{Object.entries(snapshot.metrics || {}).map(([k, v]) => `${k}: ${v}`).join(' · ')}</small>{/if}</div></div>{/each}</div></div>{/if}
+      </section>
+
+    {:else if activeView === 'Metrics'}
+      <section class="form-page">
+        <div class="section-heading"><div><span class="section-kicker">Cross-job comparison</span><h2>Metrics</h2></div></div>
+        <div class="metric-filters">
+          <span class="card-index">PLATFORM</span>
+          {#each platforms as platform}
+            <button class="filter-chip" class:active={metricFilterPlatform === platform} onclick={() => { metricFilterPlatform = metricFilterPlatform === platform ? '' : platform; loadMetrics(); }}>{platform}</button>
+          {/each}
+        </div>
+        {#if !metricComparison.length}
+          <div class="empty-inline">No published posts with metrics yet.</div>
+        {:else}
+          <div class="metric-table-wrap">
+            <table class="metric-table">
+              <thead>
+                <tr><th>platform</th><th>title</th><th>duration</th><th>layout</th><th>views</th><th>likes</th><th>comments</th><th>views Δ</th><th>likes Δ</th></tr>
+              </thead>
+              <tbody>
+                {#each metricComparison as row}
+                  <tr class:unavailable={row.unavailable}>
+                    <td>{row.platform}</td>
+                    <td class="metric-title">{row.title || '—'}</td>
+                    <td>{row.duration_bucket}</td>
+                    <td>{row.layout_id || '—'}</td>
+                    {#if row.unavailable}
+                      <td colspan="5" class="metric-unavailable">unavailable: {row.unavailable_reason}</td>
+                    {:else}
+                      <td>{row.views ?? '—'}</td>
+                      <td>{row.likes ?? '—'}</td>
+                      <td>{row.comments ?? '—'}</td>
+                      <td class:delta-positive={row.views_delta > 0} class:delta-negative={row.views_delta < 0}>{formatDelta(row.views_delta)}</td>
+                      <td class:delta-positive={row.likes_delta > 0} class:delta-negative={row.likes_delta < 0}>{formatDelta(row.likes_delta)}</td>
+                    {/if}
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
       </section>
 
     {:else if activeView === 'Settings'}

@@ -8,9 +8,13 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
+from clipmorph.job import JobManifest
 from clipmorph.metrics import (
     append_snapshot,
     collect_platform_metrics,
+    compare_metrics,
+    duration_bucket,
+    join_dimensions,
     load_snapshots,
     _normalize_metrics,
     _TWITTER_UNAVAILABLE_REASON,
@@ -162,6 +166,271 @@ class MetricsCollectorTests(unittest.TestCase):
                 _retry_request(mock_get, "http://test")
 
         self.assertEqual(call_count, MAX_RETRIES)
+
+
+class MetricsDimensionJoinTests(unittest.TestCase):
+    def _manifest(self, **kwargs):
+        from clipmorph.job import JobManifest as Manifest
+        values = dict(
+            schema_version=3,
+            job_id="test-job",
+            source_path="/tmp/clip.mp4",
+            source_sha256="abc",
+            configuration={},
+        )
+        values.update(kwargs)
+        return Manifest(**values)
+
+    def test_join_dimensions_reads_all_fields(self):
+        manifest = self._manifest(
+            configuration={"conversion": {
+                "layout_id": "layout-1",
+                "subtitles": {"renderer": "overlay"},
+            }},
+            upload_attempts=[{
+                "attempt_id": "a1",
+                "platform": "youtube",
+                "artifact_id": "1",
+                "configuration_snapshot": {
+                    "upload": {"content": {"title": "My Title"}},
+                },
+                "result": {"platform_post_id": "yt123"},
+            }],
+            artifacts={"1": {"duration_seconds": 45}},
+        )
+        snapshot = {
+            "platform": "youtube",
+            "platform_post_id": "yt123",
+            "duration_seconds": 45,
+        }
+        result = join_dimensions(snapshot, manifest)
+        self.assertEqual(result["duration_seconds"], 45)
+        self.assertEqual(result["title"], "My Title")
+        self.assertEqual(result["layout_id"], "layout-1")
+        self.assertEqual(result["subtitles_renderer"], "overlay")
+        self.assertIsNone(result["platform_overrides"])
+
+    def test_join_dimensions_duration_falls_back_to_artifact(self):
+        manifest = self._manifest(
+            upload_attempts=[{
+                "attempt_id": "a1",
+                "platform": "youtube",
+                "artifact_id": "1",
+                "configuration_snapshot": {},
+                "result": {"platform_post_id": "yt123"},
+            }],
+            artifacts={"1": {"duration_seconds": 90}},
+        )
+        snapshot = {
+            "platform": "youtube",
+            "platform_post_id": "yt123",
+            "duration_seconds": None,
+        }
+        result = join_dimensions(snapshot, manifest)
+        self.assertEqual(result["duration_seconds"], 90)
+
+    def test_join_dimensions_missing_artifact_duration_none(self):
+        manifest = self._manifest(
+            upload_attempts=[{
+                "attempt_id": "a1",
+                "platform": "youtube",
+                "artifact_id": "1",
+                "configuration_snapshot": {},
+                "result": {"platform_post_id": "yt123"},
+            }],
+            artifacts={},
+        )
+        snapshot = {
+            "platform": "youtube",
+            "platform_post_id": "yt123",
+            "duration_seconds": None,
+        }
+        result = join_dimensions(snapshot, manifest)
+        self.assertIsNone(result["duration_seconds"])
+
+    def test_join_dimensions_missing_title(self):
+        manifest = self._manifest(
+            upload_attempts=[{
+                "attempt_id": "a1",
+                "platform": "youtube",
+                "artifact_id": "1",
+                "configuration_snapshot": {},
+                "result": {"platform_post_id": "yt123"},
+            }],
+        )
+        snapshot = {"platform": "youtube", "platform_post_id": "yt123"}
+        result = join_dimensions(snapshot, manifest)
+        self.assertIsNone(result["title"])
+
+    def test_join_dimensions_unknown_post(self):
+        manifest = self._manifest()
+        snapshot = {"platform": "youtube", "platform_post_id": "unknown"}
+        result = join_dimensions(snapshot, manifest)
+        self.assertIsNone(result["duration_seconds"])
+        self.assertIsNone(result["title"])
+        self.assertIsNone(result["layout_id"])
+        self.assertIsNone(result["subtitles_renderer"])
+
+
+class DurationBucketTests(unittest.TestCase):
+    def test_boundaries(self):
+        self.assertEqual(duration_bucket(29), "<30s")
+        self.assertEqual(duration_bucket(30), "[30,60)")
+        self.assertEqual(duration_bucket(59), "[30,60)")
+        self.assertEqual(duration_bucket(60), "[60,180)")
+        self.assertEqual(duration_bucket(179), "[60,180)")
+        self.assertEqual(duration_bucket(180), ">180s")
+        self.assertEqual(duration_bucket(181), ">180s")
+
+    def test_none_is_unknown(self):
+        self.assertEqual(duration_bucket(None), "unknown")
+
+
+class CompareMetricsTests(unittest.TestCase):
+    def _seed_job(self, job_dir, snapshots, configuration=None,
+                  attempts=None, artifacts=None):
+        manifest = JobManifest(
+            schema_version=3,
+            job_id=job_dir.name,
+            source_path="/tmp/clip.mp4",
+            source_sha256="abc",
+            configuration=configuration or {},
+            upload_attempts=attempts or [],
+            artifacts=artifacts or {},
+        )
+        manifest.save(job_dir.parent)
+        for record in snapshots:
+            append_snapshot(job_dir, record)
+
+    def test_empty_state_no_jobs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rows = compare_metrics(Path(temp_dir) / "jobs")
+            self.assertEqual(rows, [])
+
+    def test_latest_snapshot_only_and_deltas(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            jobs_dir = Path(temp_dir) / "jobs"
+            job_dir = jobs_dir / "job1"
+            job_dir.mkdir(parents=True)
+            attempts = [{
+                "attempt_id": "a1",
+                "platform": "youtube",
+                "artifact_id": "1",
+                "configuration_snapshot": {
+                    "upload": {"content": {"title": "Clip"}},
+                },
+                "result": {"platform_post_id": "yt123"},
+            }]
+            self._seed_job(job_dir, [
+                {"captured_at": "2026-01-01T00:00:00+00:00",
+                 "platform": "youtube", "platform_post_id": "yt123",
+                 "metrics": {"views": 100, "likes": 10},
+                 "unavailable": False, "unavailable_reason": None},
+                {"captured_at": "2026-01-02T00:00:00+00:00",
+                 "platform": "youtube", "platform_post_id": "yt123",
+                 "metrics": {"views": 150, "likes": 15},
+                 "unavailable": False, "unavailable_reason": None},
+            ], configuration={"conversion": {
+                "layout_id": "l1", "subtitles": {"renderer": "overlay"}}},
+                attempts=attempts, artifacts={"1": {"duration_seconds": 45}})
+
+            rows = compare_metrics(jobs_dir)
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            self.assertEqual(row["platform"], "youtube")
+            self.assertEqual(row["views"], 150)
+            self.assertEqual(row["likes"], 15)
+            self.assertEqual(row["views_delta"], 50)
+            self.assertEqual(row["likes_delta"], 5)
+            self.assertEqual(row["duration_bucket"], "[30,60)")
+            self.assertEqual(row["title"], "Clip")
+            self.assertEqual(row["layout_id"], "l1")
+            self.assertEqual(row["subtitles_renderer"], "overlay")
+
+    def test_single_snapshot_delta_zero(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            jobs_dir = Path(temp_dir) / "jobs"
+            job_dir = jobs_dir / "job1"
+            job_dir.mkdir(parents=True)
+            self._seed_job(job_dir, [
+                {"captured_at": "2026-01-01T00:00:00+00:00",
+                 "platform": "youtube", "platform_post_id": "yt123",
+                 "metrics": {"views": 100},
+                 "unavailable": False, "unavailable_reason": None},
+            ])
+            rows = compare_metrics(jobs_dir)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["views_delta"], 0)
+
+    def test_platform_filter(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            jobs_dir = Path(temp_dir) / "jobs"
+            for job_name, platform in [("job1", "youtube"), ("job2", "twitter")]:
+                job_dir = jobs_dir / job_name
+                job_dir.mkdir(parents=True)
+                self._seed_job(job_dir, [
+                    {"captured_at": "2026-01-01T00:00:00+00:00",
+                     "platform": platform, "platform_post_id": "post1",
+                     "metrics": {"views": 10},
+                     "unavailable": False, "unavailable_reason": None},
+                ])
+            rows = compare_metrics(jobs_dir, platform="youtube")
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["platform"], "youtube")
+
+    def test_limit_bounds_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            jobs_dir = Path(temp_dir) / "jobs"
+            job_dir = jobs_dir / "job1"
+            job_dir.mkdir(parents=True)
+            snapshots = [
+                {"captured_at": f"2026-01-0{i + 1}T00:00:00+00:00",
+                 "platform": "youtube", "platform_post_id": f"yt{i}",
+                 "metrics": {"views": i},
+                 "unavailable": False, "unavailable_reason": None}
+                for i in range(5)
+            ]
+            self._seed_job(job_dir, snapshots)
+            rows = compare_metrics(jobs_dir, limit=3)
+            self.assertEqual(len(rows), 3)
+
+    def test_sorted_by_captured_at_desc(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            jobs_dir = Path(temp_dir) / "jobs"
+            job_dir = jobs_dir / "job1"
+            job_dir.mkdir(parents=True)
+            self._seed_job(job_dir, [
+                {"captured_at": "2026-01-01T00:00:00+00:00",
+                 "platform": "youtube", "platform_post_id": "yt1",
+                 "metrics": {"views": 1}, "unavailable": False,
+                 "unavailable_reason": None},
+                {"captured_at": "2026-01-03T00:00:00+00:00",
+                 "platform": "youtube", "platform_post_id": "yt2",
+                 "metrics": {"views": 2}, "unavailable": False,
+                 "unavailable_reason": None},
+                {"captured_at": "2026-01-02T00:00:00+00:00",
+                 "platform": "youtube", "platform_post_id": "yt3",
+                 "metrics": {"views": 3}, "unavailable": False,
+                 "unavailable_reason": None},
+            ])
+            rows = compare_metrics(jobs_dir)
+            self.assertEqual([r["platform_post_id"] for r in rows],
+                             ["yt2", "yt3", "yt1"])
+
+    def test_unreadable_manifest_skipped(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            jobs_dir = Path(temp_dir) / "jobs"
+            job_dir = jobs_dir / "job1"
+            job_dir.mkdir(parents=True)
+            (job_dir / "manifest.json").write_text("not json", encoding="utf-8")
+            append_snapshot(job_dir, {
+                "captured_at": "2026-01-01T00:00:00+00:00",
+                "platform": "youtube", "platform_post_id": "yt1",
+                "metrics": {"views": 1}, "unavailable": False,
+                "unavailable_reason": None,
+            })
+            rows = compare_metrics(jobs_dir)
+            self.assertEqual(rows, [])
 
 
 if __name__ == "__main__":

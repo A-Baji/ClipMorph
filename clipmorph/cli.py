@@ -431,6 +431,11 @@ layout_app = typer.Typer(no_args_is_help=False,
                          help="Manage the global layout registry.")
 
 
+metrics_app = typer.Typer(no_args_is_help=False,
+                          context_settings=HELP_CONTEXT_SETTINGS,
+                          help="Compare engagement metrics across jobs.")
+
+
 def _registered_artifact(manifest: Any, artifact_id: str) -> dict[str, Any]:
     """Return one registered artifact record or report a missing one."""
     artifact = manifest.artifacts.get(artifact_id)
@@ -1051,10 +1056,14 @@ def job_metrics_command(
         job_id: Annotated[str, typer.Argument(help="Job ID.")],
         pull: Annotated[bool, typer.Option(
             "--pull", help="Pull fresh metrics from platforms before listing.")] = False,
+        dimensions: Annotated[bool, typer.Option(
+            "--dimensions",
+            help="Join each snapshot to its manifest dimensions.")] = False,
         json_output: JsonOption = False,
         data_dir: DataDirOption = None,
         app_config: AppConfigOption = None) -> None:
     """List a job's metric snapshots, optionally pulling fresh data first."""
+    from clipmorph.metrics import join_dimensions
     from clipmorph.service import JobService
 
     selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
@@ -1063,16 +1072,53 @@ def job_metrics_command(
         if pull:
             service.pull_metrics(job_id)
         snapshots = service.list_metrics(job_id)
+        if dimensions:
+            manifest = service.get_job(job_id)
+            snapshots = [{**record, **join_dimensions(record, manifest)}
+                         for record in snapshots]
     if json_output:
         _print_json(snapshots)
         return
+    columns = ["platform", "captured_at", "unavailable", "metrics"]
+    if dimensions:
+        columns = columns + ["duration_seconds", "title", "layout_id",
+                             "subtitles_renderer"]
     _print_table(f"Metrics for job {job_id}", [{
         "platform": record.get("platform"),
         "captured_at": record.get("captured_at"),
         "unavailable": record.get("unavailable"),
         "metrics": record.get("metrics"),
-    } for record in snapshots],
-        ["platform", "captured_at", "unavailable", "metrics"])
+    } for record in snapshots], columns)
+
+
+@metrics_app.command("compare")
+def metrics_compare_command(
+        ctx: typer.Context,
+        platform: Annotated[Optional[str], typer.Option(
+            "--platform", help="Keep only rows for this platform.")] = None,
+        limit: Annotated[int, typer.Option(
+            "--limit", help="Maximum number of rows to print (1-500).")] = 100,
+        json_output: JsonOption = False,
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """Compare published posts across jobs from stored snapshots."""
+    from clipmorph.metrics import compare_metrics
+    from clipmorph.platforms import is_supported_platform
+
+    if platform is not None and not is_supported_platform(platform):
+        raise ValueError(f"unsupported platform: {platform}")
+    if not 1 <= limit <= 500:
+        raise ValueError("limit must be between 1 and 500")
+    selected_data_dir, _ = _resolve_paths(ctx, data_dir, app_config)
+    rows = compare_metrics(selected_data_dir / "jobs",
+                           platform=platform.lower() if platform else None,
+                           limit=limit)
+    if json_output:
+        _print_json(rows)
+        return
+    _print_table("Metric comparison", rows,
+                 ["platform", "title", "duration_bucket", "layout_id",
+                  "views", "likes", "comments", "views_delta", "likes_delta"])
 
 
 @job_app.command("cancel-scheduled")
@@ -1230,6 +1276,7 @@ def artifacts_prune_command(
 app.add_typer(auth_app, name="auth")
 app.add_typer(job_app, name="job")
 app.add_typer(layout_app, name="layout")
+app.add_typer(metrics_app, name="metrics")
 job_app.add_typer(artifact_app, name="artifacts")
 
 _command: Any = None

@@ -17,6 +17,7 @@ from unittest.mock import patch
 from clipmorph.cli import run_cli
 from clipmorph.configuration import save_app_configuration
 from clipmorph.job import JobManifest
+from clipmorph.metrics import append_snapshot
 from clipmorph.service import JobService
 
 # rich reads COLUMNS when stdout is not a terminal, so table assertions can
@@ -748,6 +749,109 @@ class CliMetricsTests(unittest.TestCase):
             self.assertEqual(code, 0)
             pull.assert_called_once_with(manifest.job_id)
             self.assertEqual(records, [])
+
+    def _seed_snapshot(self, data_dir, manifest, **overrides):
+        record = {
+            "captured_at": "2026-01-01T00:00:00+00:00",
+            "platform": "youtube",
+            "platform_post_id": "yt123",
+            "metrics": {"views": 100},
+            "unavailable": False,
+            "unavailable_reason": None,
+        }
+        record.update(overrides)
+        append_snapshot(data_dir / "jobs" / manifest.job_id, record)
+
+    def test_job_metrics_dimensions_json(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            save_app_configuration(data_dir / "app.yml", {
+                "layouts": [{"id": "l1", "name": "L1", "layout": {}}],
+            })
+            manifest = seed_job(data_dir, configuration={
+                "conversion": {"layout_id": "l1",
+                               "subtitles": {"renderer": "overlay"}},
+            })
+            self._seed_snapshot(data_dir, manifest, duration_seconds=45)
+
+            code, records = invoke_json([
+                "--data-dir", str(data_dir), "job", "metrics",
+                manifest.job_id, "--dimensions"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(len(records), 1)
+            record = records[0]
+            self.assertEqual(record["layout_id"], "l1")
+            self.assertEqual(record["subtitles_renderer"], "overlay")
+            self.assertEqual(record["duration_seconds"], 45)
+            self.assertIsNone(record["platform_overrides"])
+
+    def test_job_metrics_dimensions_table(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest = seed_job(data_dir)
+            self._seed_snapshot(data_dir, manifest)
+
+            code, output = invoke([
+                "--data-dir", str(data_dir), "job", "metrics",
+                manifest.job_id, "--dimensions"])
+
+            self.assertEqual(code, 0)
+            self.assertIn("Metrics", output)
+            self.assertIn("layout id", output.lower())
+
+    def test_metrics_compare_empty_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+
+            code, records = invoke_json([
+                "--data-dir", str(data_dir), "metrics", "compare"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(records, [])
+
+    def test_metrics_compare_output_shape(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            save_app_configuration(data_dir / "app.yml", {
+                "layouts": [{"id": "l1", "name": "L1", "layout": {}}],
+            })
+            manifest = seed_job(data_dir, configuration={
+                "conversion": {"layout_id": "l1"},
+            })
+            self._seed_snapshot(data_dir, manifest, duration_seconds=45)
+
+            code, records = invoke_json([
+                "--data-dir", str(data_dir), "metrics", "compare"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(len(records), 1)
+            row = records[0]
+            self.assertEqual(row["platform"], "youtube")
+            self.assertEqual(row["duration_bucket"], "[30,60)")
+            self.assertEqual(row["layout_id"], "l1")
+            self.assertEqual(row["views"], 100)
+
+    def test_metrics_compare_limit_validation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+
+            code, _ = invoke([
+                "--data-dir", str(data_dir), "metrics", "compare", "--limit", "0"])
+            self.assertEqual(code, 2)
+
+            code, _ = invoke([
+                "--data-dir", str(data_dir), "metrics", "compare", "--limit", "600"])
+            self.assertEqual(code, 2)
+
+    def test_metrics_compare_platform_validation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+
+            code, _ = invoke([
+                "--data-dir", str(data_dir), "metrics", "compare",
+                "--platform", "unknown"])
+            self.assertEqual(code, 2)
 
 
 if __name__ == "__main__":

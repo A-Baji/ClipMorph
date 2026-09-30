@@ -36,7 +36,8 @@ GLOBAL_OPTIONS = ("--data-dir", "--app-config")
 # ``(name, required)`` pairs. ``--help`` is provided by the parser and omitted.
 COMMANDS: dict[tuple[str, ...], tuple[tuple[str, ...], tuple[str, ...],
                                      tuple[tuple[str, bool], ...]]] = {
-    (): (GLOBAL_OPTIONS, ("init", "web", "doctor", "auth", "job", "layout"), ()),
+    (): (GLOBAL_OPTIONS, ("init", "web", "doctor", "auth", "job", "layout",
+                           "metrics"), ()),
     ("init",): (("--config-path",) + GLOBAL_OPTIONS, (), ()),
     ("web",): (("--host", "--port") + GLOBAL_OPTIONS, (), ()),
     ("doctor",): (("--json", "--source") + GLOBAL_OPTIONS, (), ()),
@@ -68,7 +69,8 @@ COMMANDS: dict[tuple[str, ...], tuple[tuple[str, ...], tuple[str, ...],
                         + GLOBAL_OPTIONS, (), (("upload_args", False),)),
     ("job", "uploads"): (("--status", "--platform", "--since", "--json")
                          + GLOBAL_OPTIONS, (), (("job_id", True),)),
-    ("job", "metrics"): (("--pull", "--json") + GLOBAL_OPTIONS, (),
+    ("job", "metrics"): (("--pull", "--dimensions", "--json") + GLOBAL_OPTIONS,
+                          (),
                          (("job_id", True),)),
     ("job", "cancel-scheduled"): (("--json",) + GLOBAL_OPTIONS, (),
                                   (("job_id", True), ("attempt_id", True))),
@@ -92,6 +94,9 @@ COMMANDS: dict[tuple[str, ...], tuple[tuple[str, ...], tuple[str, ...],
                            (("configuration", True),)),
     ("layout", "get"): (("--json",) + GLOBAL_OPTIONS, (), (("layout_id", True),)),
     ("layout", "delete"): (("--yes",) + GLOBAL_OPTIONS, (), (("layout_id", True),)),
+    ("metrics",): ((), ("compare",), ()),
+    ("metrics", "compare"): (("--platform", "--limit", "--json") + GLOBAL_OPTIONS,
+                             (), ()),
 }
 
 # typer 0.27 renders the upload argument's metavar in the Arguments panel where
