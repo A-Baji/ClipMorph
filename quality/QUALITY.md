@@ -20,7 +20,7 @@ Quality means a creator can trust that a job's media, credentials, lifecycle sta
 2. Cancel during conversion: partial artifact and status are explicit.
 3. CLI/web same manifest: effective config and policy decisions match (`__main__.py`, `workflow.py`).
 4. YAML false/list override: explicit config is not lost (`cli.py:106-121`).
-5. Out-of-order platform results: one failure does not erase another success (`job.py:127-136`).
+5. Out-of-order platform results: one failure does not erase another success (`service.py` `_run_upload_attempts`).
 6. Retry one failed platform: previously successful platforms remain complete.
 7. Caption limit: transformed caption is the value sent (`policy.py:104-110`).
 8. Resume changed source: path/hash mismatch is rejected (`__main__.py:105-112`).

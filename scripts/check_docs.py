@@ -4,6 +4,7 @@ Detects problems that caused silent doc corruption before:
 1. Relative link targets that resolve to missing files.
 2. Mojibake sequences left by encoding double-decodes.
 3. Duplicated adjacent bullet/line fragments.
+4. README instructions referencing CLI flags the CLI no longer offers.
 
 Exits 0 when all checked markdown is clean; prints each problem and exits 1
 otherwise. Run with `python scripts/check_docs.py`.
@@ -67,11 +68,56 @@ def check_file(path: Path, problems: list[str]) -> None:
                 f"(repeats line {number - 1})")
         previous = stripped
 
+README_FLAG_RE = re.compile(r"(?<![\w-])--([a-z0-9][a-z0-9-]*)")
+
+
+def offered_cli_flags() -> set[str] | None:
+    """Flatten every long option the typer CLI currently offers.
+
+    Returns None when CLI introspection is unavailable (e.g. clipmorph not
+    importable where the docs check runs); the caller skips then.
+    """
+    try:
+        import typer
+        from clipmorph.cli import app
+
+        root = typer.main.get_command(app)
+    except Exception:  # noqa: BLE001 - skip the check when import fails
+        return None
+
+    flags: set[str] = set()
+
+    def walk(command) -> None:
+        for option in getattr(command, "params", []) or []:
+            flags.update(name for name in option.opts if name.startswith("--"))
+        commands = getattr(command, "commands", None) or {}
+        for sub in commands.values():
+            walk(sub)
+
+    walk(root)
+    return flags
+
+
+def check_readme_flags(problems: list[str]) -> None:
+    """README flag tokens must be flags the CLI actually serves (#227)."""
+    flags = offered_cli_flags()
+    if flags is None:
+        return
+    readme = REPO_ROOT / "README.md"
+    text = readme.read_text(encoding="utf-8")
+    referenced = {f"--{name}" for name in README_FLAG_RE.findall(text)}
+    unknown = sorted(referenced - flags)
+    if unknown:
+        problems.append(
+            "README.md references CLI flags the CLI does not offer: "
+            + ", ".join(unknown))
+
 
 def main() -> int:
     problems: list[str] = []
     for path in checked_files():
         check_file(path, problems)
+    check_readme_flags(problems)
     for problem in problems:
         print(f"docs check: {problem}")
     if not problems:
