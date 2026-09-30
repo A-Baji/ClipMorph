@@ -276,6 +276,19 @@ class BaseUploadPipeline(ABC):
         """
         return None
 
+    def cancel_scheduled_post(self, platform_post_id: str) -> None:
+        """Remove a future publication the platform is holding for this job.
+
+        Opt-in per platform, because only the platform can undo a native
+        scheduled publication: the default raises so a platform that never
+        implemented the hook is reported instead of silently leaving a live
+        post behind. An implementation should be idempotent enough to retry
+        (a post that is already gone counts as cancelled) and should raise
+        only when the post is still there.
+        """
+        raise NotImplementedError(
+            f"{self.platform_name} cannot cancel a scheduled post")
+
     def _validate_required_attributes(self):
         """
         Validate that required attributes are set by subclasses.

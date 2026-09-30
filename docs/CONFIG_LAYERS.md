@@ -145,6 +145,7 @@ upload:
   schedule:
     publish_at: null              # ISO-8601 instant; a future value defers the upload instead of running it now
     timezone: null
+    mode: null                    # local | platform; null = local. "platform" asks the platform to hold the publication
   content:
     title: ''
     description: ''
@@ -167,6 +168,31 @@ for them to sit at the top level next to `general`/`conversion`.
 platforms participate, exactly the concern `upload.platforms` already owns,
 and `include`/`exclude` says what they do without needing the CLI's
 original flag names as context.
+
+`upload.schedule.mode` decides **who holds** a future publication: `local`
+(the default, and the value an absent `mode` reads as) keeps ClipMorph's
+in-process timer, `platform` uploads at submission time and asks the platform
+to hold the publication itself. It is inert without a deferred upload — no
+`publish_at`, or one that is not in the future, uploads immediately whatever
+`mode` says. It is one string for the whole job, not a per-platform map:
+platform eligibility is not a configuration question, so a submission whose
+selected platforms cannot hold the publication is refused outright rather
+than partially honoured:
+
+```text
+upload.schedule.mode platform is not enabled for: <platforms>
+See quality/research/scheduling_probe.py — run it with sandbox tokens, then
+flip `SUPPORTED_NATIVE_SCHEDULING` in clipmorph/platforms.py.
+```
+
+The gate is `clipmorph/platforms.py::SUPPORTED_NATIVE_SCHEDULING`, one entry
+per supported platform, and every entry ships `false` because a platform is
+only marked capable after the maintainer's sandbox probe has observed a full
+schedule → inspect → cancel cycle on the real API. `docs/PLATFORM_CAPABILITIES.md`
+carries the per-platform probe status next to the parameter each adapter sends,
+and the two change in the same commit. The strict error is deliberate: silently
+falling back to ClipMorph's own timer would publish at a different time than the
+one the user asked for and record the wrong `scheduled_via` history.
 
 `no_conversion` (renamed `conversion.skip`) moves from `general` into
 `conversion` — it's the direct parallel of `upload.skip` (skip this
@@ -684,6 +710,24 @@ fired. The submission-side dedup guard rejects a new submission when the same
 platform already holds an active (`pending`, `scheduled`, or `running`)
 attempt for the same artifact bytes and content hash.
 
+A deferred attempt records who owns its publication in `scheduled_via`
+(`local` or `platform`), written when the attempt is created and never
+back-filled by a loader. `local` attempts behave as above: an in-process timer
+fires the upload and the attempt ends `published` or `failed`. `platform`
+attempts are uploaded at submission time — the upload lands while the platform
+holds the future publication — and the attempt therefore *stays* `scheduled`
+after a successful worker pass, with `platform_post_id`, `platform_url`,
+`scheduled_publish_at`, and a message recording that the platform holds it.
+Recording `published` here would claim a visibility only the platform can
+confirm; the flip happens when the platform publishes. The upload checkpoint
+still reaches a terminal state after that pass, because restart
+reconciliation would otherwise treat the checkpoint as interrupted work and
+re-upload content the platform already holds. A platform-scheduled attempt
+holds no local timer, so it is excluded from re-arm and from the
+"still waiting on a future instant" test; a crash in the gap between the
+platform accepting the upload and the attempt recording it is healed from
+platform state on the next service construction (below).
+
 ### Invalidation And Retry Rules
 
 Checkpoint input hashes are derived from these dependencies:
@@ -743,8 +787,20 @@ A `running` upload checkpoint whose every `scheduled` attempt waits on a
 future `publish_at` is deliberately left alone — that is a deferral waiting on a
 timer, not a stall, and reconciliation would otherwise cancel a schedule the
 restart was supposed to keep. A past-due `scheduled` attempt is healed as an
-interrupted failure, never published unattended. Reconciliation runs before
-the re-arm scan, so genuinely scheduled attempts get their timers back.
+interrupted failure, never published unattended. A platform-scheduled attempt
+is the one exception to both rules: it is not waiting on this process, so a
+`running` upload checkpoint holding only such attempts is interrupted work. If
+a platform-scheduled attempt with no recorded result is attached to that
+checkpoint, reconciliation first settles it from platform state through the
+adapter's existing-post lookup — a post that is there completes the attempt as
+`published` with its id and URL, and no post marks it `failed` with a retryable
+`platform_schedule_unconfirmed` note, so the user's ordinary retry is both the
+re-upload and the refresh. The healed count is logged at startup. The
+checkpoint itself then fails as interrupted work, because that worker pass
+really did not finish; the attempt row is the source of truth for what the
+platform holds, so a job never reads as published on the strength of a post
+ClipMorph merely believes is out there. Reconciliation runs before the re-arm
+scan, so genuinely scheduled local attempts get their timers back.
 
 The manifest is the only input: no attempt is resumed automatically, and no
 remote upload is repeated without an explicit user action. Because
@@ -768,6 +824,7 @@ the same `JobService` transitions as the web API. The web contract is:
 | Resume/retry | `POST /api/v1/jobs/{id}/resume`; `POST /api/v1/jobs/{id}/checkpoints/{stage}/retry` | Resume earliest executable checkpoint; return conflict if review is required; retries append attempt/error history |
 | Artifacts | `GET/PATCH/DELETE /api/v1/jobs/{id}/artifacts/{artifact_id}` | Patch display metadata only; delete local bytes after confirmation and retain a tombstone |
 | Upload history/start/retry | `GET /api/v1/jobs/{id}/uploads`; `POST /api/v1/jobs/{id}/upload`; `POST /api/v1/jobs/{id}/uploads/{platform}/retry` | Retry requires `attempt_id`; if its artifact is no longer current, require matching `artifact_id` and `confirm_historical_artifact: true` |
+| Cancel one scheduled attempt | `DELETE /api/v1/jobs/{id}/scheduled/{attempt_id}` | `202` with the cancelled attempt; `404` for an unknown attempt, `422` when it is not `scheduled`. A local attempt is disarmed and its surviving batch members re-armed; a platform-scheduled attempt is deleted on the platform first, and a refusal leaves it `scheduled` with a `platform_cancel_failed` note |
 
 Mutations accept an expected checkpoint/configuration revision and return
 `409 Conflict` on concurrent edits or illegal transitions. Validation failures
@@ -795,6 +852,16 @@ configuration resolver.
   platform-side existing-post detection, and filterable history. A past-due
   `scheduled` attempt at service startup is healed as an interrupted failure,
   never published unattended.
+- `upload.schedule.mode: platform` uploads at submission time and lets the
+  platform hold the future publication. It is inert without a future
+  `publish_at`, is refused outright (before any attempt exists) for a platform
+  the registry has not blessed, and ships disabled for every platform until the
+  maintainer's sandbox probe runs. A successful attempt stays `scheduled`
+  because the platform still holds the post; the strictness is the point, since
+  a silent fallback to the local timer would publish at a time the user did not
+  choose. See [PLATFORM_CAPABILITIES.md](PLATFORM_CAPABILITIES.md) for the
+  per-platform probe status and
+  [CLI_WEB_PARITY.md](CLI_WEB_PARITY.md) for the cancel surface.
 - Whether multi-job groups ever become save-able presets later is deferred;
   today they are ephemeral execution groups.
 

@@ -18,10 +18,12 @@ from clipmorph.cli import summarize_runtime_configuration
 from clipmorph.platforms import (
     PLATFORM_DEFAULT_CONFIG,
     PLATFORM_TITLE,
+    SUPPORTED_NATIVE_SCHEDULING,
     SUPPORTED_PLATFORMS,
     build_platform_default_config,
     enabled_platforms,
     is_supported_platform,
+    native_scheduling_support,
 )
 from clipmorph.policy import CAPABILITY_MATRIX
 from clipmorph.preflight import PLATFORM_CREDENTIALS
@@ -34,8 +36,13 @@ FRONTEND_APP = REPO_ROOT / "frontend" / "src" / "App.svelte"
 WEB_MODULE = REPO_ROOT / "clipmorph" / "web.py"
 ADAPTER_DIRECTORY = REPO_ROOT / "clipmorph" / "upload_pipeline" / "platforms"
 ADAPTER_PACKAGE = "clipmorph.upload_pipeline.platforms"
+PROBE_SCRIPT = REPO_ROOT / "quality" / "research" / "scheduling_probe.py"
 METADATA_HEADING = "## Upload metadata rules"
 METADATA_SECTION = (METADATA_HEADING, "## Dynamic account rules")
+NATIVE_SCHEDULING_HEADING = "## Native publish scheduling"
+# A blessed platform records the probe date in its capability cell; a disabled
+# one records none, so the two cannot be confused.
+PROBE_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 # The parity contract is pinned to its CLI section: an API row may stay generic.
 CLI_CONTRACT_SECTION = ("## CLI Contract", "## API Contract")
 # Guide status markers: "- [x] youtube" ticks, "- [ ] facebook (...)" does not.
@@ -67,6 +74,18 @@ def documented_content_modes(path: Path, heading: str) -> dict[str, str]:
                 and not set(cells[0]) <= {"-"}:
             modes[cells[0]] = cells[1]
     return modes
+
+
+def documented_native_scheduling(path: Path, heading: str) -> dict[str, str]:
+    """Return each platform row's native-scheduling cell from a doc table."""
+    section = path.read_text(encoding="utf-8").split(heading, 1)[1]
+    cells_by_platform = {}
+    for line in section.split("\n## ", 1)[0].splitlines():
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) == 4 and cells[0] != "Platform" \
+                and not set(cells[0]) <= {"-"}:
+            cells_by_platform[cells[0]] = cells[1]
+    return cells_by_platform
 
 
 class PlatformRegistryTests(unittest.TestCase):
@@ -126,6 +145,72 @@ class PlatformRegistryTests(unittest.TestCase):
         self.assertEqual(summary["youtube"]["privacy_status"], "private")
         self.assertEqual(summary["youtube"]["category"], "20")
         self.assertEqual(summary["tiktok"]["privacy_level"], "SELF_ONLY")
+
+
+class NativeSchedulingRegistryTests(unittest.TestCase):
+    """`upload.schedule.mode: platform` may only name a probed platform.
+
+    The registry is a single source of truth gated on a maintainer probe, so
+    the failure this guards against is claiming a capability the platform has
+    not demonstrated: a flipped entry with no probe, or a doc that keeps
+    advertising a mode the registry will refuse.
+    """
+
+    def test_registry_covers_every_supported_platform(self):
+        self.assertEqual(set(SUPPORTED_NATIVE_SCHEDULING),
+                         set(SUPPORTED_PLATFORMS))
+
+    def test_helper_mirrors_the_registry_and_rejects_unknown_platforms(self):
+        for platform in SUPPORTED_PLATFORMS:
+            with self.subTest(platform=platform):
+                self.assertEqual(native_scheduling_support(platform),
+                                 SUPPORTED_NATIVE_SCHEDULING[platform])
+        self.assertFalse(native_scheduling_support("facebook"))
+
+    def test_every_platform_ships_disabled_until_the_probe_runs(self):
+        for platform, enabled in SUPPORTED_NATIVE_SCHEDULING.items():
+            with self.subTest(platform=platform):
+                self.assertFalse(
+                    enabled,
+                    f"platform '{platform}' is marked as holding a native "
+                    "publication; run quality/research/scheduling_probe.py "
+                    "first, then flip the registry and the capability doc "
+                    "together")
+
+    def test_capability_doc_cell_matches_the_registry(self):
+        cells = documented_native_scheduling(CAPABILITIES_DOC,
+                                             NATIVE_SCHEDULING_HEADING)
+        for platform in SUPPORTED_PLATFORMS:
+            with self.subTest(platform=platform):
+                if platform not in cells:
+                    self.fail(
+                        f"platform '{platform}' missing from "
+                        f"'{repo_relative(CAPABILITIES_DOC)}' "
+                        f"{NATIVE_SCHEDULING_HEADING} table")
+                cell = cells[platform]
+                enabled = SUPPORTED_NATIVE_SCHEDULING[platform]
+                if enabled:
+                    self.assertIn("Enabled", cell)
+                    self.assertTrue(
+                        PROBE_DATE.search(cell),
+                        f"an enabled '{platform}' row must record the probe "
+                        f"date; found {cell!r}")
+                else:
+                    self.assertNotIn("Enabled", cell)
+                    self.assertIsNone(
+                        PROBE_DATE.search(cell),
+                        f"'{platform}' is disabled in the registry, so its row "
+                        f"must not claim a probe date; found {cell!r}")
+
+    def test_probe_script_and_registry_doc_contract_stay_linked(self):
+        # The gate is only actionable if the probe the error message names
+        # exists and still tells the maintainer which two places to change.
+        self.assertTrue(PROBE_SCRIPT.is_file(),
+                        f"{repo_relative(PROBE_SCRIPT)} must exist: the "
+                        "submission error points maintainers at it")
+        probe = PROBE_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("SUPPORTED_NATIVE_SCHEDULING", probe)
+        self.assertIn(NATIVE_SCHEDULING_HEADING.lstrip("# "), probe)
 
 
 class PlatformCoverageDriftTests(unittest.TestCase):

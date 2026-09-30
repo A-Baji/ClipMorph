@@ -35,13 +35,19 @@ when these markers and the registry disagree, in either direction.
 
 1. **Registry — `clipmorph/platforms.py`.** Add the platform id to
    `SUPPORTED_PLATFORMS` (`SUPPORTED_PLATFORMS_SET` derives from it), add
-   `PLATFORM_TITLE` for the display name that surfaces render, and add
+   `PLATFORM_TITLE` for the display name that surfaces render, add
    `PLATFORM_DEFAULT_CONFIG` in the same order as the tuple, using `{}` when
-   the platform has no plain defaults. Config validation, the CLI, and the
-   service all read the registry, so there is no second platform list to edit.
+   the platform has no plain defaults, and add
+   `SUPPORTED_NATIVE_SCHEDULING` in the same order. Config validation, the CLI,
+   and the service all read the registry, so there is no second platform list to
+   edit. A new `SUPPORTED_NATIVE_SCHEDULING` entry ships `False`: the platform
+   may only be marked capable of holding a future publication after
+   `quality/research/scheduling_probe.py` has passed against its live API, and
+   that flip changes the registry and the capability doc together.
    *Fails without it:*
-   `PlatformCoverageDriftTests.test_registry_declares_title_and_defaults_for_every_platform`
-   and `PlatformRegistryTests.test_defaults_cover_every_supported_platform`.
+   `PlatformCoverageDriftTests.test_registry_declares_title_and_defaults_for_every_platform`,
+   `PlatformRegistryTests.test_defaults_cover_every_supported_platform`, and
+   `NativeSchedulingRegistryTests.test_registry_covers_every_supported_platform`.
 
 2. **Capability rule — `clipmorph/policy.py`.** Add a `CapabilityRule` to
    `CAPABILITY_MATRIX`: the duration, size, and codec bounds the platform
@@ -89,15 +95,18 @@ when these markers and the registry disagree, in either direction.
 
 5. **Policy docs — `docs/PLATFORM_CAPABILITIES.md`.** Add a row to the static
    artifact rules table linking the platform's own API or product
-   documentation, and a row to the upload metadata rules table with its
+   documentation, a row to the upload metadata rules table with its
    `content_mode`, `output_keys`, and `caption_limit`; that table mirrors
-   `CAPABILITY_MATRIX`. A new or changed rule also moves `POLICY_VERSION` in
+   `CAPABILITY_MATRIX`, and a row to the native publish scheduling table naming
+   whether the platform can hold a future publication and which adapter
+   parameter does it. A new or changed rule also moves `POLICY_VERSION` in
    `clipmorph/policy.py` and the document's "Last reviewed" line to the same
    publication date, because the runtime reports that date as the policy
    version.
    *Fails without it:*
-   `PlatformCoverageDriftTests.test_capability_doc_documents_every_platform` and
-   `tests/test_policy_metadata.py::DocumentedMetadataRuleTests`.
+   `PlatformCoverageDriftTests.test_capability_doc_documents_every_platform`,
+   `tests/test_policy_metadata.py::DocumentedMetadataRuleTests`, and
+   `NativeSchedulingRegistryTests.test_capability_doc_cell_matches_the_registry`.
 
 6. **Parity — `docs/CLI_WEB_PARITY.md`.** Name the platform id in the CLI
    upload row so the contract covers it, pointing at `SUPPORTED_PLATFORMS` as

@@ -16,6 +16,7 @@ from clipmorph.configuration import discover_source_names, load_app_configuratio
 from clipmorph.configuration import save_app_configuration
 from clipmorph.job import default_data_dir, resolve_output_dir
 from clipmorph.service import JobService
+from clipmorph.service import UnknownUploadAttempt
 
 try:
     from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -464,6 +465,17 @@ def create_app(data_dir: str | Path | None = None,
                 bool(payload.get("confirm_historical_artifact", False)))
         except FileNotFoundError:
             fail(404, "not_found", "job not found")
+        except ValueError as error:
+            service_failure(error)
+
+    @app.delete("/api/v1/jobs/{job_id}/scheduled/{attempt_id}", status_code=202)
+    def cancel_scheduled_upload(job_id: str, attempt_id: str):
+        try:
+            return service.cancel_scheduled_upload(job_id, attempt_id)
+        except FileNotFoundError:
+            fail(404, "not_found", "job not found")
+        except UnknownUploadAttempt as error:
+            fail(404, "not_found", str(error))
         except ValueError as error:
             service_failure(error)
 

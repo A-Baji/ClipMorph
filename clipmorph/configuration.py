@@ -24,8 +24,16 @@ SUPPORTED_SOURCE_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm"}
 
 # Bumped in the same commit as any breaking app.yml schema change. This stamp is
 # independent of the job manifest schema version in clipmorph/job.py; the two
-# are never unified.
+# are never unified. `upload.schedule.mode` is an additive key, so the stamp
+# stays put.
 APP_CONFIG_VERSION = 1
+
+# Who holds a future publication for `upload.schedule`: ClipMorph's own timer
+# ("local", the default) or the platform's native scheduling ("platform").
+# `None` is the unset value the YAML layer writes; it defers to "local".
+# Platform eligibility is not a config concern: it is enforced at submission by
+# the registry in clipmorph.platforms, so no per-platform mode map exists.
+SCHEDULE_MODES = {None, "local", "platform"}
 
 # Number of rotated `<file>.backup[n]` copies kept when retention.backups.keep_n
 # is unset or app.yml cannot be read (auth may persist before a valid app.yml).
@@ -439,10 +447,12 @@ def validate_job_configuration(configuration: dict[str, Any]) -> None:
     if "no_confirm" in upload and upload["no_confirm"] is not None and not isinstance(upload["no_confirm"], bool):
         raise ValueError("upload.no_confirm must be a boolean or null")
     schedule = check_object(upload.get("schedule", {}), "upload.schedule",
-                            {"publish_at", "timezone"})
+                            {"publish_at", "timezone", "mode"})
     for key, value in schedule.items():
         if value is not None and not isinstance(value, str):
             raise ValueError(f"upload.schedule.{key} must be a string or null")
+    if schedule.get("mode") not in SCHEDULE_MODES:
+        raise ValueError("upload.schedule.mode must be one of: local, platform")
     publish_at = schedule.get("publish_at")
     if publish_at is not None:
         try:

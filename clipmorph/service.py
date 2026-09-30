@@ -24,6 +24,7 @@ from clipmorph.job import configuration_sha256
 from clipmorph.job import safe_error_message
 from clipmorph.job import source_sha256
 from clipmorph.platforms import enabled_platforms
+from clipmorph.platforms import native_scheduling_support
 from clipmorph.platforms import SUPPORTED_PLATFORMS_SET
 from clipmorph.storage import ArtifactStorage, LocalArtifactStorage, make_storage
 
@@ -44,6 +45,10 @@ SCHEDULE_MINIMUM_DELAY_SECONDS = 1.0
 # Attempt statuses that still block a new submission for the same content.
 ACTIVE_ATTEMPT_STATUSES = {"pending", "scheduled", "running"}
 
+# Attempt statuses a worker must never rewrite: a stale batch timer can fire
+# after one member of its group was cancelled or already reported.
+TERMINAL_ATTEMPT_STATUSES = {"published", "failed", "cancelled"}
+
 # Platform post-id to public URL templates for platforms whose posts are
 # addressable by id alone. Platforms without a template record no URL.
 PLATFORM_URL_TEMPLATES = {
@@ -51,10 +56,32 @@ PLATFORM_URL_TEMPLATES = {
 }
 
 
+class UnknownUploadAttempt(LookupError):
+    """No upload attempt with the requested id exists in the job."""
+
+
+class UploadAttemptNotScheduled(ValueError):
+    """The upload attempt is not in the cancellable scheduled state."""
+
+
 def _platform_url(platform: str, post_id: str) -> str | None:
     """Return the public URL for one platform post id, when addressable."""
     template = PLATFORM_URL_TEMPLATES.get(platform)
     return template.format(post_id=post_id) if template else None
+
+
+def _upload_adapter(platform: str):
+    """Return one platform's upload adapter, or None when it cannot load.
+
+    Adapter construction is lazy and never raises: a platform whose credentials
+    or optional dependency are missing simply has no adapter, which the caller
+    reports as an unavailable platform action.
+    """
+    from clipmorph.platforms import PLATFORM_TITLE
+    from clipmorph.upload_pipeline import UploadPipeline
+
+    pipeline = UploadPipeline(**{platform: True})
+    return pipeline.enabled_platforms.get(PLATFORM_TITLE.get(platform, platform))
 
 
 def _parse_utc_timestamp(value: str) -> datetime:
@@ -104,6 +131,9 @@ class JobService:
         self._tokens: dict[str, CancellationToken] = {}
         self._futures: dict[str, Future] = {}
         self._scheduled_timers: dict[str, list[Timer]] = {}
+        # One batch timer serves every attempt in its group, so the per-attempt
+        # cancel surface needs the reverse index to disarm the right batch.
+        self._attempt_timers: dict[str, Timer] = {}
         # Artifact storage backend selected by app.yml; staging holds the
         # machine-local copy upload adapters read during one attempt.
         self._storage = make_storage(
@@ -211,15 +241,89 @@ class JobService:
             if manifest.checkpoints.get(stage, {}).get("status") == "running":
                 self._fail_interrupted_checkpoint(manifest, stage)
         upload = manifest.checkpoints.get("upload", {})
-        if (upload.get("status") == "running"
-                and not self._upload_awaits_schedule(manifest)):
-            self._fail_interrupted_checkpoint(manifest, "upload")
+        if upload.get("status") == "running":
+            # A platform-scheduled attempt can be stranded between the
+            # platform accepting the upload and this process recording the
+            # result, so it is healed from platform state before the
+            # interrupted-work rule below reads its status.
+            self._heal_platform_scheduled_attempts(manifest)
+            if not self._upload_awaits_schedule(manifest):
+                self._fail_interrupted_checkpoint(manifest, "upload")
         if manifest.status == "running" and not any(
                 checkpoint.get("status") == "running"
                 for checkpoint in manifest.checkpoints.values()):
             # Status drift only: every checkpoint is terminal.
             manifest._derive_status()
             manifest.save(self.jobs_dir)
+
+    def _heal_platform_scheduled_attempts(self,
+                                          manifest: JobManifest) -> int:
+        """Settle platform-scheduled attempts stranded on a running upload pass.
+
+        A platform-scheduled attempt is created ``scheduled`` and the platform
+        already holds the content, so a crash between the platform accepting
+        the upload and this process writing the result leaves a live private
+        post with no recorded outcome. The adapter's existing-post lookup is
+        the only honest source: a post found completes the attempt as
+        ``published`` without re-uploading, and no post marks it ``failed``
+        with a retryable note, so the ordinary retry is both the re-upload and
+        the refresh. Returns the number of attempts settled.
+        """
+        stranded = [attempt for attempt in manifest.upload_attempts
+                    if (attempt.get("status") == "scheduled"
+                        and attempt.get("scheduled_via") == "platform"
+                        and not attempt.get("result"))]
+        healed = 0
+        for attempt in stranded:
+            platform = str(attempt.get("platform"))
+            post_id: str | None = None
+            adapter = _upload_adapter(platform)
+            if adapter is not None:
+                try:
+                    found = adapter.find_existing_post(attempt.get("artifact_hash"))
+                except Exception as error:
+                    logger.warning("Could not read %s post state for attempt %s: %s",
+                                   platform, attempt["attempt_id"], error)
+                    found = None
+                if isinstance(found, str) and found:
+                    post_id = found
+            now = datetime.now(timezone.utc).isoformat()
+            if post_id:
+                attempt["status"] = "published"
+                attempt["completed_at"] = now
+                attempt["result"] = {
+                    "success": True,
+                    "message": ("re-attached to the platform post that was "
+                                f"already scheduled (id {post_id})"),
+                    "platform_post_id": post_id,
+                    "platform_url": _platform_url(platform, post_id),
+                    "scheduled_publish_at": attempt.get("scheduled_publish_at"),
+                    "published_at": None,
+                }
+            else:
+                attempt["status"] = "failed"
+                attempt["completed_at"] = now
+                attempt["result"] = {
+                    "success": False,
+                    "message": ("scheduled publication could not be confirmed "
+                                "after a restart; retry the attempt to "
+                                "re-upload"),
+                    "platform_post_id": None,
+                    "platform_url": None,
+                    "published_at": None,
+                }
+                attempt.setdefault("errors", []).append({
+                    "code": "platform_schedule_unconfirmed",
+                    "message": "no scheduled post was found for this attempt",
+                    "retryable": True,
+                    "occurred_at": now,
+                })
+            healed += 1
+        if healed:
+            logger.info("Healed %d platform-scheduled upload attempt(s) of %s",
+                        healed, manifest.job_id)
+            manifest.save(self.jobs_dir)
+        return healed
 
     def _fail_interrupted_checkpoint(self, manifest: JobManifest,
                                      stage: str) -> None:
@@ -234,11 +338,19 @@ class JobService:
                            stage, manifest.job_id, error)
 
     def _upload_awaits_schedule(self, manifest: JobManifest) -> bool:
-        """Report whether every scheduled attempt waits on a future publish_at."""
+        """Report whether every scheduled attempt waits on a future publish_at.
+
+        A platform-scheduled attempt is not waiting on this process: the
+        platform already holds the content and holds its own publication
+        timer, so it never keeps a pass alive and is excluded here. That is
+        what lets a ``running`` upload checkpoint holding only a platform
+        publication fall through to the interrupted-work rule.
+        """
         now = datetime.now(timezone.utc)
         scheduled: list[dict[str, Any]] = []
         for attempt in manifest.upload_attempts:
-            if attempt.get("status") != "scheduled":
+            if (attempt.get("status") != "scheduled"
+                    or attempt.get("scheduled_via") == "platform"):
                 continue
             scheduled.append(attempt)
             stamp = attempt.get("scheduled_publish_at")
@@ -253,44 +365,61 @@ class JobService:
 
     def _rearm_scheduled_attempts(self) -> None:
         """Re-arm timers for scheduled upload attempts left pending by a restart."""
-        now = datetime.now(timezone.utc)
         for path in self._manifest_paths():
             manifest = self._load_startup_manifest(path)
             if manifest is None:
                 continue
-            if manifest.checkpoints.get("upload", {}).get("status") != "running":
+            self._arm_manifest_schedules(manifest)
+
+    def _arm_manifest_schedules(self, manifest: JobManifest) -> int:
+        """Arm this process's timers for one manifest's future local schedules.
+
+        Platform-scheduled attempts are excluded: the platform already holds
+        the content and holds its own publication timer, so a local timer
+        would post the same artifact a second time. Returns the number of
+        attempts armed.
+        """
+        if manifest.checkpoints.get("upload", {}).get("status") != "running":
+            return 0
+        if not self._upload_awaits_schedule(manifest):
+            return 0
+        now = datetime.now(timezone.utc)
+        groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+        for attempt in manifest.upload_attempts:
+            if attempt.get("status") != "scheduled":
                 continue
-            if not self._upload_awaits_schedule(manifest):
+            if attempt.get("scheduled_via") == "platform":
+                # Second line of defense: reconciliation already settled these
+                # from platform state, and a re-arm would double-post.
                 continue
-            groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
-            for attempt in manifest.upload_attempts:
-                if attempt.get("status") != "scheduled":
-                    continue
-                stamp = attempt.get("scheduled_publish_at")
-                if not isinstance(stamp, str):
-                    continue
-                try:
-                    publish_at = _parse_utc_timestamp(stamp)
-                except ValueError:
-                    continue
-                if publish_at <= now:
-                    continue
-                key = (str(attempt.get("artifact_id")),
-                       str(attempt.get("configuration_hash")), stamp)
-                groups.setdefault(key, []).append(attempt)
-            for (artifact_id, _hash, stamp), group in groups.items():
-                artifact = manifest.artifacts.get(artifact_id)
-                snapshot = group[0].get("configuration_snapshot")
-                if artifact is None or not isinstance(snapshot, dict):
-                    logger.warning(
-                        "Skipping re-arm for %s: artifact %s or its upload "
-                        "snapshot is missing", manifest.job_id, artifact_id)
-                    continue
-                self._schedule_attempts(
-                    manifest.job_id, [item["attempt_id"] for item in group],
-                    artifact["storage"]["key"], snapshot,
-                    [item["platform"] for item in group],
-                    _parse_utc_timestamp(stamp))
+            stamp = attempt.get("scheduled_publish_at")
+            if not isinstance(stamp, str):
+                continue
+            try:
+                publish_at = _parse_utc_timestamp(stamp)
+            except ValueError:
+                continue
+            if publish_at <= now:
+                continue
+            key = (str(attempt.get("artifact_id")),
+                   str(attempt.get("configuration_hash")), stamp)
+            groups.setdefault(key, []).append(attempt)
+        armed = 0
+        for (artifact_id, _hash, stamp), group in groups.items():
+            artifact = manifest.artifacts.get(artifact_id)
+            snapshot = group[0].get("configuration_snapshot")
+            if artifact is None or not isinstance(snapshot, dict):
+                logger.warning(
+                    "Skipping re-arm for %s: artifact %s or its upload "
+                    "snapshot is missing", manifest.job_id, artifact_id)
+                continue
+            self._schedule_attempts(
+                manifest.job_id, [item["attempt_id"] for item in group],
+                artifact["storage"]["key"], snapshot,
+                [item["platform"] for item in group],
+                _parse_utc_timestamp(stamp))
+            armed += len(group)
+        return armed
 
     def _schedule_attempts(self, job_id: str, attempt_ids: list[str],
                            artifact_key: str, upload_config: dict[str, Any],
@@ -306,10 +435,35 @@ class JobService:
         with self._lock:
             self._scheduled_timers.setdefault(
                 f"upload:{job_id}", []).append(handle)
+            for attempt_id in attempt_ids:
+                self._attempt_timers[attempt_id] = handle
         handle.start()
         logger.info("Scheduled %d upload attempt(s) of %s in %.1fs",
                     len(attempt_ids), job_id, delay)
         return handle
+
+    def _disarm_attempt_timers(self, job_id: str,
+                               attempt_ids: list[str]) -> None:
+        """Cancel the batch timers that would run the given attempts.
+
+        One timer serves a whole group, so every handle reached from the
+        per-attempt index is cancelled and dropped from both registries; the
+        surviving group members are re-armed by the ordinary re-arm path.
+        """
+        with self._lock:
+            handles: set[Timer] = set()
+            for attempt_id in attempt_ids:
+                handle = self._attempt_timers.pop(attempt_id, None)
+                if handle is not None:
+                    handles.add(handle)
+            remaining = [timer for timer in self._scheduled_timers.get(
+                f"upload:{job_id}", []) if timer not in handles]
+            if remaining:
+                self._scheduled_timers[f"upload:{job_id}"] = remaining
+            else:
+                self._scheduled_timers.pop(f"upload:{job_id}", None)
+        for handle in handles:
+            handle.cancel()
 
     def _discard_scheduled_uploads_locked(self, manifest: JobManifest) -> int:
         """Disarm one job's scheduled uploads. Caller holds ``self._lock``.
@@ -323,27 +477,64 @@ class JobService:
         for timer in self._scheduled_timers.pop(
                 f"upload:{manifest.job_id}", []):
             timer.cancel()
+        for attempt in manifest.upload_attempts:
+            self._attempt_timers.pop(str(attempt.get("attempt_id")), None)
         unmarked = 0
         for attempt in manifest.upload_attempts:
             if attempt.get("status") == "scheduled":
                 attempt["status"] = "pending"
                 attempt.pop("scheduled_publish_at", None)
+                attempt.pop("scheduled_via", None)
                 unmarked += 1
         return unmarked
+
+    def _cancel_platform_scheduled_posts(
+            self, job_id: str, posts: list[tuple[str, str]]) -> None:
+        """Best-effort platform cancellation of scheduled post ids.
+
+        A rerender supersedes the accepted upload, so the live private post
+        must not survive it. A platform that refuses or cannot be reached is
+        recorded as a manifest warning: inventing a terminal state would lie
+        about what the platform actually holds.
+        """
+        for platform, post_id in posts:
+            try:
+                adapter = _upload_adapter(platform)
+                if adapter is None:
+                    raise RuntimeError("no upload adapter is available")
+                adapter.cancel_scheduled_post(post_id)
+            except Exception as error:
+                logger.warning("Could not cancel scheduled %s post %s: %s",
+                               platform, post_id, error)
+                with self._lock:
+                    manifest = self.get_job(job_id)
+                    manifest.warnings.append(
+                        f"scheduled {platform} post {post_id} could not be "
+                        f"cancelled: {error}")
+                    manifest.save(self.jobs_dir)
 
     def discard_scheduled_uploads(self, job_id: str) -> int:
         """Disarm a job's scheduled uploads and persist the unmarked attempts.
 
         Used where the accepted upload is superseded without a draft edit, such
-        as a rerender invalidating the upload checkpoint. Persists only when a
-        schedule was actually pending.
+        as a rerender invalidating the upload checkpoint. Platform-scheduled
+        attempts are not backed by a local timer, so their recorded post ids
+        are handed to the platform as well, or the rerender would leave a live
+        private post behind. Persists only when a schedule was actually pending.
         """
         with self._lock:
             manifest = self.get_job(job_id)
+            posts = [(str(attempt.get("platform")),
+                      str((attempt.get("result") or {}).get("platform_post_id")))
+                     for attempt in manifest.upload_attempts
+                     if (attempt.get("status") == "scheduled"
+                         and attempt.get("scheduled_via") == "platform"
+                         and (attempt.get("result") or {}).get("platform_post_id"))]
             unmarked = self._discard_scheduled_uploads_locked(manifest)
             if unmarked:
                 manifest.save(self.jobs_dir)
-            return unmarked
+        self._cancel_platform_scheduled_posts(job_id, posts)
+        return unmarked
 
     def create_job(self, source_path: str, configuration: dict[str, Any],
                    runner: Callable[[JobManifest, CancellationToken], None] | None = None
@@ -864,11 +1055,18 @@ class JobService:
 
             scheduled_for = self._resolve_publish_at(
                 upload_config, honor_schedule)
+            schedule_mode = self._resolve_schedule_mode(
+                upload_config, scheduled_for)
             upload_hash = configuration_sha256(upload_config)
             content_hash = configuration_sha256(upload_config.get("content", {}))
             if retry_of is None:
                 self._reject_duplicate_active_attempt(
                     manifest, selected, artifact.get("sha256"), content_hash)
+            if schedule_mode == "platform":
+                # Strict by decision: a platform that cannot hold the future
+                # publication is refused before any attempt exists, rather than
+                # silently falling back to ClipMorph's own timer.
+                self._reject_unsupported_schedule_platforms(selected)
             now = datetime.now(timezone.utc).isoformat()
             attempts: list[dict[str, Any]] = []
             for platform in selected:
@@ -890,6 +1088,7 @@ class JobService:
                     attempt["retry_of"] = retry_of
                 if scheduled_for is not None:
                     attempt["scheduled_publish_at"] = scheduled_for.isoformat()
+                    attempt["scheduled_via"] = schedule_mode
                     attempt["status"] = "scheduled"
                 if platform in existing_posts:
                     post_id = existing_posts[platform]
@@ -941,18 +1140,38 @@ class JobService:
                        if attempt["status"] != "published"]
         upload_platforms = [platform for platform in selected
                             if platform not in existing_posts]
-        if scheduled_for is not None and attempt_ids:
+        scheduled_config = upload_config
+        if scheduled_for is not None and schedule_mode == "platform":
+            # The platform holds the publication from the moment the upload
+            # lands, so submission is immediate: the resolved instant rides the
+            # ordinary per-platform override shape (which is what becomes the
+            # adapter's ``scheduled_publish_at`` keyword), while the attempt's
+            # frozen snapshot keeps recording the configuration the user
+            # accepted.
+            scheduled_config = deepcopy(upload_config)
+            overrides = scheduled_config.setdefault("platforms", {})
+            for platform in upload_platforms:
+                platform_overrides = overrides.get(platform)
+                platform_overrides = (deepcopy(platform_overrides)
+                                      if isinstance(platform_overrides, dict)
+                                      else {})
+                platform_overrides["scheduled_publish_at"] = (
+                    scheduled_for.isoformat())
+                overrides[platform] = platform_overrides
+        if scheduled_for is not None and schedule_mode == "local" and attempt_ids:
             self._schedule_attempts(
                 job_id, attempt_ids, artifact_key, upload_config,
                 upload_platforms, scheduled_for)
         elif attempt_ids:
             future = self.executor.submit(
                 self._run_upload_attempts, job_id, attempt_ids,
-                artifact_key, upload_config, upload_platforms)
+                artifact_key, scheduled_config, upload_platforms)
             with self._lock:
                 self._futures[f"upload:{job_id}"] = future
         return {"job_id": job_id, "attempts": attempts,
                 "scheduled": scheduled_for is not None,
+                "scheduled_via": (schedule_mode
+                                  if scheduled_for is not None else None),
                 "status_url": f"/api/v1/jobs/{job_id}",
                 "detection": {
                     "existing_posts": existing_posts,
@@ -1017,6 +1236,40 @@ class JobService:
         return found, unavailable
 
     @staticmethod
+    def _resolve_schedule_mode(upload_config: dict[str, Any],
+                               publish_at: datetime | None) -> str:
+        """Return who holds a future publication: "local" or "platform".
+
+        The configured mode is inert without a deferred upload: with no future
+        ``publish_at`` there is nothing to schedule, so an immediate submission
+        reads as ``local`` whatever the mode says.
+        """
+        schedule = upload_config.get("schedule") or {}
+        mode = schedule.get("mode") if isinstance(schedule, dict) else None
+        if publish_at is None:
+            return "local"
+        return mode if mode == "platform" else "local"
+
+    @staticmethod
+    def _reject_unsupported_schedule_platforms(platforms: list[str]) -> None:
+        """Refuse a platform-scheduled submission the registry cannot bless.
+
+        A platform's registry entry in ``SUPPORTED_NATIVE_SCHEDULING`` is only
+        ``True`` after the maintainer's sandbox probe, so this raises for every
+        platform that cannot hold the publication itself. The message names the
+        probe so the gate is actionable instead of mysterious.
+        """
+        culprits = [platform for platform in platforms
+                    if not native_scheduling_support(platform)]
+        if culprits:
+            raise ValueError(
+                "upload.schedule.mode platform is not enabled for: "
+                f"{', '.join(culprits)}\n"
+                "See quality/research/scheduling_probe.py — run it with "
+                "sandbox tokens, then flip SUPPORTED_NATIVE_SCHEDULING in "
+                "clipmorph/platforms.py.")
+
+    @staticmethod
     def _resolve_publish_at(upload_config: dict[str, Any],
                             honor_schedule: bool) -> datetime | None:
         """Return the future publish_at to defer to, or None to run now."""
@@ -1064,14 +1317,29 @@ class JobService:
         with self._lock:
             manifest = self.get_job(job_id)
             now = datetime.now(timezone.utc).isoformat()
+            runnable: list[str] = []
             for attempt_id in attempt_ids:
                 attempt = next((item for item in manifest.upload_attempts
                                 if item["attempt_id"] == attempt_id), None)
                 if attempt is None:
                     continue
+                if attempt["status"] in TERMINAL_ATTEMPT_STATUSES:
+                    # One member of a batch group can be cancelled while the
+                    # group's timer is still armed, so a stale timer must never
+                    # resurrect a terminal attempt as published.
+                    logger.info(
+                        "Skipping terminal upload attempt %s of job %s",
+                        attempt_id, job_id)
+                    continue
                 attempt["status"] = "running"
                 attempt["started_at"] = now
-            manifest.save(self.jobs_dir)
+                runnable.append(attempt_id)
+            if runnable:
+                manifest.save(self.jobs_dir)
+        if not runnable:
+            # Nothing this group can still do: the checkpoint keeps whatever
+            # state the cancel left it in.
+            return
         try:
             staged_path = self._stage_artifact(artifact_key)
         except Exception as error:
@@ -1104,7 +1372,7 @@ class JobService:
             success_count = 0
             failure_count = 0
             live_progress = self._live_progress.get(job_id, {})
-            for attempt_id in attempt_ids:
+            for attempt_id in runnable:
                 attempt = next((item for item in manifest.upload_attempts
                                 if item["attempt_id"] == attempt_id), None)
                 if attempt is None:
@@ -1121,7 +1389,40 @@ class JobService:
                 post_id = result.get("result")
                 if success and not isinstance(post_id, str):
                     post_id = None
-                attempt["status"] = "published" if success else "failed"
+                platform_scheduled = (attempt.get("scheduled_via") == "platform")
+                attempt["status"] = (
+                    "scheduled" if success and platform_scheduled
+                    else "published" if success else "failed")
+                if success and platform_scheduled:
+                    attempt["result"] = {
+                        "success": True,
+                        "message": (
+                            "uploaded private; platform holds publication "
+                            f"until {attempt.get('scheduled_publish_at')}"),
+                        "platform_post_id": post_id,
+                        "platform_url": (_platform_url(platform, post_id)
+                                         if post_id else None),
+                        "scheduled_publish_at": attempt.get(
+                            "scheduled_publish_at"),
+                        "published_at": None,
+                        "progress_percent": live_progress.get(
+                            platform.lower(), 0),
+                    }
+                    manifest.platforms[platform] = {
+                        "success": True,
+                        "status": "scheduled",
+                        "message": attempt["result"]["message"],
+                        "attempt_id": attempt_id,
+                        "artifact_id": attempt["artifact_id"],
+                        "artifact_hash": attempt["artifact_hash"],
+                        "platform_post_id": post_id,
+                        "platform_url": attempt["result"]["platform_url"],
+                        "scheduled_publish_at": attempt["result"][
+                            "scheduled_publish_at"],
+                        "published_at": None,
+                    }
+                    success_count += 1
+                    continue
                 attempt["result"] = {
                     "success": success,
                     "message": str(result.get("error") or result.get("result") or "")[:1000],
@@ -1376,11 +1677,11 @@ class JobService:
         if manifest.status in {"created", "queued", "awaiting_review"}:
             self._cancel_manifest(manifest)
         elif manifest.status == "scheduled":
-            self.cancel_scheduled_upload(job_id)
+            self.cancel_all_scheduled_uploads(job_id)
             self._cancel_manifest(self.get_job(job_id))
         return self.get_job(job_id)
 
-    def cancel_scheduled_upload(self, job_id: str) -> int:
+    def cancel_all_scheduled_uploads(self, job_id: str) -> int:
         """Abort a job's scheduled upload attempts before their timers fire.
 
         Disarms the armed timers and moves every ``scheduled`` attempt to the
@@ -1396,11 +1697,114 @@ class JobService:
                 if attempt.get("status") == "scheduled":
                     attempt["status"] = "cancelled"
                     attempt["completed_at"] = now
+                    self._attempt_timers.pop(str(attempt.get("attempt_id")), None)
                     cancelled += 1
             if cancelled:
                 manifest._derive_status()
                 manifest.save(self.jobs_dir)
             return cancelled
+
+    def cancel_scheduled_upload(self, job_id: str,
+                                attempt_id: str) -> dict[str, Any]:
+        """Cancel one scheduled upload attempt before its publication.
+
+        A local-path attempt is disarmed locally: its batch timer is cancelled
+        and the surviving group members are re-armed through the ordinary
+        re-arm path. A platform-scheduled attempt is not backed by a local
+        timer, so the adapter owns the platform action: its scheduled post is
+        cancelled first and the attempt only becomes terminal once the platform
+        confirms. A platform that refuses leaves the attempt ``scheduled`` with
+        the reason in its ``errors`` list, because a forced terminal state would
+        claim a visibility the platform never granted.
+        """
+        manifest = self.get_job(job_id)
+        attempt = next((item for item in manifest.upload_attempts
+                        if item.get("attempt_id") == attempt_id), None)
+        if attempt is None:
+            raise UnknownUploadAttempt(
+                f"upload attempt {attempt_id} was not found in job {job_id}")
+        if attempt.get("status") != "scheduled":
+            raise UploadAttemptNotScheduled(
+                f"upload attempt {attempt_id} is {attempt.get('status')}, "
+                "not scheduled")
+        platform = str(attempt.get("platform"))
+        via = attempt.get("scheduled_via")
+        post_id = (attempt.get("result") or {}).get("platform_post_id")
+        if via == "platform":
+            self._cancel_scheduled_post(job_id, platform, attempt_id, post_id)
+        else:
+            self._disarm_attempt_timers(job_id, [attempt_id])
+        with self._lock:
+            manifest = self.get_job(job_id)
+            attempt = next(item for item in manifest.upload_attempts
+                           if item.get("attempt_id") == attempt_id)
+            now = datetime.now(timezone.utc).isoformat()
+            attempt["status"] = "cancelled"
+            attempt["completed_at"] = now
+            if via == "platform":
+                attempt["result"] = {
+                    "success": True,
+                    "message": f"scheduled {platform} post {post_id} cancelled",
+                    "platform_post_id": post_id,
+                    "platform_url": _platform_url(platform, str(post_id)),
+                    "scheduled_publish_at": attempt.get("scheduled_publish_at"),
+                    "published_at": None,
+                }
+            checkpoint = manifest.checkpoints.get("upload", {})
+            still_waiting = any(
+                item.get("status") in ACTIVE_ATTEMPT_STATUSES
+                for item in manifest.upload_attempts)
+            if checkpoint.get("status") == "running" and not still_waiting:
+                # Nothing is left to publish, so the pass the user just
+                # cancelled must not keep the job reading as scheduled.
+                manifest.transition_checkpoint(
+                    "upload", "cancelled", checkpoint["revision"],
+                    self.jobs_dir)
+            else:
+                manifest._derive_status()
+                manifest.save(self.jobs_dir)
+        if via != "platform":
+            # The cancelled attempt shared its batch timer with the members
+            # still waiting on the same publish_at, so they are re-armed.
+            self._arm_manifest_schedules(self.get_job(job_id))
+        return {"job_id": job_id, "attempt_id": attempt_id,
+                "platform": platform, "scheduled_via": via,
+                "status": "cancelled"}
+
+    def _cancel_scheduled_post(self, job_id: str, platform: str,
+                               attempt_id: str, post_id: Any) -> None:
+        """Ask the platform to drop one scheduled post, or record why it stayed.
+
+        A platform-scheduled attempt with no recorded post id is a submission
+        that never landed, so there is nothing to delete and the attempt is
+        safe to cancel locally. A refusal leaves the attempt ``scheduled`` with
+        the reason in its ``errors`` list and raises.
+        """
+        if not isinstance(post_id, str) or not post_id:
+            return
+        try:
+            adapter = _upload_adapter(platform)
+            if adapter is None:
+                raise RuntimeError("no upload adapter is available")
+            adapter.cancel_scheduled_post(post_id)
+        except Exception as error:
+            message = safe_error_message(error)
+            logger.warning("Could not cancel scheduled %s post %s: %s",
+                           platform, post_id, message)
+            with self._lock:
+                manifest = self.get_job(job_id)
+                attempt = next(item for item in manifest.upload_attempts
+                               if item.get("attempt_id") == attempt_id)
+                attempt.setdefault("errors", []).append({
+                    "code": "platform_cancel_failed",
+                    "message": message[:500],
+                    "retryable": True,
+                    "occurred_at": datetime.now(timezone.utc).isoformat(),
+                })
+                manifest.save(self.jobs_dir)
+            raise ValueError(
+                f"the {platform} platform refused to cancel post {post_id}: "
+                f"{message}")
 
     def list_upload_attempts(self, job_id: str, status: str | None = None,
                              platform: str | None = None,
@@ -1451,6 +1855,7 @@ class JobService:
             timers = [timer for group in self._scheduled_timers.values()
                       for timer in group]
             self._scheduled_timers.clear()
+            self._attempt_timers.clear()
         for timer in timers:
             timer.cancel()
         self.executor.shutdown(wait=True, cancel_futures=False)

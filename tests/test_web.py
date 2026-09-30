@@ -485,6 +485,64 @@ class WebApiTests(unittest.TestCase):
                     f"/api/v1/jobs/{job_id}/uploads?since=not-a-timestamp")
                 self.assertEqual(invalid.status_code, 422)
 
+    def test_cancel_scheduled_route_contract(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"source")
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {
+                "conversion": {"skip": True, "subtitles": {"skip": True}},
+                "upload": {"platforms": {"include": ["youtube"]}},
+            })
+            artifact_dir = data_dir / "output" / manifest.job_id
+            artifact_dir.mkdir(parents=True)
+            artifact_path = artifact_dir / "output.mp4"
+            artifact_path.write_bytes(b"rendered artifact")
+            manifest.set_artifact(str(artifact_path), service.jobs_dir)
+            service.close()
+
+            app = create_app(data_dir)
+            with TestClient(app) as client:
+                job_id = manifest.job_id
+                publish_at = (datetime.now(timezone.utc)
+                              + timedelta(hours=2)).isoformat()
+                client.put(
+                    f"/api/v1/jobs/{job_id}/checkpoints/upload",
+                    json={"expected_revision": 0,
+                          "upload": {
+                              "content": {"title": "Frozen title"},
+                              "schedule": {"publish_at": publish_at,
+                                           "mode": "local"}}})
+                with patch("clipmorph.upload_pipeline.UploadPipeline") as pipeline_type:
+                    pipeline_type.return_value.run.return_value = {
+                        "YouTube": {"success": True, "result": "video-id"}}
+                    submitted = client.post(f"/api/v1/jobs/{job_id}/upload", json={})
+                    self.assertEqual(submitted.status_code, 202, submitted.text)
+                attempt_id = submitted.json()["attempts"][0]["attempt_id"]
+                self.assertEqual(submitted.json()["scheduled_via"], "local")
+
+                cancelled = client.delete(
+                    f"/api/v1/jobs/{job_id}/scheduled/{attempt_id}")
+                self.assertEqual(cancelled.status_code, 202, cancelled.text)
+                self.assertEqual(cancelled.json()["status"], "cancelled")
+                self.assertEqual(cancelled.json()["scheduled_via"], "local")
+                self.assertEqual(
+                    client.get(
+                        f"/api/v1/jobs/{job_id}/uploads").json()[0]["status"],
+                    "cancelled")
+
+                # An unknown attempt is 404, an unscheduled one is 422.
+                missing = client.delete(
+                    f"/api/v1/jobs/{job_id}/scheduled/does-not-exist")
+                self.assertEqual(missing.status_code, 404)
+                self.assertEqual(missing.json()["error"]["code"], "not_found")
+                again = client.delete(
+                    f"/api/v1/jobs/{job_id}/scheduled/{attempt_id}")
+                self.assertEqual(again.status_code, 422)
+                self.assertIn("not scheduled", again.json()["error"]["message"])
+
     def test_queue_event_payload_with_scheduled_attempts(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
