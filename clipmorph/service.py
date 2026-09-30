@@ -26,12 +26,17 @@ from clipmorph.job import source_sha256
 from clipmorph.metrics import append_snapshot, collect_platform_metrics, load_snapshots
 from clipmorph.platforms import native_scheduling_support
 from clipmorph.platforms import resolve_upload_participants
+from clipmorph.platforms import build_platform_default_config
 from clipmorph.platforms import SUPPORTED_PLATFORMS
 from clipmorph.platforms import SUPPORTED_PLATFORMS_SET
 from clipmorph.storage import ArtifactStorage, LocalArtifactStorage, make_storage
 
 
 logger = logging.getLogger(__name__)
+
+# Sentinel distinguishing "option absent from the registry defaults" from a
+# registry default whose value happens to be None.
+_REGISTRY_MISSING = object()
 
 # Emitted when a checkpoint was still running in a manifest found at startup,
 # meaning the process that owned it never finished or reported.
@@ -265,6 +270,13 @@ class JobService:
         self.data_dir = Path(data_dir)
         self.jobs_dir = self.data_dir / "jobs"
         self.app_config_path = Path(app_config_path) if app_config_path else self.data_dir / "app.yml"
+        # Load this workspace's auth file once at construction: uploads read
+        # credentials from the environment and any OAuth registration they
+        # trigger persists back to this same data dir (#226). Without this,
+        # CLI-driven jobs ran with empty token env vars and re-prompted the
+        # OAuth flow on every upload.
+        from clipmorph.auth import load_auth_config
+        load_auth_config(self.data_dir)
         self.executor = ThreadPoolExecutor(max_workers=max(1, max_workers))
         self._lock = Lock()
         self._tokens: dict[str, CancellationToken] = {}
@@ -1522,11 +1534,21 @@ class JobService:
         effective = resolve_platform_configuration(
             configuration, global_defaults, layouts, platform)
         snapshot = deepcopy(effective.get("upload", {}))
+        # Registry-equal flat options are NOT frozen: the upload pipeline
+        # folds the same defaults from ``clipmorph.platforms`` at run time
+        # (``_map_common_parameters``), so freezing them would only byte-
+        # differentiate every snapshot the moment a job inherited the
+        # registry defaults from app.yml's ``job_defaults.platforms`` —
+        # splitting what used to coalesce into one binding per identical
+        # upload slice (#225). Explicit values that DIFFER from the
+        # registry still freeze so per-platform mixing stays exact.
+        registry_defaults = build_platform_default_config().get(platform, {})
         snapshot["platform_options"] = {
             f"{platform}_{key}": deepcopy(value)
             for key, value in configuration.get("platforms", {}).get(
                 platform, {}).items()
-            if key not in ("general", "conversion", "upload")}
+            if key not in ("general", "conversion", "upload")
+            and value != registry_defaults.get(key, _REGISTRY_MISSING)}
         return snapshot
 
     def _attempt_bindings(self, manifest: JobManifest, selected: list[str],

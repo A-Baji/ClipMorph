@@ -130,8 +130,10 @@ def _instagram_collector(attempts: list[dict]) -> dict[str, dict]:
         if not media_id:
             continue
         try:
-            from clipmorph.auth import load_auth_config
-            load_auth_config()
+            # Credentials were loaded into the environment when the owning
+            # JobService was constructed; a bare load_auth_config() here
+            # would silently re-point the process-global active auth path
+            # at the default data dir (#226).
             token = _get_env_token("instagram")
             if not token:
                 results[media_id] = _unavailable_snapshot()
@@ -185,8 +187,9 @@ def _tiktok_collector(attempts: list[dict]) -> dict[str, dict]:
         return results
 
     try:
-        from clipmorph.auth import load_auth_config
-        load_auth_config()
+        # Same as the Instagram collector: the owning JobService already
+        # loaded this workspace's credentials into the environment; a bare
+        # load would hijack the active auth path to the default data dir.
         access_token = _get_env_token("tiktok")
         if not access_token:
             for post_id in ids:
