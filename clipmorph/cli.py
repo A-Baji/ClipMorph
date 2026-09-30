@@ -1050,7 +1050,6 @@ def job_cancel_scheduled_command(
         ctx: typer.Context,
         job_id: Annotated[str, typer.Argument(help="Job ID.")],
         attempt_id: Annotated[str, typer.Argument(
-            metavar="ATTEMPT_ID",
             help="Scheduled upload attempt ID to cancel.")],
         json_output: JsonOption = False,
         data_dir: DataDirOption = None,
