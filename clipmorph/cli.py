@@ -448,7 +448,8 @@ def _artifact_path(ctx: typer.Context, job_id: str, artifact_id: str,
     with closing(JobService(selected_data_dir,
                            app_config_path=selected_config)) as service:
         manifest = service.get_job(job_id)
-        return Path(_registered_artifact(manifest, artifact_id)["path"])
+        artifact = _registered_artifact(manifest, artifact_id)
+        return service.artifact_path(artifact)
 
 
 @app.callback()
@@ -1058,8 +1059,7 @@ def artifacts_list_command(
     with closing(JobService(selected_data_dir,
                            app_config_path=selected_config)) as service:
         manifest = service.get_job(job_id)
-        records = [{key: value for key, value in item.items() if key != "path"}
-                   for item in manifest.artifacts.values()]
+        records = list(manifest.artifacts.values())
     if json_output:
         _print_json(records)
         return
@@ -1137,8 +1137,6 @@ def artifacts_delete_command(
         data_dir: DataDirOption = None,
         app_config: AppConfigOption = None) -> None:
     """Trash local artifact bytes and keep a manifest tombstone."""
-    from send2trash import send2trash
-
     from clipmorph.service import JobService
 
     selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
@@ -1146,14 +1144,10 @@ def artifacts_delete_command(
                            app_config_path=selected_config)) as service:
         manifest = service.get_job(job_id)
         artifact = _registered_artifact(manifest, artifact_id)
-        path = Path(artifact["path"])
         if not yes:
             raise ValueError("artifact delete requires --yes")
-        if path.exists():
-            send2trash(str(path))
+        service.storage.remove(artifact["storage"]["key"])
         artifact["state"] = "deleted"
-        if manifest.current_artifact_id == artifact_id:
-            manifest.artifact_path = None
         manifest.save(service.jobs_dir)
 
 

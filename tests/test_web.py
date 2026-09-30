@@ -545,5 +545,80 @@ class WebApiTests(unittest.TestCase):
                 self.assertEqual(stale.json()["error"]["code"], "conflict")
 
 
+class _PretendRemoteStorage:
+    """A non-local backend that owns no bytes on this machine."""
+
+    def __init__(self):
+        self.removed: list[str] = []
+
+    def remove(self, key):
+        self.removed.append(key)
+
+    def health(self):
+        return ("ok", "pretend backend at gs://bucket")
+
+
+@unittest.skipUnless(TestClient and create_app, "web extra is not installed")
+class WebArtifactStorageTests(unittest.TestCase):
+    def test_artifact_routes_run_on_the_injected_storage_backend(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"source")
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {
+                "conversion": {"skip": True, "subtitles": {"skip": True}}})
+            job_id = manifest.job_id
+            manifest_dir = service.jobs_dir
+            artifact_dir = data_dir / "output" / job_id
+            artifact_dir.mkdir(parents=True)
+            rendered = artifact_dir / "clip.mp4"
+            rendered.write_bytes(b"0" * 20)
+            manifest.record_artifact("primary", rendered, manifest_dir)
+            artifact_id = manifest.current_artifact_id
+            storage_key = manifest.artifacts[artifact_id]["storage"]["key"]
+            service.close()
+
+            app = create_app(data_dir)
+            pretend = _PretendRemoteStorage()
+            app.state.job_service._storage = pretend
+            with TestClient(app) as client:
+                listed = client.get(f"/api/v1/jobs/{job_id}/artifacts")
+                self.assertEqual(listed.status_code, 200, listed.text)
+                for record in listed.json():
+                    self.assertNotIn("path", record)
+                    self.assertEqual(record["storage"]["backend"], "local")
+                fetched = client.get(
+                    f"/api/v1/jobs/{job_id}/artifacts/{artifact_id}")
+                self.assertEqual(fetched.json()["storage"],
+                                 {"backend": "local", "key": storage_key})
+                renamed = client.patch(
+                    f"/api/v1/jobs/{job_id}/artifacts/{artifact_id}",
+                    json={"display_name": "renamed.mp4"})
+                self.assertEqual(renamed.status_code, 200, renamed.text)
+                self.assertEqual(renamed.json()["display_name"], "renamed.mp4")
+
+                # A backend without local bytes cannot stream a preview.
+                for route in ("preview", "download"):
+                    response = client.get(
+                        f"/api/v1/jobs/{job_id}/artifacts/{artifact_id}/{route}")
+                    self.assertEqual(response.status_code, 409, response.text)
+                    self.assertEqual(response.json()["error"]["code"],
+                                     "storage_unavailable")
+
+                deleted = client.delete(
+                    f"/api/v1/jobs/{job_id}/artifacts/{artifact_id}"
+                    "?confirm=true")
+                self.assertEqual(deleted.status_code, 200, deleted.text)
+
+            # Delete recycles through the backend, not through the local file.
+            self.assertEqual(pretend.removed, [storage_key])
+            self.assertTrue(rendered.exists())
+            tombstoned = client.get(
+                f"/api/v1/jobs/{job_id}/artifacts/{artifact_id}")
+            self.assertEqual(tombstoned.status_code, 404)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4,12 +4,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from clipmorph.configuration import DEFAULT_BACKUP_KEEP_N, rotate_backup
 from clipmorph.configuration import resolve_backup_keep_n
 from clipmorph.configuration import save_app_configuration
 from clipmorph.job import JobManifest
 from clipmorph.service import CancellationToken, JobService
+from clipmorph.storage import LocalArtifactStorage
 
 
 def _iso(**delta) -> str:
@@ -92,8 +94,10 @@ class ArtifactRetentionTests(unittest.TestCase):
         # A source artifact is never auto-pruned, and other states stay put.
         self.assertEqual(saved.artifacts[source_copy]["state"], "superseded")
         self.assertEqual(saved.artifacts[recent]["state"], "current")
-        self.assertFalse(Path(saved.artifacts[old]["path"]).exists())
-        self.assertTrue(Path(saved.artifacts[recent]["path"]).exists())
+        self.assertFalse(self.service._storage.exists(
+            saved.artifacts[old]["storage"]["key"]))
+        self.assertTrue(self.service._storage.exists(
+            saved.artifacts[recent]["storage"]["key"]))
 
     def test_age_pruning_never_touches_a_stale_artifact(self):
         first = self._render("primary", 10)
@@ -108,7 +112,8 @@ class ArtifactRetentionTests(unittest.TestCase):
         saved = self._saved()
         self.assertEqual(result["pruned"], [first])
         self.assertEqual(saved.artifacts[second]["state"], "stale")
-        self.assertTrue(Path(saved.artifacts[second]["path"]).exists())
+        self.assertTrue(self.service._storage.exists(
+            saved.artifacts[second]["storage"]["key"]))
 
     def test_max_bytes_evicts_oldest_obsolete_first_until_under_the_cap(self):
         first = self._render("primary", 1000)
@@ -126,7 +131,8 @@ class ArtifactRetentionTests(unittest.TestCase):
         self.assertEqual(result["pruned"], [first, second])
         self.assertEqual(result["bytes_freed"], 2000)
         self.assertEqual(saved.artifacts[third]["state"], "current")
-        self.assertTrue(Path(saved.artifacts[third]["path"]).exists())
+        self.assertTrue(self.service._storage.exists(
+            saved.artifacts[third]["storage"]["key"]))
 
     def test_retention_keeps_manifest_history_for_pruned_artifacts(self):
         first = self._render("primary", 10)
@@ -140,7 +146,7 @@ class ArtifactRetentionTests(unittest.TestCase):
         self.assertIn(first, saved.artifacts)
         self.assertEqual(saved.artifacts[first]["kind"], "primary")
         self.assertTrue(saved.artifacts[first]["sha256"])
-        self.assertTrue(saved.artifacts[first]["path"])
+        self.assertTrue(saved.artifacts[first]["storage"]["key"])
 
     def test_uploading_a_pruned_artifact_reports_unavailable_bytes(self):
         first = self._render("primary", 10)
@@ -174,6 +180,27 @@ class ArtifactRetentionTests(unittest.TestCase):
         saved = self._saved()
         self.assertEqual(saved.status, "completed")
         self.assertEqual(saved.artifacts[first]["state"], "deleted")
+
+    def test_a_failed_recycle_warns_and_never_fails_the_job(self):
+        first = self._render("primary", 10)
+        self._render("primary", 20)
+        self._backdate(first, days=-200)
+        self._policy(artifacts={"max_age_days": 1})
+
+        with patch.object(LocalArtifactStorage, "remove",
+                          side_effect=OSError("file is in use")):
+            result = self.service.enforce_retention(self.manifest.job_id)
+
+        saved = self._saved()
+        self.assertEqual(result, {"pruned": [], "bytes_freed": 0})
+        self.assertEqual(saved.artifacts[first]["state"], "superseded")
+        self.assertNotIn("deleted_at", saved.artifacts[first])
+        self.assertTrue(self.service._storage.exists(
+            saved.artifacts[first]["storage"]["key"]))
+        # Cleanup outcomes are warnings; pruning cannot fail the job.
+        self.assertIn(f"artifact {first} could not be recycled: file is in use",
+                      saved.warnings)
+        self.assertEqual(saved.errors, [])
 
     def test_age_policy_below_the_threshold_prunes_nothing(self):
         first = self._render("primary", 10)

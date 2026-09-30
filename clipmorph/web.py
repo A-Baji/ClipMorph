@@ -533,8 +533,7 @@ def create_app(data_dir: str | Path | None = None,
             manifest = service.get_job(job_id)
         except FileNotFoundError:
             fail(404, "not_found", "job not found")
-        return [{key: value for key, value in item.items() if key != "path"}
-                for item in manifest.artifacts.values()]
+        return list(manifest.artifacts.values())
 
     @app.get("/api/v1/jobs/{job_id}/artifacts/{artifact_id}")
     def get_artifact(job_id: str, artifact_id: str):
@@ -545,7 +544,7 @@ def create_app(data_dir: str | Path | None = None,
         artifact = manifest.artifacts.get(artifact_id)
         if artifact is None or artifact.get("state") == "deleted":
             fail(404, "not_found", "artifact not found")
-        return {key: value for key, value in artifact.items() if key != "path"}
+        return artifact
 
     def artifact_record(job_id: str, artifact_id: str):
         try:
@@ -555,7 +554,12 @@ def create_app(data_dir: str | Path | None = None,
         artifact = manifest.artifacts.get(artifact_id)
         if artifact is None or artifact.get("state") == "deleted":
             fail(404, "not_found", "artifact not found")
-        path = Path(artifact["path"]).resolve()
+        try:
+            path = service.artifact_path(artifact)
+        except ValueError as error:
+            # A backend that owns no local bytes has nothing to stream; the
+            # signed-URL redirect lands with the first remote backend.
+            fail(409, "storage_unavailable", str(error))
         job_output = output_root() / job_id
         job_data = service.jobs_dir / job_id
         allowed = [job_output, job_data]
@@ -592,7 +596,7 @@ def create_app(data_dir: str | Path | None = None,
             fail(404, "not_found", "artifact not found")
         artifact["display_name"] = name.strip()
         manifest.save(service.jobs_dir)
-        return {key: value for key, value in artifact.items() if key != "path"}
+        return artifact
 
     @app.delete("/api/v1/jobs/{job_id}/artifacts/{artifact_id}")
     def delete_artifact(job_id: str, artifact_id: str, confirm: bool = False):
@@ -607,13 +611,9 @@ def create_app(data_dir: str | Path | None = None,
             fail(404, "not_found", "artifact not found")
         if artifact.get("kind") == "source":
             fail(409, "source_immutable", "source artifacts cannot be deleted")
-        path = Path(artifact["path"])
-        if path.exists():
-            send2trash(str(path))
+        service.storage.remove(artifact["storage"]["key"])
         artifact["state"] = "deleted"
         artifact["deleted_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        if manifest.current_artifact_id == artifact_id:
-            manifest.artifact_path = None
         manifest.save(service.jobs_dir)
         return {"deleted": True, "artifact_id": artifact_id}
 

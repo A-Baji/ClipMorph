@@ -29,8 +29,13 @@ artifacts, and platform results.
   invalid. Objects merge; scalars/lists replace. CONFIG_LAYERS.md owns config
   semantics.
 - Conversion artifacts are in `output_dir/<job_id>/`, registered in the
-  manifest. Review sessions live in the job directory. Trash local files only;
-  never delete remote posts.
+  manifest as a `{backend, key}` storage reference relative to that root
+  (never a local `path`). Review sessions live in the job directory. Trash
+  local files only; never delete remote posts.
+- Artifact bytes are read through the configured storage backend
+  (`app.yml:storage.backend`, phase 1 `local` only); `local_path` is a
+  local-backend-only accessor behind `JobService.artifact_path`. Uploads always
+  read a staged copy under `data_dir/staging`, released after the attempt.
 - Use shared source/config/layout/transcript/preflight/platform validation;
   CLI and API use the same error fields/messages.
 
@@ -61,9 +66,9 @@ interruption.
 | `clipmorph job review ID CHECKPOINT [--edits FILE] [--accept] [--json]`; `job render ID` | `--edits` supplies a complete transcript edit-session YAML/JSON object. Review acceptance uses the current manifest revision; render creates a new immutable artifact. |
 | `clipmorph job upload ID [--platform PLATFORM] [--json]`; `job upload retry ID PLATFORM [--attempt-id ID]` | Submit the accepted upload draft or retry one failed attempt. Retries use frozen artifact/settings and upload immediately; historical use requires explicit ID and confirmation. PLATFORM is a supported id (`youtube`, `instagram`, `tiktok`, `twitter`) validated against `clipmorph/platforms.py::SUPPORTED_PLATFORMS`, which stays the single source of truth. |
 | `clipmorph job uploads ID [--status S] [--platform P] [--since ISO] [--json]` | List a job's upload attempt history with optional status, platform, and since filters. Returns filtered attempts with result fields (`platform_post_id`, `platform_url`, `published_at`). |
-| `clipmorph job artifacts list ID [--json]`; `job artifacts preview ID ARTIFACT_ID`; `job artifacts download ID ARTIFACT_ID --destination PATH`; `job artifacts rename ID ARTIFACT_ID --name NAME`; `job artifacts delete ID ARTIFACT_ID --yes`; `job artifacts prune ID [--json]` | Operate on registered artifact IDs; rename changes display metadata only, delete trashes local bytes and retains a manifest tombstone. `prune` applies `app.yml:retention.artifacts` and prints `{pruned,bytes_freed}`. |
+| `clipmorph job artifacts list ID [--json]`; `job artifacts preview ID ARTIFACT_ID`; `job artifacts download ID ARTIFACT_ID --destination PATH`; `job artifacts rename ID ARTIFACT_ID --name NAME`; `job artifacts delete ID ARTIFACT_ID --yes`; `job artifacts prune ID [--json]` | Operate on registered artifact IDs; rename changes display metadata only, delete recycles the bytes through the storage backend and retains a manifest tombstone. `prune` applies `app.yml:retention.artifacts` and prints `{pruned,bytes_freed}`. |
 | `clipmorph layout list [--json]`; `layout create FILE [--json]`; `layout get ID [--json]`; `layout delete ID --yes` | CRUD validated global `{id,name,layout}` records; create reads YAML/JSON. |
-| `clipmorph doctor [--json] [--source PATH]` | Read-only environment health check (FFmpeg/FFprobe binaries, app.yml, source/output directories, layouts, fonts, credentials, transcription device, and optional source media); text report by default, `--json` emits `{"checks":[{"id","status","detail"}]}` with status `ok\|warning\|failed`. CLI-only surface; no API route — an intentional CLI-only mechanic. Exit `0` when no check failed (warnings allowed), `1` when at least one failed. |
+| `clipmorph doctor [--json] [--source PATH]` | Read-only environment health check (FFmpeg/FFprobe binaries, app.yml, source/output directories, layouts, fonts, credentials, transcription device, artifact storage backend, and optional source media); text report by default, `--json` emits `{"checks":[{"id","status","detail"}]}` with status `ok\|warning\|failed\|unavailable`. The `artifacts_storage` check probes the configured backend (a `.<uuid>.probe` object written and recycled inside the artifact root) and reports `unavailable` when the backend cannot be built. CLI-only surface; no API route — an intentional CLI-only mechanic. Exit `0` when no check failed (warnings and `unavailable` allowed), `1` when at least one failed. |
 
 Map CLI controls to CONFIG_LAYERS.md: no-confirm -> `general.no_confirm`, clean
 -> `general.clean`, no-conversion/no-subs/no-upload -> `conversion.skip`/
@@ -101,8 +106,8 @@ root-level names under `source_dir`; validate before queueing.
 | `GET/PUT/DELETE /jobs/{id}/checkpoints/upload` | GET returns `{upload,checkpoint}`; PUT body `{expected_revision,upload,reopen?}` updates only the pending draft; DELETE query `expected_revision` resets it to frozen global defaults. Mutations do not change prior attempts. A draft change also discards a schedule armed by an earlier submission: its timers are cancelled and its pending attempts are unmarked, so only the next submission uploads. |
 | `GET /jobs/{id}/uploads?status=&platform=&since=`; `POST /jobs/{id}/upload` | Read append-only history with optional status, platform, and since filters; submit pending draft after review against current artifact; accepted work `202 {job_id,attempts,scheduled,status_url,detection}`. A snapshot whose `upload.schedule.publish_at` is in the future returns `scheduled: true` and leaves the attempts `scheduled` for a later timer. Attempt statuses are `pending`, `scheduled`, `running`, `published`, `failed`, `cancelled`. A duplicate active submission returns `409`. Platform-side detection may mark attempts `published` without running a pipeline. A completed attempt's `result` carries `progress_percent`, the last observed live upload percent (not extrapolated); live percents are never rewritten into a terminal record. |
 | `POST /jobs/{id}/uploads/{platform}/retry` | Body names failed `attempt_id`; reuse frozen settings/artifact. Historical retry requires matching `artifact_id` and `confirm_historical_artifact:true`. A retry ignores any `publish_at` in the frozen snapshot and uploads immediately. |
-| `GET /jobs/{id}/artifacts`; `GET /jobs/{id}/artifacts/{artifact_id}/preview`; `GET .../download` | List immutable revisions without local paths; stream registered bytes; missing/deleted bytes or paths outside allowed roots return `404`. |
-| `GET/PATCH/DELETE /jobs/{id}/artifacts/{artifact_id}` | PATCH body `{display_name}` changes display metadata only. DELETE requires `confirm=true`, removes local bytes but retains a manifest tombstone/upload references; source artifacts cannot be deleted. |
+| `GET /jobs/{id}/artifacts`; `GET /jobs/{id}/artifacts/{artifact_id}/preview`; `GET .../download` | List immutable revisions with their `{backend, key}` storage reference and no local path; stream registered bytes from the local backend; missing/deleted bytes or paths outside allowed roots return `404`, and a backend that owns no local bytes returns `409 storage_unavailable`. |
+| `GET/PATCH/DELETE /jobs/{id}/artifacts/{artifact_id}` | PATCH body `{display_name}` changes display metadata only. DELETE requires `confirm=true`, recycles the bytes through the storage backend but retains a manifest tombstone/upload references; source artifacts cannot be deleted. |
 | `POST /jobs/{id}/artifacts/prune` | Apply the `app.yml:retention.artifacts` policy; `202 {pruned,bytes_freed}`, `404` for a missing job, `409` when bytes could not be recycled (nothing is saved). Only superseded non-source artifacts are candidates; `current`/`stale` are never pruned. No policy set is a no-op. |
 
 Explicit records override matching sidecars but never narrow all-source
@@ -152,6 +157,7 @@ upload is repeated without an explicit user action.
   `tests/test_oauth.py`,
   `tests/test_reconciliation.py`, `tests/test_retention.py`,
   `tests/test_service.py`, `tests/test_job_manifest.py`,
+  `tests/test_storage.py`, `tests/test_doctor.py`,
   `tests/test_auth.py`, `tests/test_cli.py`, `tests/test_cli_surface.py`, and
   `tests/test_web.py`.
 
@@ -191,12 +197,15 @@ upload is repeated without an explicit user action.
 <data_dir>/jobs/<job_id>/job.yml
 <data_dir>/jobs/<job_id>/transcripts/revision-0001.json
 <output_dir>/<job_id>/<registered media artifacts>
+<data_dir>/staging/<per-attempt upload copies, removed after the attempt>
 ```
 
 Manifest stores schema version, ID, normalized source path/hash, effective
 config, `configuration_sources.global_defaults` snapshot, status, steps/progress,
 checkpoint revisions, artifact metadata/history, warnings/errors and append-only
-upload attempts. It never stores override patches. `job.yml` is finalized
+upload attempts. Every artifact record carries a `storage` reference
+(`{backend, key}`, key relative to `output_dir`) instead of a local `path`.
+It never stores override patches. `job.yml` is finalized
 after merge/normalization/derivation. Transcript sessions are immutable files
 under `transcripts/`; conversion outputs are immutable revisions referenced by
 artifact ID/hash in the manifest.
@@ -241,7 +250,8 @@ CONFIG_LAYERS.md remains authoritative for field meaning.
 | Dedup guard | POST /upload; POST /uploads/{platform}/retry | Submission blocked while active attempt exists | Same platform + artifact + content hash + active status | None | `409` on duplicate active attempt | CLI 2; API 409 | Service dedup guard tests |
 | Platform-side detection | POST /upload (YouTube with read scope) | Existing post detected, upload skipped | `find_existing_post` hook per adapter | None | Attempt `published` with found id/url; `unavailable` note on scope failure | CLI 1; API 202 | Detection hook tests |
 | Cancel scheduled | POST /jobs/{id}/cancel (job in `scheduled` status) | Scheduled attempts aborted pre-firing | Disarm timers + mark `cancelled` | None | Attempts `cancelled`; job `cancelled` | CLI 0; API 200 | Service cancel path tests |
-| Artifact preview/download/rename/delete | GET/PATCH/DELETE artifact by ID plus preview/download | Table/preview/download/display-name/trash | Registered immutable ID, safe metadata, availability, confirmation | Display metadata or artifact availability only | Manifest revisions/tombstones; local bytes; upload references retained | CLI 1/2; API 200/400/404/409 | Bytes/headers/containment/rename/delete |
+| Artifact preview/download/rename/delete | GET/PATCH/DELETE artifact by ID plus preview/download | Table/preview/download/display-name/trash | Registered immutable ID, safe metadata, availability, confirmation | Display metadata or artifact availability only | Manifest revisions/tombstones with `storage` refs; bytes recycled through the backend; upload references retained | CLI 1/2; API 200/400/404/409 | Bytes/headers/containment/rename/delete |
+| Artifact storage backend | `app.yml:storage.backend`; doctor `artifacts_storage` | Settings backend selector; doctor report | Unknown backend `422`; backend health probe | None (app-level) | Every artifact keyed relative to `output_dir` | CLI 1; API 422 | `tests/test_storage.py`; `tests/test_doctor.py` |
 | Retention/prune | `job artifacts prune ID`; POST /jobs/{id}/artifacts/prune | Apply app-level retention policy | superseded + non-source only; `current`/`stale` protected | None (app-level, not part of the job merge) | Tombstoned manifest entries; bytes to trash | CLI 0/1; API 202/404 | `tests/test_retention.py`; CLI/web cases |
 | Restart reconciliation | Implicit on every service construction | Queue self-healing | Recorded `running` status; unreadable manifests skipped | None | `interrupted_by_restart` checkpoint failure | CLI 0/1; API n/a | `tests/test_reconciliation.py` |
 | Events/progress/errors | GET job events SSE | Queue progress/checkpoint/errors | Shared status serializer | No config change | Manifest progress/status/errors | Same error fields; terminal SSE; `upload_progress` is live/in-memory only (empty when idle) | Event/status parity |
@@ -261,7 +271,7 @@ or network calls.
 | App/auth/layout | Init/lazy startup, path resolution/replacement, registry, masking/env precedence/auth-only writes, preset+inline override. CLI/auth/layout/web tests. |
 | Conversion/review | Crop/placement/captions/typography/renderer/strict; transcript hash/roundtrip; invalidation/rerender. Layout/render/transcript/web tests. |
 | Checkpoint/upload | Review gates, content/platform updates, partial result, one-platform retry, historical result, future `publish_at` deferral, schedule disarm on draft change/rerender, and immediate retry. Service/web/upload; checkpoint tests under #180. |
-| Lifecycle/artifacts | CRUD/status, immutable source, confirm, cancel/resume/events, preview/download containment, rename/trash/pointers/no remote deletion, retention prune and restart reconciliation. Service/web/CLI tests. |
+| Lifecycle/artifacts | CRUD/status, immutable source, confirm, cancel/resume/events, preview/download containment, rename/recycle/pointers/no remote deletion, storage-reference keys and staged upload copies, retention prune and restart reconciliation. Service/web/CLI/storage tests. |
 | Frontend | Source/results, masked settings, layouts, review checkpoints, `publish_at` field and scheduled-attempt badge, progress/errors, desktop/mobile. Extend `test_e2e_dashboard.py`. |
 
 Do not introduce legacy configuration/manifest readers or duplicate validation paths; preserve lazy media imports.

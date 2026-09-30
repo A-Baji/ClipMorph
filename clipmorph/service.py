@@ -7,6 +7,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import logging
 from pathlib import Path
+import shutil
 from threading import Event, Lock, Timer
 from typing import Any, Callable
 import uuid
@@ -24,6 +25,7 @@ from clipmorph.job import safe_error_message
 from clipmorph.job import source_sha256
 from clipmorph.platforms import enabled_platforms
 from clipmorph.platforms import SUPPORTED_PLATFORMS_SET
+from clipmorph.storage import ArtifactStorage, LocalArtifactStorage, make_storage
 
 
 logger = logging.getLogger(__name__)
@@ -102,6 +104,11 @@ class JobService:
         self._tokens: dict[str, CancellationToken] = {}
         self._futures: dict[str, Future] = {}
         self._scheduled_timers: dict[str, list[Timer]] = {}
+        # Artifact storage backend selected by app.yml; staging holds the
+        # machine-local copy upload adapters read during one attempt.
+        self._storage = make_storage(
+            load_app_configuration(self.app_config_path), self.data_dir)
+        self._staging_dir = self.data_dir / "staging"
         # Live per-platform upload percents (job_id -> {platform: percent}),
         # held in service memory only while an upload is in flight; the
         # final snapshot is written into the attempt record at completion.
@@ -110,6 +117,55 @@ class JobService:
         # that only genuinely scheduled uploads survive into the re-arm scan.
         self._reconcile_interrupted_jobs()
         self._rearm_scheduled_attempts()
+
+    @property
+    def storage(self) -> ArtifactStorage:
+        """The artifact storage backend this workspace selected in app.yml."""
+        return self._storage
+
+    def artifact_path(self, artifact: dict[str, Any]) -> Path:
+        """Return the local file path of one registered artifact record.
+
+        Preview and download hand a real file to the browser or to a
+        ``FileResponse``, so this resolves the record's key through the
+        backend that owns the bytes. A backend without local bytes has no
+        path to hand over and says so.
+        """
+        storage = self._storage
+        if not isinstance(storage, LocalArtifactStorage):
+            raise ValueError(
+                f"storage backend {type(storage).__name__} has no local path")
+        return storage.local_path(artifact["storage"]["key"])
+
+    def _stage_artifact(self, key: str) -> Path:
+        """Copy one artifact into a private staging directory for the caller.
+
+        Each copy lands in its own directory under ``data_dir/staging``, so
+        concurrent attempts of the same artifact never share bytes and the
+        caller releases exactly what it read with ``_release_staging``.
+        """
+        return self._storage.stage(key, self._staging_dir / uuid.uuid4().hex)
+
+    def _release_staging(self, staged_path: Path) -> None:
+        """Drop one staged artifact copy and the directory that held it."""
+        try:
+            staged_path.unlink(missing_ok=True)
+        except OSError as error:  # pragma: no cover - locked scratch file
+            logger.warning("Could not remove staged artifact %s: %s",
+                           staged_path, error)
+        shutil.rmtree(staged_path.parent, ignore_errors=True)
+
+    def _staged_artifact_sha256(self, key: str) -> str:
+        """Hash one artifact's bytes through a throwaway staging copy.
+
+        Raises ``FileNotFoundError`` when the backend no longer holds the
+        bytes, which callers report as unavailable bytes.
+        """
+        staged = self._stage_artifact(key)
+        try:
+            return source_sha256(staged)
+        finally:
+            self._release_staging(staged)
 
     def _manifest_paths(self) -> list[Path]:
         """Return every job manifest path, tolerating an absent jobs tree."""
@@ -232,19 +288,19 @@ class JobService:
                     continue
                 self._schedule_attempts(
                     manifest.job_id, [item["attempt_id"] for item in group],
-                    str(artifact["path"]), snapshot,
+                    artifact["storage"]["key"], snapshot,
                     [item["platform"] for item in group],
                     _parse_utc_timestamp(stamp))
 
     def _schedule_attempts(self, job_id: str, attempt_ids: list[str],
-                           artifact_path: str, upload_config: dict[str, Any],
+                           artifact_key: str, upload_config: dict[str, Any],
                            platforms: list[str], publish_at: datetime) -> Timer:
         """Run one upload attempt group at publish_at on a daemon timer."""
         delay = max(
             0.0,
             (publish_at - datetime.now(timezone.utc)).total_seconds())
         handle = Timer(delay, self._run_upload_attempts,
-                       args=(job_id, list(attempt_ids), str(artifact_path),
+                       args=(job_id, list(attempt_ids), artifact_key,
                              deepcopy(upload_config), list(platforms)))
         handle.daemon = True
         with self._lock:
@@ -754,10 +810,11 @@ class JobService:
                         if pre_artifact_id else None)
         if pre_artifact is None:
             raise ValueError("selected artifact is unavailable")
-        pre_artifact_path = Path(pre_artifact["path"])
-        if not pre_artifact_path.is_file():
-            raise ValueError("selected artifact bytes are unavailable")
-        pre_actual_hash = source_sha256(pre_artifact_path)
+        pre_storage_key = pre_artifact["storage"]["key"]
+        try:
+            pre_actual_hash = self._staged_artifact_sha256(pre_storage_key)
+        except FileNotFoundError as error:
+            raise ValueError("selected artifact bytes are unavailable") from error
         if (not pre_artifact.get("sha256")
                 or pre_actual_hash != pre_artifact["sha256"]):
             raise ValueError("selected artifact hash does not match manifest")
@@ -784,10 +841,11 @@ class JobService:
             is_historical = selected_artifact_id != manifest.current_artifact_id
             if is_historical and (not confirm_historical_artifact or not artifact_id):
                 raise ValueError("historical artifact requires explicit confirmation")
-            artifact_path = Path(artifact["path"])
-            if not artifact_path.is_file():
-                raise ValueError("selected artifact bytes are unavailable")
-            actual_artifact_hash = source_sha256(artifact_path)
+            artifact_key = artifact["storage"]["key"]
+            try:
+                actual_artifact_hash = self._staged_artifact_sha256(artifact_key)
+            except FileNotFoundError as error:
+                raise ValueError("selected artifact bytes are unavailable") from error
             if not artifact.get("sha256") or actual_artifact_hash != artifact["sha256"]:
                 raise ValueError("selected artifact hash does not match manifest")
 
@@ -885,12 +943,12 @@ class JobService:
                             if platform not in existing_posts]
         if scheduled_for is not None and attempt_ids:
             self._schedule_attempts(
-                job_id, attempt_ids, str(artifact_path), upload_config,
+                job_id, attempt_ids, artifact_key, upload_config,
                 upload_platforms, scheduled_for)
         elif attempt_ids:
             future = self.executor.submit(
                 self._run_upload_attempts, job_id, attempt_ids,
-                str(artifact_path), upload_config, upload_platforms)
+                artifact_key, upload_config, upload_platforms)
             with self._lock:
                 self._futures[f"upload:{job_id}"] = future
         return {"job_id": job_id, "attempts": attempts,
@@ -999,7 +1057,7 @@ class JobService:
             return dict(self._live_progress.get(job_id, {}))
 
     def _run_upload_attempts(self, job_id: str, attempt_ids: list[str],
-                             artifact_path: str, upload_config: dict[str, Any],
+                             artifact_key: str, upload_config: dict[str, Any],
                              platforms: list[str]) -> None:
         from clipmorph.upload_attempts import execute_upload_pipeline
         from clipmorph.upload_attempts import normalize_results
@@ -1015,14 +1073,30 @@ class JobService:
                 attempt["started_at"] = now
             manifest.save(self.jobs_dir)
         try:
-            results = execute_upload_pipeline(
-                platforms, artifact_path, upload_config,
-                progress_callback=self._on_progress(job_id))
+            staged_path = self._stage_artifact(artifact_key)
         except Exception as error:
+            # Staging is the precondition of the transport, so a storage
+            # failure fails the attempts the way an upload failure does and is
+            # recorded with its own code.
+            message = safe_error_message(error)
+            self._record_manifest_error(job_id, "staging_failed", message)
             now = datetime.now(timezone.utc).isoformat()
-            results = {platform: {"success": False, "error": str(error),
-                                  "started_at": now, "completed_at": now}
-                       for platform in platforms}
+            results = {platform: {
+                "success": False,
+                "error": f"artifact staging failed: {message}",
+                "started_at": now, "completed_at": now} for platform in platforms}
+        else:
+            try:
+                results = execute_upload_pipeline(
+                    platforms, str(staged_path), upload_config,
+                    progress_callback=self._on_progress(job_id))
+            except Exception as error:
+                now = datetime.now(timezone.utc).isoformat()
+                results = {platform: {"success": False, "error": str(error),
+                                      "started_at": now, "completed_at": now}
+                           for platform in platforms}
+            finally:
+                self._release_staging(staged_path)
 
         normalized_results = normalize_results(results)
         with self._lock:
@@ -1081,6 +1155,18 @@ class JobService:
             # restart (or a later submission) starts from empty.
             self._live_progress.pop(job_id, None)
 
+    def _record_manifest_error(self, job_id: str, code: str,
+                               message: str) -> None:
+        """Append one coded error to a job's manifest."""
+        with self._lock:
+            manifest = self.get_job(job_id)
+            manifest.errors.append({
+                "code": code,
+                "message": message,
+                "occurred_at": datetime.now(timezone.utc).isoformat(),
+            })
+            manifest.save(self.jobs_dir)
+
     def retry_upload(self, job_id: str, platform: str, attempt_id: str,
                      artifact_id: str | None = None,
                      confirm_historical_artifact: bool = False) -> dict[str, Any]:
@@ -1098,10 +1184,15 @@ class JobService:
                 not confirm_historical_artifact or artifact_id != target_artifact_id):
             raise ValueError("historical artifact retry requires matching ID and confirmation")
         artifact = manifest.artifacts.get(target_artifact_id)
-        if artifact is None or not Path(artifact["path"]).is_file():
+        if artifact is None:
             raise ValueError("retry artifact bytes are unavailable")
+        artifact_key = artifact["storage"]["key"]
+        try:
+            actual_hash = self._staged_artifact_sha256(artifact_key)
+        except FileNotFoundError as error:
+            raise ValueError("retry artifact bytes are unavailable") from error
         if (not artifact.get("sha256")
-                or source_sha256(artifact["path"]) != artifact["sha256"]
+                or actual_hash != artifact["sha256"]
                 or previous.get("artifact_hash") != artifact["sha256"]):
             raise ValueError("retry artifact hash does not match failed attempt")
         checkpoint = manifest.checkpoints["upload"]
@@ -1147,7 +1238,7 @@ class JobService:
         total_bytes = 0
         obsolete: list[tuple[str, datetime, int]] = []
         for artifact_id, artifact in manifest.artifacts.items():
-            size = _artifact_size(artifact)
+            size = _artifact_size(artifact, self._storage)
             if artifact.get("state") != "deleted":
                 total_bytes += size
             if (artifact.get("state") != "superseded"
@@ -1180,21 +1271,24 @@ class JobService:
         pruned: list[str] = []
         bytes_freed = 0
         if selected:
-            from send2trash import send2trash
             now_iso = now.isoformat()
             for artifact_id, _obsolete_at, size in obsolete:
                 if artifact_id not in selected:
                     continue
                 artifact = manifest.artifacts[artifact_id]
-                path = Path(artifact["path"])
-                if path.exists():
-                    send2trash(str(path))
+                storage_key = artifact["storage"]["key"]
+                try:
+                    self._storage.remove(storage_key)
                     bytes_freed += size
+                except Exception as error:
+                    logger.warning("Could not remove artifact %s: %s",
+                                   artifact_id, error)
+                    manifest.warnings.append(
+                        f"artifact {artifact_id} could not be recycled: {error}")
+                    continue
                 artifact["state"] = "deleted"
                 artifact["deleted_at"] = now_iso
                 pruned.append(artifact_id)
-            if manifest.current_artifact_id in set(pruned):
-                manifest.artifact_path = None
             manifest.save(self.jobs_dir)
         return {"pruned": pruned, "bytes_freed": bytes_freed}
 
@@ -1362,10 +1456,19 @@ class JobService:
         self.executor.shutdown(wait=True, cancel_futures=False)
 
 
-def _artifact_size(artifact: dict[str, Any]) -> int:
-    """Return an artifact's on-disk size, or 0 when its bytes are gone."""
-    path = Path(str(artifact.get("path", "")))
+def _artifact_size(artifact: dict[str, Any],
+                   storage: ArtifactStorage) -> int:
+    """Return one artifact's stored size, or 0 when its bytes are gone.
+
+    Only a backend that owns local bytes is measured today; a remote backend
+    reports its own object sizes when it lands, and until then its artifacts
+    count as nothing toward ``retention.artifacts.max_bytes``.
+    """
+    key = artifact.get("storage", {}).get("key", "")
+    if not key or not isinstance(storage, LocalArtifactStorage):
+        return 0
     try:
+        path = storage.local_path(key)
         return path.stat().st_size if path.is_file() else 0
     except OSError:
         return 0

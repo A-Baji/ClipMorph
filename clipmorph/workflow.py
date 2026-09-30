@@ -12,6 +12,7 @@ from clipmorph.job import JobManifest, resolve_output_dir
 from clipmorph.platforms import enabled_platforms as resolve_enabled_platforms
 from clipmorph.preflight import PreflightValidator
 from clipmorph.service import CancellationToken, JobService
+from clipmorph.storage import storage_key_for
 
 
 def _transition(manifest: JobManifest, stage: str, status: str,
@@ -133,7 +134,9 @@ def execute_job(manifest: JobManifest, token: CancellationToken,
         if conversion_checkpoint["status"] != "skipped":
             _transition(manifest, "conversion", "skipped", jobs_root)
         if manifest.current_artifact_id is None:
-            manifest.set_artifact(manifest.source_path, jobs_root, name="source")
+            manifest.set_artifact(
+                manifest.source_path, jobs_root, name="source",
+                storage_key=storage_key_for(output_root, manifest.source_path))
         manifest = JobManifest.load(manifest.job_id, jobs_root)
     elif conversion_checkpoint["status"] == "awaiting_review":
         return
@@ -158,7 +161,9 @@ def execute_job(manifest: JobManifest, token: CancellationToken,
             layout=conversion.get("layout", {}),
         )
         artifact_path = conversion_pipeline.run()
-        manifest.set_artifact(artifact_path, jobs_root, name="conversion")
+        manifest.set_artifact(
+            artifact_path, jobs_root, name="conversion",
+            storage_key=storage_key_for(output_root, artifact_path))
         manifest = JobManifest.load(manifest.job_id, jobs_root)
         _transition(manifest, "conversion", "awaiting_review", jobs_root)
         manifest.set_step("conversion", "awaiting_review", jobs_root,

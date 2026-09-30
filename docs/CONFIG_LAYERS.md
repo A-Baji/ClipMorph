@@ -50,6 +50,8 @@ retention:
     max_bytes: null
   backups:
     keep_n: null
+storage:
+  backend: local
 ```
 
 `config_version` is a stamp of the app-configuration schema shape, maintained
@@ -61,6 +63,24 @@ any other field is inspected, so an outdated file produces one actionable
 error instead of a validation cascade. `clipmorph init` run beside an existing
 `app.yml` regenerates a current template to copy settings into; the CLI never
 rewrites an existing `app.yml` in place.
+
+`storage.backend` selects the artifact storage backend and is app-level, never
+part of the job configuration merge. Phase 1 accepts only `local`; any other
+value is rejected as `unknown storage backend` (web `PUT /configuration`
+answers `422 invalid_configuration`). `clipmorph.storage.make_storage` is the
+single place that builds the backend, and `JobService` grabs it once at
+construction.
+
+`output_dir` doubles as the artifact root: every manifest artifact record
+stores a storage reference `{backend, key}` instead of a local `path`, and the
+`key` is always relative to that root (`<job_id>/<artifact_name>.mp4`). A file
+outside the root — the source artifact in `source_dir` — keys with the
+relative path that reaches it (`../sources/clip.mp4`), so one root resolves
+every key on the `local` backend and the same key is the object key a remote
+backend would use. `clipmorph.storage.storage_key_for` is the only place that
+derives a key from a file and the root. The `signed_url` contract is
+explicitly unsupported for the `local` backend: local preview and download
+stream the registered bytes.
 
 `retention` bounds what a long-lived workspace accumulates. Every knob
 defaults to `null`, which makes retention a no-op until a policy is set:
@@ -78,7 +98,10 @@ defaults to `null`, which makes retention a no-op until a policy is set:
 `current` and `stale` artifacts are never auto-pruned, so a rerender target
 always survives; a pruned artifact keeps its manifest entry with a `deleted`
 tombstone, and its bytes go to the system trash rather than being unlinked.
-Enforcement runs automatically after a job's run completes and is also
+Pruning recycles through the configured storage backend's `remove(key)`; a
+backend failure is recorded as a manifest warning, never an error, because
+cleanup cannot fail a job. Enforcement runs automatically after a job's run
+completes and is also
 available on demand as `clipmorph job artifacts prune ID` and
 `POST /api/v1/jobs/{id}/artifacts/prune`. Both return `{"pruned": [...],
 "bytes_freed": N}`; the no-policy case returns `{"pruned": []}` without
@@ -532,7 +555,7 @@ errors without credentials or secret values.
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "status": "awaiting_review",
   "current_checkpoint": "transcript",
   "current_configuration_hash": "<sha256 of canonical effective job.yml>",
@@ -632,13 +655,14 @@ at the new revision only after the referenced files are durable.
 
 Every successful render creates a new immutable conversion revision and a
 unique artifact id. A manifest artifact entry contains its id, revision, kind,
-relative or normalized path, SHA-256, conversion configuration hash,
+a `storage` reference (`{backend, key}` with the key relative to `output_dir`,
+never a local path), SHA-256, conversion configuration hash,
 transcript revision (when used), creation timestamp, and state. The manifest's
 `current_artifact_id` points to the latest render; it may point to a stale
 artifact while a rerender is required. A rerender never overwrites an existing
 artifact. The previous artifact is marked `superseded`; configuration edits
 before rerender mark it `stale`. Both remain on disk by default. Only explicit
-artifact deletion removes local bytes, and deletion leaves an audit tombstone
+artifact deletion removes the bytes, and deletion leaves an audit tombstone
 and all upload references intact.
 
 Each upload attempt is append-only and records attempt id, platform, artifact

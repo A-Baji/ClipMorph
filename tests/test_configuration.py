@@ -15,6 +15,7 @@ from clipmorph.configuration import resolve_job_configuration
 from clipmorph.configuration import save_app_configuration
 from clipmorph.configuration import discover_source_names
 from clipmorph.job import JobManifest
+from clipmorph.job import MANIFEST_SCHEMA_VERSION
 from clipmorph.service import JobService
 from clipmorph.service import CancellationToken
 from clipmorph.transcript import create_edit_session
@@ -398,7 +399,7 @@ class ManifestPersistenceTests(unittest.TestCase):
                 str(source), configuration, jobs_dir, global_defaults=defaults)
 
             job_directory = jobs_dir / manifest.job_id
-            self.assertEqual(manifest.schema_version, 2)
+            self.assertEqual(manifest.schema_version, MANIFEST_SCHEMA_VERSION)
             self.assertEqual(
                 yaml.safe_load((job_directory / "job.yml").read_text(encoding="utf-8")),
                 configuration)
