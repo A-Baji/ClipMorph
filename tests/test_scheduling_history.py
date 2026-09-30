@@ -10,23 +10,30 @@ from clipmorph.job import JobManifest
 from clipmorph.service import JobService
 
 
-def _reviewed_job(data_dir: Path) -> tuple[JobService, JobManifest]:
+def _reviewed_job(data_dir: Path, upload: dict | None = None
+                  ) -> tuple[JobService, JobManifest]:
     """Create a service whose single job sits at the upload review gate."""
     source_dir = data_dir / "sources"
     source_dir.mkdir(parents=True, exist_ok=True)
     source = source_dir / "clip.mp4"
     source.write_bytes(b"video")
     service = JobService(data_dir)
-    manifest = JobManifest.create(
-        str(source),
-        {"general": {"source": source.name},
-         "conversion": {"skip": True, "subtitles": {"skip": True}}},
-        service.jobs_dir)
+    configuration = {"conversion": {"skip": True, "subtitles": {"skip": True}}}
+    if upload:
+        configuration["upload"] = upload
+    manifest = JobManifest.create(str(source), configuration, service.jobs_dir)
     manifest.record_artifact("source", source, service.jobs_dir)
     manifest.transition_checkpoint(
         "upload", "awaiting_review", manifest.checkpoints["upload"]["revision"],
         service.jobs_dir)
     return service, manifest
+
+
+def _future_schedule() -> dict:
+    """An upload section carrying a publish_at an hour out."""
+    return {"schedule": {
+        "publish_at": (datetime.now(timezone.utc)
+                       + timedelta(hours=1)).isoformat()}}
 
 
 def _upload_results(platforms):
@@ -47,33 +54,25 @@ class UploadFilterTests(unittest.TestCase):
         """Submit uploads to create attempts with varied statuses."""
         with patch("clipmorph.upload_attempts.execute_upload_pipeline",
                    side_effect=_upload_results(["youtube", "tiktok"])):
-            # First submission: youtube + tiktok (both succeed)
-            service.submit_upload(
-                manifest.job_id, ["youtube", "tiktok"],
-                configuration_snapshot={
-                    "platforms": {"include": ["youtube", "tiktok"]},
-                    "content": {"title": "First", "description": "", "tags": []}})
+            # First submission: youtube + tiktok (both succeed), ignoring the
+            # schedule the job's configuration carries.
+            service.submit_upload(manifest.job_id, ["youtube", "tiktok"],
+                                  honor_schedule=False)
             service._futures[f"upload:{manifest.job_id}"].result(timeout=5)
 
             # Reset the checkpoint to awaiting_review for the second submission
             saved = service.get_job(manifest.job_id)
             service.update_upload_draft(
-                manifest.job_id, {"platforms": {"include": ["youtube"]}},
+                manifest.job_id, {"content": {"title": "Second"}},
                 saved.checkpoints["upload"]["revision"], reopen=True)
 
             # Second submission: youtube only (scheduled)
-            future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
-            service.submit_upload(
-                manifest.job_id, ["youtube"],
-                configuration_snapshot={
-                    "platforms": {"include": ["youtube"]},
-                    "schedule": {"publish_at": future},
-                    "content": {"title": "Second", "description": "", "tags": []}})
+            service.submit_upload(manifest.job_id, ["youtube"])
 
     def test_list_upload_attempts_filters_by_status(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
-            service, manifest = _reviewed_job(data_dir)
+            service, manifest = _reviewed_job(data_dir, _future_schedule())
             try:
                 self._submit_with_attempts(service, manifest)
 
@@ -92,7 +91,7 @@ class UploadFilterTests(unittest.TestCase):
     def test_list_upload_attempts_filters_by_platform(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
-            service, manifest = _reviewed_job(data_dir)
+            service, manifest = _reviewed_job(data_dir, _future_schedule())
             try:
                 self._submit_with_attempts(service, manifest)
 
@@ -111,7 +110,7 @@ class UploadFilterTests(unittest.TestCase):
     def test_list_upload_attempts_filters_by_since(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
-            service, manifest = _reviewed_job(data_dir)
+            service, manifest = _reviewed_job(data_dir, _future_schedule())
             try:
                 self._submit_with_attempts(service, manifest)
 
@@ -147,7 +146,7 @@ class UploadFilterTests(unittest.TestCase):
     def test_list_upload_attempts_combines_filters(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
-            service, manifest = _reviewed_job(data_dir)
+            service, manifest = _reviewed_job(data_dir, _future_schedule())
             try:
                 self._submit_with_attempts(service, manifest)
 
@@ -172,11 +171,7 @@ class PlatformDetectionTests(unittest.TestCase):
                            side_effect=_upload_results(["youtube"])), \
                      patch("clipmorph.service.JobService._detect_existing_posts",
                            return_value=({"youtube": "existing-video-id"}, [])):
-                    result = service.submit_upload(
-                        manifest.job_id, ["youtube"],
-                        configuration_snapshot={
-                            "platforms": {"include": ["youtube"]},
-                            "content": {"title": "Test", "description": "", "tags": []}})
+                    result = service.submit_upload(manifest.job_id, ["youtube"])
 
                 attempt = result["attempts"][0]
                 self.assertEqual(attempt["status"], "published")
@@ -197,11 +192,7 @@ class PlatformDetectionTests(unittest.TestCase):
                            side_effect=_upload_results(["youtube"])), \
                      patch("clipmorph.service.JobService._detect_existing_posts",
                            return_value=({}, ["youtube"])):
-                    result = service.submit_upload(
-                        manifest.job_id, ["youtube"],
-                        configuration_snapshot={
-                            "platforms": {"include": ["youtube"]},
-                            "content": {"title": "Test", "description": "", "tags": []}})
+                    result = service.submit_upload(manifest.job_id, ["youtube"])
 
                 self.assertEqual(result["detection"]["unavailable"], ["youtube"])
                 self.assertEqual(result["attempts"][0]["status"], "pending")
@@ -217,11 +208,7 @@ class PlatformDetectionTests(unittest.TestCase):
                            side_effect=_upload_results(["tiktok"])), \
                      patch("clipmorph.service.JobService._detect_existing_posts",
                            return_value=({}, [])) as detect:
-                    result = service.submit_upload(
-                        manifest.job_id, ["tiktok"],
-                        configuration_snapshot={
-                            "platforms": {"include": ["tiktok"]},
-                            "content": {"title": "Test", "description": "", "tags": []}})
+                    result = service.submit_upload(manifest.job_id, ["tiktok"])
 
                 detect.assert_called_once()
                 self.assertEqual(result["attempts"][0]["status"], "pending")

@@ -4,12 +4,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from clipmorph.job import JobManifest
-from clipmorph.service import JobService
+from clipmorph.job import CHECKPOINT_STATES, JobManifest
+from clipmorph.platforms import SUPPORTED_PLATFORMS, resolve_upload_participants
+from clipmorph.service import CancellationToken, JobService
 from clipmorph.service import UnknownUploadAttempt
 from clipmorph.service import UploadAttemptNotScheduled
+from clipmorph.service import _stage_skipped, conversion_groups
 from clipmorph.storage import LocalArtifactStorage
 from clipmorph.upload_attempts import content_options
+from clipmorph.workflow import execute_job
 
 
 class JobServiceTests(unittest.TestCase):
@@ -55,23 +58,58 @@ class JobServiceTests(unittest.TestCase):
                 service.close()
 
 
-def _reviewed_job(data_dir: Path) -> tuple[JobService, JobManifest]:
-    """Create a service whose single job sits at the upload review gate."""
+def _reviewed_job(data_dir: Path, upload: dict | None = None
+                  ) -> tuple[JobService, JobManifest]:
+    """Create a service whose single job sits at the upload review gate.
+
+    ``upload`` seeds the job's own upload section.  A submission now freezes
+    each target platform's effective upload slice out of that configuration
+    instead of accepting a caller-supplied snapshot, so a scheduled upload is
+    produced by configuring ``schedule.publish_at`` here.
+    """
     source_dir = data_dir / "sources"
     source_dir.mkdir(parents=True, exist_ok=True)
     source = source_dir / "clip.mp4"
     source.write_bytes(b"video")
     service = JobService(data_dir)
+    configuration = {"conversion": {"skip": True, "subtitles": {"skip": True}}}
+    if upload:
+        configuration["upload"] = upload
     manifest = JobManifest.create(
-        str(source),
-        {"general": {"source": source.name},
-         "conversion": {"skip": True, "subtitles": {"skip": True}}},
-        service.jobs_dir)
+        str(source), configuration, service.jobs_dir)
     manifest.record_artifact("source", source, service.jobs_dir)
     manifest.transition_checkpoint(
         "upload", "awaiting_review", manifest.checkpoints["upload"]["revision"],
         service.jobs_dir)
     return service, manifest
+
+
+def _bindings_for(service: JobService, job_id: str, *attempts: dict) -> list[dict]:
+    """Rebuild the execution bindings a submission froze for these attempts.
+
+    ``submit_upload`` coalesces attempts that share an artifact and a frozen
+    upload slice into one binding; a test that fires a timer early drives the
+    same shape.
+    """
+    artifacts = service.get_job(job_id).artifacts
+    bindings: list[dict] = []
+    for attempt in attempts:
+        match = next((item for item in bindings
+                      if item["artifact_key"]
+                      == artifacts[attempt["artifact_id"]]["storage"]["key"]
+                      and item["upload_config"]
+                      == attempt["configuration_snapshot"]), None)
+        if match is None:
+            match = {
+                "artifact_key": artifacts[attempt["artifact_id"]]["storage"]["key"],
+                "upload_config": attempt["configuration_snapshot"],
+                "attempt_ids": [],
+                "platforms": [],
+            }
+            bindings.append(match)
+        match["attempt_ids"].append(attempt["attempt_id"])
+        match["platforms"].append(attempt["platform"])
+    return bindings
 
 
 def _upload_results(platforms):
@@ -89,18 +127,15 @@ class DeferredUploadTests(unittest.TestCase):
     def test_submit_upload_with_future_publish_at_defers_execution(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
-            service, manifest = _reviewed_job(data_dir)
-            self.addCleanup(service.close)
             publish_at = (datetime.now(timezone.utc)
                           + timedelta(hours=1)).isoformat()
+            service, manifest = _reviewed_job(
+                data_dir, {"schedule": {"publish_at": publish_at}})
+            self.addCleanup(service.close)
 
             with patch("clipmorph.upload_attempts.execute_upload_pipeline",
                        side_effect=_upload_results(["youtube"])) as pipeline:
-                result = service.submit_upload(
-                    manifest.job_id, ["youtube"],
-                    configuration_snapshot={
-                        "platforms": {"include": ["youtube"]},
-                        "schedule": {"publish_at": publish_at}})
+                result = service.submit_upload(manifest.job_id, ["youtube"])
 
                 pipeline.assert_not_called()
                 self.assertTrue(result["scheduled"])
@@ -117,10 +152,8 @@ class DeferredUploadTests(unittest.TestCase):
                 timer = service._scheduled_timers[f"upload:{manifest.job_id}"][0]
                 timer.cancel()
                 service._run_upload_attempts(
-                    manifest.job_id, [attempt["attempt_id"]],
-                    service.get_job(manifest.job_id).artifacts[
-                        attempt["artifact_id"]]["storage"]["key"],
-                    {"platforms": {"include": ["youtube"]}}, ["youtube"])
+                    manifest.job_id, _bindings_for(service, manifest.job_id,
+                                                   attempt))
 
             saved = service.get_job(manifest.job_id)
             self.assertEqual(pipeline.call_count, 1)
@@ -133,14 +166,11 @@ class DeferredUploadTests(unittest.TestCase):
     def test_scheduled_timers_are_cancelled_on_close(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
-            service, manifest = _reviewed_job(data_dir)
             publish_at = (datetime.now(timezone.utc)
                           + timedelta(hours=1)).isoformat()
-            service.submit_upload(
-                manifest.job_id, ["youtube"],
-                configuration_snapshot={
-                    "platforms": {"include": ["youtube"]},
-                    "schedule": {"publish_at": publish_at}})
+            service, manifest = _reviewed_job(
+                data_dir, {"schedule": {"publish_at": publish_at}})
+            service.submit_upload(manifest.job_id, ["youtube"])
             timer = service._scheduled_timers[f"upload:{manifest.job_id}"][0]
 
             service.close()
@@ -158,17 +188,13 @@ class DeferredUploadTests(unittest.TestCase):
             try:
                 publish_at = (datetime.now(timezone.utc)
                               + timedelta(hours=1)).isoformat()
-                service.submit_upload(
-                    manifest.job_id, ["youtube"],
-                    configuration_snapshot={
-                        "platforms": {"include": ["youtube"]},
-                        "schedule": {"publish_at": publish_at}})
+                service, manifest = _reviewed_job(
+                    data_dir, {"schedule": {"publish_at": publish_at}})
+                service.submit_upload(manifest.job_id, ["youtube"])
                 attempt = service.get_job(manifest.job_id).upload_attempts[0]
                 service._run_upload_attempts(
-                    manifest.job_id, [attempt["attempt_id"]],
-                    service.get_job(manifest.job_id).artifacts[
-                        attempt["artifact_id"]]["storage"]["key"],
-                    {"platforms": {"include": ["youtube"]}}, ["youtube"])
+                    manifest.job_id,
+                    _bindings_for(service, manifest.job_id, attempt))
                 failed = service.get_job(manifest.job_id).upload_attempts[0]
                 failed["status"] = "failed"
                 service.get_job(manifest.job_id).save(service.jobs_dir)
@@ -193,18 +219,14 @@ class DeferredUploadTests(unittest.TestCase):
     def test_publish_at_in_the_past_uploads_immediately(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
-            service, manifest = _reviewed_job(data_dir)
+            past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+            service, manifest = _reviewed_job(
+                data_dir, {"schedule": {"publish_at": past}})
             self.addCleanup(service.close)
 
             with patch("clipmorph.upload_attempts.execute_upload_pipeline",
                        side_effect=_upload_results(["youtube"])) as pipeline:
-                result = service.submit_upload(
-                    manifest.job_id, ["youtube"],
-                    configuration_snapshot={
-                        "platforms": {"include": ["youtube"]},
-                        "schedule": {"publish_at": (
-                            datetime.now(timezone.utc)
-                            - timedelta(hours=1)).isoformat()}})
+                result = service.submit_upload(manifest.job_id, ["youtube"])
                 service._futures[f"upload:{manifest.job_id}"].result(timeout=5)
 
             pipeline.assert_called_once()
@@ -213,27 +235,21 @@ class DeferredUploadTests(unittest.TestCase):
     def test_unparsable_publish_at_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
-            service, manifest = _reviewed_job(data_dir)
+            service, manifest = _reviewed_job(
+                data_dir, {"schedule": {"publish_at": "next tuesday"}})
             self.addCleanup(service.close)
 
             with self.assertRaisesRegex(ValueError, "ISO-8601"):
-                service.submit_upload(
-                    manifest.job_id, ["youtube"],
-                    configuration_snapshot={
-                        "platforms": {"include": ["youtube"]},
-                        "schedule": {"publish_at": "next tuesday"}})
+                service.submit_upload(manifest.job_id, ["youtube"])
 
     def test_startup_rearm_scheduled_attempts(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
-            service, manifest = _reviewed_job(data_dir)
             publish_at = (datetime.now(timezone.utc)
                           + timedelta(hours=2)).isoformat()
-            service.submit_upload(
-                manifest.job_id, ["youtube"],
-                configuration_snapshot={
-                    "platforms": {"include": ["youtube"]},
-                    "schedule": {"publish_at": publish_at}})
+            service, manifest = _reviewed_job(
+                data_dir, {"schedule": {"publish_at": publish_at}})
+            service.submit_upload(manifest.job_id, ["youtube"])
             service.close()
 
             restarted = JobService(data_dir)
@@ -256,20 +272,17 @@ class DeferredUploadTests(unittest.TestCase):
     def test_draft_change_disarms_the_armed_schedule(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
-            service, manifest = _reviewed_job(data_dir)
-            self.addCleanup(service.close)
             publish_at = (datetime.now(timezone.utc)
                           + timedelta(hours=1)).isoformat()
-            first = service.submit_upload(
-                manifest.job_id, ["youtube"],
-                configuration_snapshot={
-                    "platforms": {"include": ["youtube"]},
-                    "schedule": {"publish_at": publish_at}})
+            service, manifest = _reviewed_job(
+                data_dir, {"schedule": {"publish_at": publish_at}})
+            self.addCleanup(service.close)
+            first = service.submit_upload(manifest.job_id, ["youtube"])
             key = f"upload:{manifest.job_id}"
             armed = service._scheduled_timers[key][0]
 
             service.update_upload_draft(
-                manifest.job_id, {"platforms": {"include": ["youtube"]}},
+                manifest.job_id, {"content": {"title": "Updated draft"}},
                 service.get_job(manifest.job_id).checkpoints["upload"]["revision"])
 
             # The superseded schedule must not survive the draft edit, or the
@@ -283,12 +296,7 @@ class DeferredUploadTests(unittest.TestCase):
             self.assertNotIn("scheduled_publish_at",
                              discarded.upload_attempts[0])
 
-            second = service.submit_upload(
-                manifest.job_id, ["youtube"],
-                configuration_snapshot={
-                    "platforms": {"include": ["youtube"]},
-                    "schedule": {"publish_at": publish_at},
-                    "content": {"title": "Updated", "description": "", "tags": []}})
+            second = service.submit_upload(manifest.job_id, ["youtube"])
 
             timers = service._scheduled_timers[key]
             self.assertEqual(len(timers), 1)
@@ -299,16 +307,13 @@ class DeferredUploadTests(unittest.TestCase):
     def test_restart_does_not_rearm_a_discarded_schedule(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
-            service, manifest = _reviewed_job(data_dir)
             publish_at = (datetime.now(timezone.utc)
                           + timedelta(hours=1)).isoformat()
-            service.submit_upload(
-                manifest.job_id, ["youtube"],
-                configuration_snapshot={
-                    "platforms": {"include": ["youtube"]},
-                    "schedule": {"publish_at": publish_at}})
+            service, manifest = _reviewed_job(
+                data_dir, {"schedule": {"publish_at": publish_at}})
+            service.submit_upload(manifest.job_id, ["youtube"])
             service.update_upload_draft(
-                manifest.job_id, {"platforms": {"include": ["youtube"]}},
+                manifest.job_id, {"content": {"title": "Updated draft"}},
                 service.get_job(manifest.job_id).checkpoints["upload"]["revision"])
             service.close()
 
@@ -328,15 +333,12 @@ class DeferredUploadTests(unittest.TestCase):
     def test_rerender_disarms_the_schedule_it_supersedes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
-            service, manifest = _reviewed_job(data_dir)
-            self.addCleanup(service.close)
             publish_at = (datetime.now(timezone.utc)
                           + timedelta(hours=1)).isoformat()
-            service.submit_upload(
-                manifest.job_id, ["youtube"],
-                configuration_snapshot={
-                    "platforms": {"include": ["youtube"]},
-                    "schedule": {"publish_at": publish_at}})
+            service, manifest = _reviewed_job(
+                data_dir, {"schedule": {"publish_at": publish_at}})
+            self.addCleanup(service.close)
+            service.submit_upload(manifest.job_id, ["youtube"])
             key = f"upload:{manifest.job_id}"
             armed = service._scheduled_timers[key][0]
             service.get_job(manifest.job_id).invalidate_checkpoint(
@@ -358,43 +360,33 @@ class DeferredUploadTests(unittest.TestCase):
     def test_duplicate_active_attempt_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
-            service, manifest = _reviewed_job(data_dir)
+            future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+            service, manifest = _reviewed_job(data_dir, {
+                "content": {"title": "Test", "description": "", "tags": []},
+                "schedule": {"publish_at": future}})
             try:
                 # Create a scheduled attempt (active status) without firing it
-                future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
-                service.submit_upload(
-                    manifest.job_id, ["youtube"],
-                    configuration_snapshot={
-                        "platforms": {"include": ["youtube"]},
-                        "schedule": {"publish_at": future},
-                        "content": {"title": "Test", "description": "", "tags": []}})
+                service.submit_upload(manifest.job_id, ["youtube"])
                 # Reset the checkpoint to awaiting_review for the second submission
                 saved = service.get_job(manifest.job_id)
                 service.update_upload_draft(
-                    manifest.job_id, {"platforms": {"include": ["youtube"]}},
+                    manifest.job_id, {"content": {"title": "Test"}},
                     saved.checkpoints["upload"]["revision"], reopen=True)
 
                 with self.assertRaisesRegex(ValueError, "active upload attempt"):
-                    service.submit_upload(
-                        manifest.job_id, ["youtube"],
-                        configuration_snapshot={
-                            "platforms": {"include": ["youtube"]},
-                            "content": {"title": "Test", "description": "", "tags": []}})
+                    service.submit_upload(manifest.job_id, ["youtube"])
             finally:
                 service.close()
 
     def test_exact_attempt_retry_bypasses_dedup_guard(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
-            service, manifest = _reviewed_job(data_dir)
+            service, manifest = _reviewed_job(data_dir, {
+                "content": {"title": "Test", "description": "", "tags": []}})
             try:
                 with patch("clipmorph.upload_attempts.execute_upload_pipeline",
                            side_effect=_upload_results(["youtube"])):
-                    service.submit_upload(
-                        manifest.job_id, ["youtube"],
-                        configuration_snapshot={
-                            "platforms": {"include": ["youtube"]},
-                            "content": {"title": "Test", "description": "", "tags": []}})
+                    service.submit_upload(manifest.job_id, ["youtube"])
                     service._futures[f"upload:{manifest.job_id}"].result(timeout=5)
 
                 saved = service.get_job(manifest.job_id)
@@ -415,16 +407,13 @@ class DeferredUploadTests(unittest.TestCase):
     def test_published_attempt_propagates_platform_url(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
-            service, manifest = _reviewed_job(data_dir)
+            service, manifest = _reviewed_job(data_dir, {
+                "content": {"title": "Test", "description": "", "tags": []}})
             self.addCleanup(service.close)
 
             with patch("clipmorph.upload_attempts.execute_upload_pipeline",
                        side_effect=_upload_results(["youtube"])):
-                service.submit_upload(
-                    manifest.job_id, ["youtube"],
-                    configuration_snapshot={
-                        "platforms": {"include": ["youtube"]},
-                        "content": {"title": "Test", "description": "", "tags": []}})
+                service.submit_upload(manifest.job_id, ["youtube"])
                 service._futures[f"upload:{manifest.job_id}"].result(timeout=5)
 
             saved = service.get_job(manifest.job_id)
@@ -440,15 +429,12 @@ class DeferredUploadTests(unittest.TestCase):
     def test_cancel_all_scheduled_uploads_marks_cancelled(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
-            service, manifest = _reviewed_job(data_dir)
-            self.addCleanup(service.close)
             future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
-            service.submit_upload(
-                manifest.job_id, ["youtube"],
-                configuration_snapshot={
-                    "platforms": {"include": ["youtube"]},
-                    "schedule": {"publish_at": future},
-                    "content": {"title": "Test", "description": "", "tags": []}})
+            service, manifest = _reviewed_job(data_dir, {
+                "content": {"title": "Test", "description": "", "tags": []},
+                "schedule": {"publish_at": future}})
+            self.addCleanup(service.close)
+            service.submit_upload(manifest.job_id, ["youtube"])
 
             cancelled = service.cancel_all_scheduled_uploads(manifest.job_id)
             self.assertEqual(cancelled, 1)
@@ -476,15 +462,17 @@ class PlatformScheduledUploadTests(unittest.TestCase):
 
     def _submit(self, service, manifest, platforms, publish_at, mode="platform",
                 notify_subscribers=None):
-        overrides = {"include": platforms}
+        snapshot = {
+            "schedule": {"publish_at": publish_at, "mode": mode},
+            "content": {"title": "Test", "description": "", "tags": []},
+            "platform_options": {},
+        }
         if notify_subscribers is not None:
-            overrides["youtube"] = {"notify_subscribers": notify_subscribers}
+            snapshot["platform_options"]["youtube_notify_subscribers"] = (
+                notify_subscribers)
         return service.submit_upload(
             manifest.job_id, platforms,
-            configuration_snapshot={
-                "platforms": overrides,
-                "schedule": {"publish_at": publish_at, "mode": mode},
-                "content": {"title": "Test", "description": "", "tags": []}})
+            platform_snapshots={platform: snapshot for platform in platforms})
 
     def test_platform_mode_names_every_ineligible_platform_before_any_attempt(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -532,7 +520,7 @@ class PlatformScheduledUploadTests(unittest.TestCase):
 
             # The resolved instant rides the per-platform override into the
             # adapter keyword the production mapping derives from it.
-            options = content_options(pipeline.call_args.args[2], ["youtube"])
+            options = content_options(pipeline.call_args.args[2])
             self.assertEqual(options["youtube_scheduled_publish_at"], publish_at)
 
             saved = service.get_job(manifest.job_id)
@@ -567,7 +555,8 @@ class PlatformScheduledUploadTests(unittest.TestCase):
             # The local path is untouched: one timer, and nothing in what the
             # worker is handed tells the adapter about a scheduled publication.
             schedule.assert_called_once()
-            options = content_options(schedule.call_args.args[3], ["youtube"])
+            options = content_options(
+                schedule.call_args.args[1][0]["upload_config"])
             self.assertNotIn("youtube_scheduled_publish_at", options)
 
     def test_cancelled_attempt_is_not_resurrected_by_a_stale_batch_timer(self):
@@ -585,8 +574,12 @@ class PlatformScheduledUploadTests(unittest.TestCase):
             with patch("clipmorph.upload_attempts.execute_upload_pipeline",
                        side_effect=_upload_results(["youtube"])) as pipeline:
                 service._run_upload_attempts(
-                    manifest.job_id, [attempt_id], "artifact-key",
-                    {"platforms": {"include": ["youtube"]}}, ["youtube"])
+                    manifest.job_id, [{
+                        "attempt_ids": [attempt_id],
+                        "platforms": ["youtube"],
+                        "artifact_key": "artifact-key",
+                        "upload_config": {"platforms": {"include": ["youtube"]}},
+                    }])
 
             pipeline.assert_not_called()
             self.assertEqual(
@@ -691,10 +684,9 @@ class PlatformScheduledUploadTests(unittest.TestCase):
                        side_effect=_upload_results(["youtube"])):
                 service.submit_upload(
                     manifest.job_id, ["youtube"],
-                    configuration_snapshot={
-                        "platforms": {"include": ["youtube"]},
+                    platform_snapshots={"youtube": {
                         "content": {"title": "Test", "description": "",
-                                    "tags": []}})
+                                    "tags": []}}})
                 service._futures[f"upload:{manifest.job_id}"].result(timeout=5)
 
             with self.assertRaises(UnknownUploadAttempt):
@@ -764,27 +756,22 @@ class ArtifactStagingTests(unittest.TestCase):
     def test_staging_failure_fails_the_attempt_and_records_a_manifest_error(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
-            service, manifest = _reviewed_job(data_dir)
-            self.addCleanup(service.close)
-            service._storage = _ArmedStagingStorage(service._storage.root)
             publish_at = (datetime.now(timezone.utc)
                           + timedelta(hours=1)).isoformat()
+            service, manifest = _reviewed_job(
+                data_dir, {"schedule": {"publish_at": publish_at}})
+            self.addCleanup(service.close)
+            service._storage = _ArmedStagingStorage(service._storage.root)
 
             with patch("clipmorph.upload_attempts.execute_upload_pipeline") as pipeline:
-                result = service.submit_upload(
-                    manifest.job_id, ["youtube"],
-                    configuration_snapshot={
-                        "platforms": {"include": ["youtube"]},
-                        "schedule": {"publish_at": publish_at}})
+                result = service.submit_upload(manifest.job_id, ["youtube"])
                 # Hold the attempt back, then fail only its staging copy.
                 service._scheduled_timers[f"upload:{manifest.job_id}"][0].cancel()
                 service._storage.armed = True
                 attempt = result["attempts"][0]
                 service._run_upload_attempts(
-                    manifest.job_id, [attempt["attempt_id"]],
-                    service.get_job(manifest.job_id).artifacts[
-                        attempt["artifact_id"]]["storage"]["key"],
-                    {"platforms": {"include": ["youtube"]}}, ["youtube"])
+                    manifest.job_id,
+                    _bindings_for(service, manifest.job_id, attempt))
 
             pipeline.assert_not_called()
             saved = service.get_job(manifest.job_id)
@@ -929,6 +916,371 @@ class PullMetricsTests(unittest.TestCase):
             self.assertTrue(snapshot["unavailable"])
             # The raw error should not contain the secret.
             self.assertNotIn("secret123", str(snapshot))
+
+
+class PerPlatformGroupTests(unittest.TestCase):
+    def test_groups_derived_at_creation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            source_dir = data_dir / "sources"
+            source_dir.mkdir(parents=True)
+            source = source_dir / "clip.mp4"
+            source.write_bytes(b"video")
+            service = JobService(data_dir)
+            try:
+                manifest = service.create_job("clip.mp4", {
+                    "conversion": {"skip": True, "subtitles": {"skip": True}},
+                    "upload": {"skip": True},
+                    "platforms": {
+                        "youtube": {"upload": {"skip": False}},
+                        "tiktok": {"upload": {"skip": False}},
+                    },
+                })
+                groups = manifest.checkpoints["conversion"].get("groups", {})
+                self.assertEqual(len(groups), 1)
+                group = next(iter(groups.values()))
+                self.assertEqual(
+                    set(group["platforms"]),
+                    {"youtube", "instagram", "tiktok", "twitter", "facebook"})
+            finally:
+                service.close()
+
+    def test_mixed_skip_render_produces_two_groups(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            source_dir = data_dir / "sources"
+            source_dir.mkdir(parents=True)
+            source = source_dir / "clip.mp4"
+            source.write_bytes(b"video")
+            service = JobService(data_dir)
+            try:
+                manifest = service.create_job("clip.mp4", {
+                    "conversion": {"skip": False, "subtitles": {"skip": True}},
+                    "upload": {"skip": True},
+                    "platforms": {
+                        "youtube": {"conversion": {"skip": True}},
+                        "tiktok": {"conversion": {"skip": False}},
+                    },
+                })
+                groups = manifest.checkpoints["conversion"].get("groups", {})
+                self.assertEqual(len(groups), 2)
+            finally:
+                service.close()
+
+    def test_explicit_submission_to_skipped_platform_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = _reviewed_job(data_dir)
+            self.addCleanup(service.close)
+            # Skip youtube in the configuration
+            manifest.configuration["platforms"] = {
+                "youtube": {"upload": {"skip": True}}}
+            manifest.save(service.jobs_dir)
+            with self.assertRaisesRegex(ValueError, "skipped"):
+                service.submit_upload(manifest.job_id, ["youtube"])
+
+    def test_per_platform_upload_skip_selection(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = _reviewed_job(data_dir)
+            self.addCleanup(service.close)
+            manifest.configuration["upload"] = {"skip": True}
+            manifest.configuration["platforms"] = {
+                "youtube": {"upload": {"skip": False}}}
+            manifest.save(service.jobs_dir)
+            with patch("clipmorph.upload_pipeline.UploadPipeline") as pipeline_type:
+                pipeline_type.return_value.run.return_value = {
+                    "YouTube": {"success": True, "result": "ok"}}
+                result = service.submit_upload(manifest.job_id)
+                service._futures[f"upload:{manifest.job_id}"].result(timeout=5)
+            self.assertEqual(len(result["attempts"]), 1)
+            self.assertEqual(result["attempts"][0]["platform"], "youtube")
+
+    def test_all_platforms_skip_a_stage_skips_it(self):
+        configuration = {
+            "conversion": {"skip": False, "subtitles": {"skip": False}},
+            "upload": {"skip": False},
+            "platforms": {
+                platform: {"conversion": {"skip": True}}
+                for platform in SUPPORTED_PLATFORMS
+            },
+        }
+        # Reaching the end of the loop means every platform's effective
+        # conversion section is skipped, so the stage is skipped too.
+        self.assertTrue(_stage_skipped(configuration, "conversion"))
+        self.assertTrue(_stage_skipped(configuration, "transcript"))
+        configuration["platforms"]["youtube"]["conversion"]["skip"] = False
+        self.assertFalse(_stage_skipped(configuration, "conversion"))
+
+    def test_non_participating_platform_does_not_unskip_a_stage(self):
+        configuration = {
+            "conversion": {"skip": True, "subtitles": {"skip": True}},
+            "upload": {"skip": True},
+            "platforms": {"youtube": {"upload": {"skip": False}}},
+        }
+        # Only YouTube participates; the other platforms' non-skipped
+        # conversion defaults must not force conversion or transcription.
+        self.assertEqual(resolve_upload_participants(configuration), ["youtube"])
+        self.assertTrue(_stage_skipped(configuration, "conversion"))
+        self.assertTrue(_stage_skipped(configuration, "transcript"))
+
+    def test_pending_group_keeps_conversion_actionable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            source_dir = data_dir / "sources"
+            source_dir.mkdir(parents=True)
+            (source_dir / "clip.mp4").write_bytes(b"video")
+            service = JobService(data_dir)
+            try:
+                manifest = service.create_job("clip.mp4", {
+                    "conversion": {"skip": False, "subtitles": {"skip": True}},
+                    "platforms": {"youtube": {"conversion": {"strict": True}}},
+                })
+                checkpoint = manifest.checkpoints["conversion"]
+                self.assertIn(checkpoint["status"], CHECKPOINT_STATES)
+                self.assertEqual(manifest.current_checkpoint, "conversion")
+                groups = checkpoint.get("groups", {})
+                self.assertEqual(len(groups), 2)
+                self.assertTrue(all(group["status"] == "pending"
+                                    for group in groups.values()))
+            finally:
+                service.close()
+
+
+class WorkflowStageSkipReconciliationTests(unittest.TestCase):
+    """A per-platform override that un-skips a born-``skipped`` stage runs it.
+
+    ``JobManifest.create`` marks a stage ``skipped`` from the job-level flag
+    only, so ``execute_job`` must return the checkpoint to ``pending`` when a
+    per-platform section un-skips it; otherwise the stage is left skipped (or
+    the transcript branch returns) and the participating platform never runs.
+    """
+
+    @staticmethod
+    def _fake_runner():
+        return type("FakeRunner", (), {
+            "get_video_info": lambda _self, _path: {
+                "format": {"duration": "3"},
+                "streams": [{"codec_type": "video", "width": 1920,
+                             "height": 1080}],
+            },
+        })()
+
+    def test_upload_stage_unskipped_by_platform_reaches_review(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            (data_dir / "sources").mkdir()
+            (data_dir / "sources" / "clip.mp4").write_bytes(b"video")
+            service = JobService(data_dir)
+            self.addCleanup(service.close)
+            manifest = service.create_job("clip.mp4", {
+                "conversion": {"skip": True, "subtitles": {"skip": True}},
+                "upload": {"skip": True},
+                "platforms": {"youtube": {"upload": {"skip": False}}},
+            })
+            self.assertEqual(manifest.checkpoints["upload"]["status"], "skipped")
+
+            with patch("clipmorph.workflow.configure_ffmpeg"), \
+                    patch("clipmorph.workflow.FFmpegRunner",
+                          return_value=self._fake_runner()), \
+                    patch("clipmorph.workflow.PreflightValidator"):
+                execute_job(manifest, CancellationToken(), service.jobs_dir)
+
+            saved = service.get_job(manifest.job_id)
+            self.assertEqual(saved.checkpoints["upload"]["status"],
+                             "awaiting_review")
+            self.assertEqual(saved.current_checkpoint, "upload")
+
+    def test_conversion_stage_unskipped_by_platform_renders(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            (data_dir / "sources").mkdir()
+            (data_dir / "sources" / "clip.mp4").write_bytes(b"video")
+            rendered = data_dir / "render.mp4"
+            rendered.write_bytes(b"render")
+            service = JobService(data_dir)
+            self.addCleanup(service.close)
+            manifest = service.create_job("clip.mp4", {
+                "general": {"no_confirm": True},
+                "conversion": {"skip": True, "subtitles": {"skip": True}},
+                "upload": {"skip": True},
+                "platforms": {"youtube": {
+                    "upload": {"skip": False},
+                    "conversion": {"skip": False}}},
+            })
+            self.assertEqual(manifest.checkpoints["conversion"]["status"],
+                             "skipped")
+            # Isolate the born-skipped conversion reconciliation from the
+            # transcript: a born-skipped transcript cannot render its captions
+            # collection, which is a separate interaction.  Pre-completing it
+            # lets this test observe the conversion branch of the fix.
+            manifest.checkpoints["transcript"]["status"] = "completed"
+            manifest.save(service.jobs_dir)
+
+            pipeline = type("FakePipeline", (), {
+                "__init__": lambda self, **kwargs: None,
+                "run": lambda self: str(rendered),
+            })()
+            with patch("clipmorph.workflow.configure_ffmpeg"), \
+                    patch("clipmorph.workflow.FFmpegRunner",
+                          return_value=self._fake_runner()), \
+                    patch("clipmorph.workflow.PreflightValidator"), \
+                    patch("clipmorph.conversion_pipeline.ConversionPipeline",
+                          return_value=pipeline):
+                execute_job(manifest, CancellationToken(), service.jobs_dir)
+
+            saved = service.get_job(manifest.job_id)
+            self.assertEqual(saved.checkpoints["conversion"]["status"],
+                             "completed")
+            render_group = next(
+                group for group in conversion_groups(saved.configuration)
+                if not group["conversion"].get("skip"))
+            self.assertIn("youtube", render_group["platforms"])
+            self.assertIsNotNone(
+                saved.checkpoints["conversion"]["groups"][render_group["id"]][
+                    "current_artifact_id"])
+
+
+def _two_group_job(service: JobService, data_dir: Path) -> JobManifest:
+    """Create a job with a rendered group and a source-bound group.
+
+    YouTube resolves to a distinct conversion section, so the job has two
+    conversion groups; the helper renders the other group's artifact on disk and
+    stamps it on that group, leaving the source artifact registered for the
+    group that skips conversion.
+    """
+    source_dir = data_dir / "sources"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    source = source_dir / "clip.mp4"
+    source.write_bytes(b"video")
+    manifest = service.create_job("clip.mp4", {
+        "conversion": {"skip": False, "subtitles": {"skip": True}},
+        "upload": {"content": {"title": "Job title"}},
+        "platforms": {
+            "youtube": {"conversion": {"skip": True}},
+            "tiktok": {"privacy_level": "SELF_ONLY"},
+        },
+    })
+    derived = conversion_groups(manifest.configuration)
+    render_group = next(group["id"] for group in derived
+                        if not group["conversion"].get("skip"))
+    skip_group = next(group["id"] for group in derived
+                      if group["id"] != render_group)
+    output = service.jobs_dir / manifest.job_id / "render.mp4"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(b"vertical")
+    manifest.record_artifact("primary", output, service.jobs_dir,
+                             group_id=render_group)
+    manifest.record_artifact("source", source, service.jobs_dir,
+                             group_id=skip_group)
+    manifest.transition_checkpoint(
+        "upload", "awaiting_review",
+        manifest.checkpoints["upload"]["revision"], service.jobs_dir)
+    return service.get_job(manifest.job_id)
+
+
+class PerPlatformBindingTests(unittest.TestCase):
+    """A submission binds each platform to its own group's artifact/snapshot."""
+
+    def test_identical_platforms_share_one_render_and_one_artifact(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            source_dir = data_dir / "sources"
+            source_dir.mkdir(parents=True)
+            (source_dir / "clip.mp4").write_bytes(b"video")
+            service = JobService(data_dir)
+            self.addCleanup(service.close)
+            # No per-platform conversion overrides, so every platform resolves
+            # to the job section and there is exactly one group to render.
+            manifest = service.create_job("clip.mp4", {
+                "conversion": {"skip": False, "subtitles": {"skip": True}},
+            })
+            groups = manifest.checkpoints["conversion"]["groups"]
+            self.assertEqual(len(groups), 1)
+            group_id = next(iter(groups))
+            output = service.jobs_dir / manifest.job_id / "render.mp4"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"vertical")
+            manifest.record_artifact("primary", output, service.jobs_dir,
+                                     group_id=group_id)
+            manifest.transition_checkpoint(
+                "upload", "awaiting_review",
+                manifest.checkpoints["upload"]["revision"], service.jobs_dir)
+
+            with patch("clipmorph.upload_pipeline.UploadPipeline") as pipeline:
+                pipeline.return_value.run.return_value = {
+                    name: {"success": True, "result": "ok"}
+                    for name in ("YouTube", "Instagram", "TikTok", "Twitter",
+                                 "Facebook")}
+                result = service.submit_upload(manifest.job_id)
+                service._futures[f"upload:{manifest.job_id}"].result(timeout=10)
+
+            # One render, one artifact, every attempt bound to it.
+            self.assertEqual(pipeline.return_value.run.call_count, 1)
+            bound = {attempt["platform"]: attempt["artifact_id"]
+                     for attempt in result["attempts"]}
+            self.assertEqual(
+                set(bound),
+                {"youtube", "instagram", "tiktok", "twitter", "facebook"})
+            self.assertEqual(len(set(bound.values())), 1)
+            self.assertEqual(
+                {attempt["group_id"] for attempt in result["attempts"]},
+                {group_id})
+
+    def test_each_platform_freezes_its_own_upload_slice(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service = JobService(data_dir)
+            self.addCleanup(service.close)
+            manifest = _two_group_job(service, data_dir)
+
+            with patch("clipmorph.upload_pipeline.UploadPipeline") as pipeline:
+                pipeline.return_value.run.return_value = {
+                    "YouTube": {"success": True, "result": "ok"},
+                    "TikTok": {"success": True, "result": "ok"}}
+                result = service.submit_upload(
+                    manifest.job_id, ["youtube", "tiktok"])
+                service._futures[f"upload:{manifest.job_id}"].result(timeout=10)
+
+            snapshots = {attempt["platform"]: attempt["configuration_snapshot"]
+                         for attempt in result["attempts"]}
+            self.assertEqual(snapshots["youtube"]["content"]["title"], "Job title")
+            self.assertEqual(
+                snapshots["tiktok"]["platform_options"],
+                {"tiktok_privacy_level": "SELF_ONLY"})
+            # The two platforms are on different artifacts: the untouched source
+            # for the group that skips conversion, the render for the other.
+            bound = {attempt["platform"]: attempt["artifact_id"]
+                     for attempt in result["attempts"]}
+            self.assertNotEqual(bound["youtube"], bound["tiktok"])
+            kinds = {platform: manifest.artifacts[artifact_id]["kind"]
+                     for platform, artifact_id in bound.items()}
+            self.assertEqual(kinds["youtube"], "source")
+            self.assertEqual(kinds["tiktok"], "primary")
+
+    def test_upload_draft_summary_reports_each_platform_target(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service = JobService(data_dir)
+            self.addCleanup(service.close)
+            manifest = _two_group_job(service, data_dir)
+            manifest.configuration["platforms"]["twitter"] = {
+                "upload": {"skip": True}}
+            manifest.save(service.jobs_dir)
+
+            summary = service.upload_draft_summary(manifest.job_id)
+            # YouTube skips conversion but still uploads, as the 16:9 VOD.
+            self.assertTrue(summary["youtube"]["participates"])
+            self.assertTrue(summary["tiktok"]["participates"])
+            self.assertFalse(summary["twitter"]["participates"])
+            self.assertEqual(summary["youtube"]["kind"], "source")
+            self.assertEqual(summary["tiktok"]["kind"], "vertical")
+            self.assertNotEqual(
+                summary["youtube"]["group_id"], summary["tiktok"]["group_id"])
+            self.assertTrue(summary["youtube"]["conversion"]["skip"])
+            self.assertFalse(summary["tiktok"]["conversion"]["skip"])
+            self.assertEqual(
+                summary["tiktok"]["upload"]["content"]["title"], "Job title")
 
 
 if __name__ == "__main__":

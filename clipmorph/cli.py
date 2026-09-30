@@ -898,6 +898,8 @@ def job_review_command(
             "--accept", help="Accept the current checkpoint revision.")] = False,
         reopen: Annotated[bool, typer.Option(
             "--reopen", help="Reopen the checkpoint for the changed inputs.")] = False,
+        group: Annotated[Optional[str], typer.Option(
+            "--group", help="Conversion group ID to accept; omit to accept all groups.")] = None,
         json_output: JsonOption = False,
         data_dir: DataDirOption = None,
         app_config: AppConfigOption = None) -> None:
@@ -916,9 +918,8 @@ def job_review_command(
                     job_id, edit_values, active_revision,
                     manifest.checkpoints["transcript"]["revision"], reopen)
             elif checkpoint == "upload":
-                upload_draft = edit_values.get("upload", edit_values)
                 service.update_upload_draft(
-                    job_id, upload_draft,
+                    job_id, edit_values,
                     manifest.checkpoints["upload"]["revision"], reopen)
             elif checkpoint == "conversion":
                 service.update_job_configuration(
@@ -926,8 +927,17 @@ def job_review_command(
                     manifest.current_configuration_hash, reopen)
             manifest = service.get_job(job_id)
         if accept:
+            checkpoint_record = manifest.checkpoints[checkpoint]
+            if group is not None:
+                groups = checkpoint_record.get("groups", {})
+                if group not in groups:
+                    raise ValueError(
+                        f"unknown {checkpoint} checkpoint group: {group}")
+                revision = groups[group]["revision"]
+            else:
+                revision = checkpoint_record["revision"]
             manifest = service.accept_checkpoint(
-                job_id, checkpoint, manifest.checkpoints[checkpoint]["revision"])
+                job_id, checkpoint, revision, group_id=group)
     record = asdict(manifest)
     if json_output:
         _print_json(record)
@@ -939,6 +949,8 @@ def job_review_command(
 def job_render_command(
         ctx: typer.Context,
         job_id: Annotated[str, typer.Argument(help="Job ID.")],
+        group: Annotated[Optional[str], typer.Option(
+            "--group", help="Rerender only this conversion group id.")] = None,
         data_dir: DataDirOption = None,
         app_config: AppConfigOption = None) -> None:
     """Rerender the accepted composition as a new immutable artifact."""
@@ -948,18 +960,7 @@ def job_render_command(
     selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
     with closing(JobService(selected_data_dir,
                            app_config_path=selected_config)) as service:
-        manifest = service.get_job(job_id)
-        conversion = manifest.checkpoints["conversion"]
-        if conversion["status"] in {"failed", "cancelled", "stale"}:
-            manifest.transition_checkpoint(
-                "conversion", "pending", conversion["revision"], service.jobs_dir)
-        elif conversion["status"] == "completed":
-            manifest.transition_checkpoint(
-                "conversion", "stale", conversion["revision"], service.jobs_dir)
-            manifest = service.get_job(job_id)
-            manifest.transition_checkpoint(
-                "conversion", "pending",
-                manifest.checkpoints["conversion"]["revision"], service.jobs_dir)
+        service.rerender_job(job_id, group)
         service.resume_job(job_id, lambda job, token: execute_job(
             job, token, service.jobs_dir, service.app_config_path))
 

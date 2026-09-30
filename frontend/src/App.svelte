@@ -29,7 +29,7 @@
     title: '', description: '', tags: '', no_confirm: false, clean: false,
     conversion_skip: false, subtitles_skip: false, strict: false,
     renderer: 'overlay', layout_id: '', upload_skip: false,
-    include: [...platforms], exclude: [], dry_run: false,
+    include: [...platforms], dry_run: false,
   };
   let layoutForm = {
     name: 'Vertical highlight', crop: false, crop_x: 0, crop_y: 0,
@@ -39,6 +39,7 @@
   let uploadDraft = { title: '', description: '', tags: '', publishAt: '' };
   let uploadContentKind = 'reel';
   let uploadPlatforms = [...platforms];
+  let platformSummaries = {};
   let uploadFilterStatus = '';
   let uploadFilterPlatform = '';
   let uploadFilterSince = '';
@@ -126,6 +127,14 @@
     return attempt.result?.platform_url || attempt.platform_url || '';
   }
 
+  // The kind badge names the artifact THIS attempt uploaded, not the platform's
+  // current binding: a rerender can rebind a platform's group while a
+  // historical attempt still points at the source it actually sent.
+  function attemptKind(attempt) {
+    const artifact = (artifacts || []).find((item) => item.id === attempt.artifact_id);
+    return artifact?.kind === 'source' ? 'source' : 'vertical';
+  }
+
   $: filteredUploadAttempts = uploadAttempts.filter((attempt) => {
     if (uploadFilterStatus && attempt.status !== uploadFilterStatus) return false;
     if (uploadFilterPlatform && attempt.platform !== uploadFilterPlatform) return false;
@@ -211,16 +220,22 @@
 
   async function loadJobDetails() {
     if (!selectedJobId) return;
-    const [job, artifactList, attempts, metrics] = await Promise.all([
+    const [job, artifactList, attempts, metrics, draft] = await Promise.all([
       api(`/api/v1/jobs/${selectedJobId}`),
       api(`/api/v1/jobs/${selectedJobId}/artifacts`),
       api(`/api/v1/jobs/${selectedJobId}/uploads`),
       api(`/api/v1/jobs/${selectedJobId}/metrics?include=dimensions`),
+      api(`/api/v1/jobs/${selectedJobId}/checkpoints/upload`),
     ]);
     jobs = jobs.map((item) => item.job_id === selectedJobId ? job : item);
     artifacts = artifactList;
     uploadAttempts = attempts;
     metricSnapshots = metrics;
+    // READ-ONLY per-platform summary: the server resolves each platform's
+    // effective conversion slice, bound artifact and participation so review
+    // shows what every platform receives without re-deriving the merge here.
+    platformSummaries = draft.platform_summaries || {};
+    uploadPlatforms = platforms.filter((platform) => platformSummaries[platform]?.participates);
     uploadDraft = {
       title: job.configuration?.upload?.content?.title || '',
       description: job.configuration?.upload?.content?.description || '',
@@ -313,6 +328,10 @@
   }
 
   function sharedOverrides() {
+    const platformOverrides = {};
+    for (const platform of platforms) {
+      platformOverrides[platform] = { upload: { skip: !jobForm.include.includes(platform) } };
+    }
     return {
       general: { no_confirm: jobForm.no_confirm, clean: jobForm.clean },
       conversion: {
@@ -328,8 +347,8 @@
           description: jobForm.description,
           tags: jobForm.tags ? jobForm.tags.split(',').map((tag) => tag.trim()).filter(Boolean) : [],
         },
-        platforms: { include: jobForm.include, exclude: jobForm.exclude },
       },
+      platforms: platformOverrides,
     };
   }
 
@@ -498,18 +517,18 @@
         tags: uploadDraft.tags
           .split(',').map((tag) => tag.trim()).filter(Boolean),
       };
-      upload.platforms = { ...(upload.platforms || {}), include: uploadPlatforms };
+      const platformOverrides = {};
+      for (const platform of platforms) {
+        platformOverrides[platform] = { upload: { skip: !uploadPlatforms.includes(platform) } };
+      }
       if (uploadPlatforms.includes('facebook')) {
-        upload.platforms.facebook = {
-          ...(upload.platforms.facebook || {}),
-          content_kind: uploadContentKind,
-        };
+        platformOverrides.facebook.content_kind = uploadContentKind;
       }
       const publishAt = toUtcTimestamp(uploadDraft.publishAt);
       if (publishAt) upload.schedule = { ...(upload.schedule || {}), publish_at: publishAt };
       else delete upload.schedule;
       await api(`/api/v1/jobs/${selectedJob.job_id}/checkpoints/upload`,
-        jsonOptions('PUT', { expected_revision: checkpoint.revision, upload }));
+        jsonOptions('PUT', { expected_revision: checkpoint.revision, upload, platforms: platformOverrides }));
       await loadWorkspace();
       flash('Upload draft saved for review');
     } catch (error) { errors = [error.message]; }
@@ -892,6 +911,7 @@
         {#if !selectedJob}<div class="empty-view"><h2>Select a job first</h2></div>{:else}<div class="upload-layout"><div class="form-card upload-draft-fields"><span class="card-index">UPLOAD DRAFT</span><label class="field-label">Title<input aria-label="Upload title" bind:value={uploadDraft.title} /></label><label class="field-label">Description<textarea aria-label="Upload description" rows="4" bind:value={uploadDraft.description}></textarea></label><label class="field-label">Tags<input aria-label="Upload tags" bind:value={uploadDraft.tags} placeholder="tag one, tag two" /></label><label class="field-label">Schedule for<input aria-label="Upload schedule for" type="datetime-local" bind:value={uploadDraft.publishAt} /><small>Leave empty to upload as soon as you submit. A future time defers every selected platform; a retry always runs immediately.</small></label>
           {#each platforms as platform}<label><input type="checkbox" checked={uploadPlatforms.includes(platform)} onchange={(event) => uploadPlatforms = event.currentTarget.checked ? [...uploadPlatforms, platform] : uploadPlatforms.filter((item) => item !== platform)} /> {platform}</label>{/each}
           {#if uploadPlatforms.includes('facebook')}<label class="field-label">Facebook content kind<select bind:value={uploadContentKind}><option value="reel">Reel</option><option value="video">Page video</option></select></label>{/if}
+          <span class="card-index">PER-PLATFORM SUMMARY</span><small>Read-only. Conversion overrides are edited in composition review; participation and content above.</small>{#each platforms as platform}{@const summary = platformSummaries[platform] || {}}{#if summary.participates}<div class="saved-row"><div><b>{platform} · {summary.kind}</b><small>{summary.conversion?.skip ? 'uploads the source file' : 'uploads the rendered vertical'} · group {summary.group_id || 'unassigned'}</small><small>{summary.artifact_id ? summary.artifact_sha256 : 'no artifact yet'}</small></div>{#if summary.artifact_id}<a class="text-button" href={`/api/v1/jobs/${selectedJob.job_id}/artifacts/${summary.artifact_id}/preview`} target="_blank">Preview</a>{/if}</div>{/if}{/each}
           <span class="card-index">ARTIFACTS</span>{#each artifacts as artifact}<div class="saved-row"><div><b>{artifact.display_name || artifact.kind} · r{artifact.revision}</b><small>{artifact.state} · {artifact.sha256 || 'unavailable'}</small></div><a class="text-button" href={`/api/v1/jobs/${selectedJob.job_id}/artifacts/${artifact.id}/preview`} target="_blank">Preview</a><a class="text-button" href={`/api/v1/jobs/${selectedJob.job_id}/artifacts/${artifact.id}/download`}>Download</a><button class="quiet-action" onclick={() => renameArtifact(artifact)} aria-label="Rename artifact">✎</button><button class="quiet-action" onclick={() => deleteArtifact(artifact)} aria-label="Delete artifact">×</button></div>{/each}
         </div><div class="form-card suggestions-card"><div class="suggestions-head"><span class="card-index">AI SUGGESTIONS</span><span class="provider-chip">{suggestionProvider}</span></div>
           <div class="field-row"><button class="secondary-action" onclick={() => generateSuggestions(false)}>Generate suggestions</button><button class="secondary-action" onclick={() => generateSuggestions(true)} disabled={!uploadSuggestions.length}>Regenerate</button><button class="secondary-action" onclick={acceptAllSuggestions} disabled={!uploadSuggestions.length}>Apply all</button><button class="quiet-action" onclick={clearSuggestions} disabled={!uploadSuggestions.length}>Clear</button></div>
@@ -906,7 +926,7 @@
               <div class="field-row"><button class="secondary-action" onclick={() => saveSuggestionEdits(row.platform)}>Save edits</button><button class="primary-action" onclick={() => acceptSuggestion(row.platform)}>Apply</button></div>
             </div>
           {/each}
-        </div><div class="form-card"><span class="card-index">ATTEMPT HISTORY</span><div class="field-row"><label class="field-label">Status<select bind:value={uploadFilterStatus} onchange={applyUploadFilters}><option value="">All</option>{['pending', 'scheduled', 'running', 'published', 'failed', 'cancelled'].map((s) => `<option value="${s}">${s}</option>`).join('')}</select></label><label class="field-label">Platform<select bind:value={uploadFilterPlatform} onchange={applyUploadFilters}><option value="">All</option>{platforms.map((p) => `<option value="${p}">${p}</option>`).join('')}</select></label><label class="field-label">Since<input type="datetime-local" bind:value={uploadFilterSince} onchange={applyUploadFilters} /></label></div>{#each filteredUploadAttempts as attempt}<div class="saved-row"><div><b>{attempt.platform} · {attempt.status}</b><small>{attempt.configuration_snapshot?.content?.title} · {attempt.artifact_hash}</small>{#if scheduleLabel(attempt)}<small class="schedule-note">{scheduleLabel(attempt)}</small>{/if}{#if attemptUrl(attempt)}<a class="text-button" href={attemptUrl(attempt)} target="_blank">View post</a>{/if}</div><div class="attempt-progress">{#if uploadProgress[selectedJobId]?.[attempt.platform] !== undefined}<span class="attempt-progress-live">{uploadProgress[selectedJobId][attempt.platform]}%</span>{:else if attempt.result?.progress_percent !== undefined}<span class="attempt-progress-final">{attempt.result.progress_percent}%</span>{/if}</div>{#if attempt.status === 'failed'}<button class="text-button" onclick={() => retryUpload(attempt)}>Retry</button>{/if}</div>{/each}</div>
+        </div><div class="form-card"><span class="card-index">ATTEMPT HISTORY</span><div class="field-row"><label class="field-label">Status<select bind:value={uploadFilterStatus} onchange={applyUploadFilters}><option value="">All</option>{['pending', 'scheduled', 'running', 'published', 'failed', 'cancelled'].map((s) => `<option value="${s}">${s}</option>`).join('')}</select></label><label class="field-label">Platform<select bind:value={uploadFilterPlatform} onchange={applyUploadFilters}><option value="">All</option>{platforms.map((p) => `<option value="${p}">${p}</option>`).join('')}</select></label><label class="field-label">Since<input type="datetime-local" bind:value={uploadFilterSince} onchange={applyUploadFilters} /></label></div>{#each filteredUploadAttempts as attempt}<div class="saved-row"><div><b>{attempt.platform} · {attempt.status}</b> <span class="attempt-kind">{attemptKind(attempt)}</span><small>{attempt.configuration_snapshot?.content?.title} · {attempt.artifact_hash}</small>{#if scheduleLabel(attempt)}<small class="schedule-note">{scheduleLabel(attempt)}</small>{/if}{#if attemptUrl(attempt)}<a class="text-button" href={attemptUrl(attempt)} target="_blank">View post</a>{/if}</div><div class="attempt-progress">{#if uploadProgress[selectedJobId]?.[attempt.platform] !== undefined}<span class="attempt-progress-live">{uploadProgress[selectedJobId][attempt.platform]}%</span>{:else if attempt.result?.progress_percent !== undefined}<span class="attempt-progress-final">{attempt.result.progress_percent}%</span>{/if}</div>{#if attempt.status === 'failed'}<button class="text-button" onclick={() => retryUpload(attempt)}>Retry</button>{/if}</div>{/each}</div>
         <div class="form-card"><span class="card-index">METRICS</span>{#if !metricSnapshots.length}<div class="empty-inline">No metrics yet. Pull fresh data to see engagement.</div>{/if}{#each metricSnapshots as snapshot}<div class="saved-row"><div><b>{snapshot.platform} · {snapshot.captured_at}</b>{#if snapshot.unavailable}<small class="schedule-note">{snapshot.unavailable_reason}</small>{:else}<small>{Object.entries(snapshot.metrics || {}).map(([k, v]) => `${k}: ${v}`).join(' · ')}</small>{/if}</div></div>{/each}</div></div>{/if}
       </section>
 

@@ -33,7 +33,7 @@ paths and are not part of the job configuration merge. `config_version`,
 into a job. `job_defaults` uses the same job-config shape shown below:
 
 ```yaml
-config_version: 1
+config_version: 2
 source_dir: sources
 output_dir: output
 job_defaults:
@@ -43,6 +43,7 @@ job_defaults:
     clean: false
   conversion: {}
   upload: {}
+  platforms: {}
 layouts: []
 retention:
   artifacts:
@@ -173,18 +174,51 @@ upload:
   suggestions:
     provider: template           # template | hugging_face; selects the generator
     model: null                  # provider-specific model id override
-  platforms:
-    include: []                  # only upload to these platforms (empty = all)
-    exclude: []                  # exclude these platforms from an otherwise-included set
-    youtube: {...}
-    instagram: {...}
-    tiktok: {...}
-    twitter: {...}
+
+platforms:                      # per-platform override tier (see below)
+  youtube:
+    category: '22'              # flat adapter option; exact keys unchanged
+    privacy_status: public
+    general: {...}               # override section mirroring general (no `source`)
+    conversion: {...}            # override section mirroring conversion
+    upload: {...}                # override section mirroring upload; `skip` is per-platform participation
+  instagram: {...}
+  tiktok: {...}
+  twitter: {...}
 ```
 
-`content` and `platforms` nest under `upload` — both are exclusively
-upload-time concerns (what gets published and where), so there's no reason
-for them to sit at the top level next to `general`/`conversion`.
+`content` stays nested under `upload` — what gets published is exclusively an
+upload-time concern.
+
+`platforms` is a **sibling** of `general`/`conversion`/`upload`, not a child of
+`upload`. It originally nested under `upload` because platform entries were
+"exclusively upload-time concerns" (what gets published and where). The
+composition tier removes that premise: a platform entry is a full set of
+override sections, so a platform can carry `conversion` settings and change
+what is rendered for it. Nesting those under `upload` would say that a
+rendering decision is an upload concern, and it produced the confusing
+`upload.platforms.<p>.upload.content.title` path; the flattened location is
+`platforms.<p>.upload.content.title`.
+
+Section names inside a platform entry mirror the top-level schema exactly.
+There is no `platforms.<p>.upload.platforms` — the selection map is not a
+mirrored section.
+
+Two keys are structurally impossible and are rejected rather than ignored:
+
+- `platforms.<p>.platforms` — recursion; selection overrides are not configured
+  per platform.
+- `platforms.<p>.general.source` — source identity is fixed per job; a second
+  source per platform is a different job.
+
+`conversion.subtitles.transcription_*` is rejected per platform as well. The
+transcript checkpoint is a single source-bound session for the job, so honouring
+a per-platform transcription config would need one transcript group per distinct
+transcription configuration; until a concrete case needs that, the shared
+session wins and the key is refused with an actionable message rather than
+silently dropped. Every other `conversion`/`upload`/`general` key is a legal
+per-platform override.
+
 
 `upload.suggestions` selects the AI-assisted metadata generator and holds its
 drafts. Its `provider` (`template`, the deterministic default, or
@@ -203,11 +237,54 @@ review gate then submits that content. There is no "disabled" flag — the
 absence of a generated row *is* disabled, and an explicit Clear drops the rows
 while keeping the `provider`/`model` selector.
 
-`upload_to`/`skip` (the platform allowlist/denylist) move under
-`upload.platforms` and are renamed `include`/`exclude` — they select which
-platforms participate, exactly the concern `upload.platforms` already owns,
-and `include`/`exclude` says what they do without needing the CLI's
-original flag names as context.
+## Per-platform overrides and participation
+
+`platforms.<p>` is the third composition tier. A platform's effective
+configuration is the job's effective configuration deep-merged with that
+platform's `general`/`conversion`/`upload` override sections, using the same
+`merge_configuration` rules as the global-defaults → job-overrides merge
+(dictionaries merge key by key; scalars and lists replace). Flat adapter
+options (`youtube.category`, `tiktok.privacy_level`) are not merged — they are
+that platform's own upload options and are passed through verbatim.
+
+Participation is normalized to `skip`, with no include/exclude lists:
+
+- `platforms.<p>.upload.skip: true` → the platform receives no attempts.
+- An absent platform entry + job `upload.skip: false` → the platform
+  participates. Omission means all.
+- Job `upload.skip: true` + `platforms.<p>.upload.skip: false` → that platform
+  uploads anyway. A per-platform override wins over the job-level flag, the
+  same precedence law as `conversion.skip`.
+- An explicit submission (`job upload --platform X`) targeting a skipped
+  platform fails `422` with the per-platform reason. Re-enabling the platform
+  is a configuration edit, not a submission flag.
+
+`clipmorph/platforms.py::resolve_upload_participants` is the single resolver for
+this, in stable registry order. A stage is skipped only when *every* platform's
+effective section for it is skipped; a single participating platform un-skips
+the checkpoint.
+
+## Conversion groups
+
+The pipeline renders once per **distinct effective conversion configuration**.
+Platforms are grouped by the SHA-256 digest of their resolved effective
+`conversion` section; a group's id is the first 12 hex characters of that
+digest, and its record is `{id, conversion, platforms}`.
+
+Three platforms that resolve to the same conversion section share one render and
+one artifact. A platform with `conversion.skip: true` resolves to a section no
+rendering platform matches, so it forms its own group bound to the `"source"`
+artifact revision — the untouched original uploads as-is. With no per-platform
+`conversion` overrides at all, every platform resolves to the job section, and
+there is exactly one group.
+
+A group's digest is taken from the stored effective configuration, so a
+per-platform `conversion.layout_id` is materialized into that platform's entry
+when the configuration is resolved, exactly as the job-level one is. A platform
+that names a layout is therefore grouped and rendered on the layout it asked
+for, and an id that is not in the registry is rejected at resolution time
+(`Unknown platforms.<p>.conversion.layout_id`) instead of silently falling back
+to the job's layout.
 
 `upload.schedule.mode` decides **who holds** a future publication: `local`
 (the default, and the value an absent `mode` reads as) keeps ClipMorph's
@@ -244,11 +321,11 @@ The old `no_conversion`/`no_subs`/`no_upload` names stutter once nested
 under their own section (`conversion.no_conversion`,
 `conversion.subtitles.no_subs`, `upload.no_upload`) and are inconsistent
 with each other. They're renamed to a shared generic `skip: false` at each
-level. `disabled` was considered first, but `skip` reads more naturally
-here ("skip conversion", "skip subtitles", "skip upload") and only became
-available once the platform allowlist/denylist moved to
-`upload.platforms.include`/`exclude`. `general.no_confirm` keeps its name
-since it isn't nested under a section named after what it disables.
+level, which is also the single participation flag at
+`platforms.<p>.upload.skip`. `disabled` was considered first, but `skip` reads
+more naturally here ("skip conversion", "skip subtitles", "skip upload").
+`general.no_confirm` keeps its name since it isn't nested under a section named
+after what it disables.
 
 `conversion.no_confirm` and `upload.no_confirm` let a step opt out of (or
 back into) confirmation prompts independently of the global default. This
@@ -449,6 +526,16 @@ selected `layout_id` and fully materialized `layout` in the effective job.
   to two sources instead of the former flat CLI/config layering.
 - Order of precedence: job overrides win over global defaults. Applied as
   `merge(app.yml:job_defaults, job_overrides)`.
+- A platform's override sections are the third tier, applied on top of the
+  job's own effective configuration with the same rules:
+  `resolve_platform_configuration(manifest_configuration, global_defaults,
+  layouts, platform)` merges `platforms.<p>.{general,conversion,upload}` over
+  the effective configuration and re-resolves the result exactly like
+  `resolve_job_configuration` does, including layout-registry materialization
+  (with the update-flow registry backfill, so a per-platform
+  `conversion.layout_id` referencing a now-unregistered preset still resolves).
+  Flat adapter options are not a merge tier; they are that platform's own
+  upload options.
 - `conversion.layout_id` resolves the app registry first, then
   `conversion.layout` deep-merges over the resolved preset. The effective
   configuration stores the fully materialized layout; `layout_id` alone is
@@ -462,6 +549,43 @@ selected `layout_id` and fully materialized `layout` in the effective job.
   `general.clean`) are resolved *after* the two sources are merged, against
   the single effective configuration — they are not part of the tier-merge
   algorithm itself.
+
+## Example: one job, two output formats
+
+```yaml
+general:
+  source: stream.mp4
+conversion:
+  layout_id: <vertical-preset-uuid>       # the job's default 9:16 render
+  subtitles:
+    renderer: overlay
+upload:
+  content:
+    title: 'Ranked run'
+platforms:
+  youtube:
+    privacy_status: unlisted
+    conversion:
+      skip: true                          # 16:9 VOD: the original uploads as-is
+    upload:
+      content:
+        title: 'Full stream VOD'
+  tiktok:
+    privacy_level: PUBLIC_TO_EVERYONE
+    upload:
+      schedule:
+        publish_at: '2026-01-01T18:00:00Z'
+      content:
+        title: 'The one moment that ended it'
+  instagram:                              # absent entry: participates under
+  twitter: {}                             # the job-level upload defaults
+```
+
+This job has two conversion groups: TikTok and Instagram share the job's
+rendered 9:16 artifact, YouTube has its own group bound to the source
+artifact, and Twitter resolves to the same section as TikTok/Instagram. The
+per-platform `content.title` and `privacy_*` values reach only their own
+platform's upload payload.
 
 ## Derived Values
 
@@ -511,6 +635,7 @@ job provenance, and the persisted job record.
 | Global defaults | `app.yml` global job defaults + layouts registry | Persistent, user-edited defaults |
 | Multi-job context | In-memory selected-clip run configuration | Ephemeral UI/API/CLI grouping; not a merged schema tier |
 | Job | Finalized `job.yml` inside the job directory, or the equivalent in-memory UI/API request body | Persisted with that job's manifest |
+| Per-platform | `platforms.<p>` in the job configuration | Persisted with that job's manifest; resolved per platform at render and upload time |
 
 `app.yml` stores application/workspace settings such as the source directory
 and output directory, plus the persistent global job defaults. When a user
@@ -621,12 +746,12 @@ errors without credentials or secret values.
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "status": "awaiting_review",
   "current_checkpoint": "transcript",
   "current_configuration_hash": "<sha256 of canonical effective job.yml>",
-  "configuration": {"general": {"source": "clip.mp4"}, "conversion": {}, "upload": {}},
-  "configuration_sources": {"global_defaults": {"general": {}, "conversion": {}, "upload": {}}},
+  "configuration": {"general": {"source": "clip.mp4"}, "conversion": {}, "upload": {}, "platforms": {}},
+  "configuration_sources": {"global_defaults": {"general": {}, "conversion": {}, "upload": {}, "platforms": {}}},
   "checkpoints": {
     "transcript": {
       "status": "awaiting_review",
@@ -641,7 +766,20 @@ errors without credentials or secret values.
       "invalidation_reason": null,
       "error": null
     },
-    "conversion": {"status": "pending", "revision": 0},
+    "conversion": {
+      "status": "pending",
+      "revision": 0,
+      "groups": {
+        "<group id>": {
+          "status": "pending",
+          "revision": 0,
+          "configuration_hash": "<sha256 of this group's effective conversion section>",
+          "artifact_hash": null,
+          "current_artifact_id": null,
+          "platforms": ["tiktok", "twitter"]
+        }
+      }
+    },
     "upload": {"status": "pending", "revision": 0}
   },
   "current_artifact_id": null,
@@ -678,6 +816,60 @@ targeted retry. Legal flow is:
 | Upload | `pending → awaiting_review → running → completed` or `partial_failure`; a targeted retry returns it to `running` and appends results |
 | Retry/edit | `failed` or `cancelled → pending`; changed inputs make a completed checkpoint `stale → pending` |
 | Optional stage | `pending → skipped`; a configuration change may make it required again |
+
+### Per-group Conversion Checkpoints
+
+`checkpoints.conversion` gains a `groups` map keyed by conversion-group id.
+Each group record is a standard checkpoint record — `status`, monotonic
+`revision`, `configuration_hash` of *that group's* effective `conversion`
+section, `artifact_hash`, `current_artifact_id`, `platforms`, timestamps, and
+structured `error`. The aggregate record keeps the common fields for
+reporting, and its reported state is the worst case over its groups: conversion
+is `failed` if any group failed, `awaiting_review` while any group awaits
+review, and so on.
+
+`transition_checkpoint`, `invalidate_checkpoint`, and `record_artifact` take an
+optional `group_id`; a transition without one addresses the aggregate.
+`record_artifact` stamps the group id on the artifact, and the artifact's
+`configuration_hash` is that group's conversion hash rather than the aggregate
+stage hash. Editing one platform's `conversion` override re-derives the group
+set: an unchanged group keeps its status, revision, and artifact, so a single
+group goes stale while the others stay valid. A group whose digest is no longer
+derived is dropped and the artifact only it bound is superseded, so nothing is
+left pointing at bytes no platform uploads. Re-derivation also runs at render
+time, which is what keeps a group created by an edit (or by a layout registry
+change) from being silently skipped. The top-level
+`current_artifact_id` is a display pointer to the latest render and does not
+decide what a submission uploads — each attempt binds its own group's artifact.
+Historical-artifact confirmation is likewise keyed per group: submitting one
+group's fresh artifact is not historical just because another group rendered
+more recently.
+
+A group whose configuration skips conversion is born `skipped`, never renders,
+and binds the source artifact. `skipped` is terminal for a group — there is no
+`skipped → completed` transition — so a mixed job reports one skipped group
+alongside the groups that rendered, and its aggregate is `completed` once every
+group that renders has completed. Because an edit can also re-point platforms
+onto groups that are already rendered, the aggregate is a projection of the
+group records: when no group is left with work, the render loop re-derives it
+instead of leaving the stage stranded at `stale`.
+
+Retention never recycles an artifact a live group binds to, even when the
+display pointer has moved on: a group-bound artifact is the one reference that
+decides what a submission uploads.
+
+The transcript checkpoint is not grouped. The job produces one transcript
+session, so per-platform `conversion.subtitles.transcription_*` overrides are
+rejected at validation rather than faked with sub-checkpoints.
+
+The upload checkpoint's dependency projection covers the `platforms` block
+alongside `upload`. Without it, editing
+`platforms.<p>.upload.content.title` would produce no hash change and would
+never invalidate the awaited draft. The conversion and transcript projections
+cover the per-platform `conversion` and per-platform `subtitles` slices for the
+same reason: a platform that changes its own conversion or transcription inputs
+must invalidate exactly the stage that consumes them, and an upload-only
+platform override must not.
 
 An invalid transition returns a conflict and does not change the manifest.
 Transcript and conversion checkpoints stop for review after producing their
@@ -734,12 +926,15 @@ and all upload references intact.
 Each upload attempt is append-only and records attempt id, platform, artifact
 id and SHA-256, the upload-content/platform/schedule configuration snapshot and
 hash, a content hash for dedup, start/completion timestamps, outcome, and
-safe response/error details. A completed attempt's `result` also carries
-`progress_percent`, the last observed live upload percent; live percents are
-runtime state and are never rewritten into a terminal record. An attempt is
-never rewritten to point at a newer artifact or new content. Partial platform
-success remains visible per attempt and platform. Remote uploads are historical
-results; local edits never silently update or delete them.
+safe response/error details. The snapshot is frozen **per attempt**: it is that
+platform's own effective `upload` slice plus its flat adapter options, so two
+platforms never upload each other's title, schedule, or privacy options. A
+completed attempt's `result` also carries `progress_percent`, the last observed
+live upload percent; live percents are runtime state and are never rewritten
+into a terminal record. An attempt is never rewritten to point at a newer
+artifact or new content. Partial platform success remains visible per attempt
+and platform. Remote uploads are historical results; local edits never silently
+update or delete them.
 
 Attempt statuses are `pending`, `scheduled`, `running`, `published`, `failed`,
 and `cancelled`. A scheduled attempt waits on a future `publish_at`; when the
@@ -777,6 +972,8 @@ Checkpoint input hashes are derived from these dependencies:
 | Transcript text, timing, segment typography, transcript generation settings, or source identity | Transcript and downstream conversion/upload work; converted artifact becomes stale | Prior transcript sessions, artifacts, and upload attempts |
 | Crop, captions/layout, subtitle/rendering, or composition settings | Conversion and pending upload work; converted artifact becomes stale | Prior artifacts and upload attempts |
 | Title, description, tags, schedule, or platform options | Upload draft/current upload checkpoint only; conversion remains valid | All prior upload attempts and remote results |
+| One platform's `conversion` override | Only the group whose effective conversion section changed; other groups keep their status and artifact | Prior artifacts and upload attempts for every group |
+| One platform's participation (`upload.skip`) | That platform's pending attempts and the upload draft; conversion remains valid | All prior upload attempts and remote results |
 | No dependency hash changes | Nothing | All state unchanged |
 
 Source identity is fixed for a job; changing the source requires creating a new
@@ -819,9 +1016,13 @@ construction the service scans `jobs/*/job.yml` once and reconciles each manifes
 whose recorded status is `running`: the in-flight checkpoint is marked `failed`
 with `{"code": "interrupted_by_restart", "retryable": true}` and the job returns
 to a state where `resume` or a checkpoint retry is actionable, instead of
-appearing permanently stuck. A `queued` manifest is left alone — all-pending
-checkpoints are not evidence of a crash — and a `running` job whose checkpoints
-have all gone terminal has only its drifted status re-derived.
+appearing permanently stuck. For a grouped conversion checkpoint, every
+`running` group is healed individually and the aggregate is failed only if it is
+still `running` afterwards, so a crash between two group renders fails the
+groups that were in flight without discarding the groups that already
+completed. A `queued` manifest is left alone — all-pending checkpoints are not
+evidence of a crash — and a `running` job whose checkpoints have all gone
+terminal has only its drifted status re-derived.
 
 A `running` upload checkpoint whose every `scheduled` attempt waits on a
 future `publish_at` is deliberately left alone — that is a deferral waiting on a
@@ -856,14 +1057,15 @@ the same `JobService` transitions as the web API. The web contract is:
 
 | Operation | Route | Contract |
 | --- | --- | --- |
-| Read job/checkpoints | `GET /api/v1/jobs/{id}` | Return aggregate status, all checkpoint revisions, active transcript session, artifact pointers, and upload history references |
-| Update job config | `PATCH /api/v1/jobs/{id}/configuration` | Accept a patch, `expected_configuration_hash`, and optional `reopen`; validate and update only that job's `job.yml` |
+| Read job/checkpoints | `GET /api/v1/jobs/{id}` | Return aggregate status, all checkpoint revisions, per-group conversion records, active transcript session, artifact pointers, and upload history references |
+| Update job config | `PATCH /api/v1/jobs/{id}/configuration` | Accept a patch, `expected_configuration_hash`, and optional `reopen`; validate and update only that job's `job.yml`. Editing `platforms.<p>.conversion` re-derives the conversion groups and stales only the changed groups |
 | Read/save transcript | `GET/PUT /api/v1/jobs/{id}/transcript` | Validate source hash and expected transcript revision; save a new immutable session revision and invalidate conversion when accepted edits change |
-| Accept transcript/conversion review | `POST /api/v1/jobs/{id}/checkpoints/{transcript\|conversion}/accept` | Require the current checkpoint revision; return conflict on stale review input |
-| Review/update upload draft | `GET/PUT/DELETE /api/v1/jobs/{id}/checkpoints/upload` | Update or discard only the pending draft; never modify prior upload attempts |
-| Resume/retry | `POST /api/v1/jobs/{id}/resume`; `POST /api/v1/jobs/{id}/checkpoints/{stage}/retry` | Resume earliest executable checkpoint; return conflict if review is required; retries append attempt/error history |
+| Accept transcript/conversion review | `POST /api/v1/jobs/{id}/checkpoints/{transcript\|conversion}/accept` | Require the current checkpoint revision; an optional `group` body param accepts one conversion group, and omitting it accepts every group awaiting review; return conflict on stale review input |
+| Rerender | `POST /api/v1/jobs/{id}/render` | Render every conversion group; an optional `group` body param rerenders only that group |
+| Review/update upload draft | `GET/PUT/DELETE /api/v1/jobs/{id}/checkpoints/upload` | Payload is `{upload, platforms}` — the job's `upload` section plus the per-platform `upload` slices. `platforms.<p>.conversion` is not editable here; it flows through `PATCH /configuration` and re-derives groups. Responses carry a read-only per-platform summary of what each platform will receive. Mutations never modify prior upload attempts |
+| Resume/retry | `POST /api/v1/jobs/{id}/resume`; `POST /api/v1/jobs/{id}/checkpoints/{stage}/retry` | Resume the earliest actionable checkpoint or group; return conflict if review is required; retries append attempt/error history |
 | Artifacts | `GET/PATCH/DELETE /api/v1/jobs/{id}/artifacts/{artifact_id}` | Patch display metadata only; delete local bytes after confirmation and retain a tombstone |
-| Upload history/start/retry | `GET /api/v1/jobs/{id}/uploads`; `POST /api/v1/jobs/{id}/upload`; `POST /api/v1/jobs/{id}/uploads/{platform}/retry` | Retry requires `attempt_id`; if its artifact is no longer current, require matching `artifact_id` and `confirm_historical_artifact: true` |
+| Upload history/start/retry | `GET /api/v1/jobs/{id}/uploads`; `POST /api/v1/jobs/{id}/upload`; `POST /api/v1/jobs/{id}/uploads/{platform}/retry` | Bind each attempt to its own group's artifact and freeze its own upload slice. Retry requires `attempt_id`; if its artifact is no longer current, require matching `artifact_id` and `confirm_historical_artifact: true`. An explicit submission naming a platform whose effective `upload.skip` is true returns `422` |
 | Cancel one scheduled attempt | `DELETE /api/v1/jobs/{id}/scheduled/{attempt_id}` | `202` with the cancelled attempt; `404` for an unknown attempt, `422` when it is not `scheduled`. A local attempt is disarmed and its surviving batch members re-armed; a platform-scheduled attempt is deleted on the platform first, and a refusal leaves it `scheduled` with a `platform_cancel_failed` note |
 
 Mutations accept an expected checkpoint/configuration revision and return
@@ -904,13 +1106,24 @@ configuration resolver.
   [CLI_WEB_PARITY.md](CLI_WEB_PARITY.md) for the cancel surface.
 - Whether multi-job groups ever become save-able presets later is deferred;
   today they are ephemeral execution groups.
+- Whether the transcript checkpoint ever gains per-group sub-checkpoints is
+  deferred. The composition tier would allow
+  `platforms.<p>.conversion.subtitles.transcription_*`, but the job has one
+  source-bound transcript session, so honouring those keys needs one transcript
+  group per distinct transcription configuration. Until a concrete case needs
+  it, the keys are rejected at validation with an actionable message instead of
+  being silently dropped, and only the conversion checkpoint is grouped.
 
 ## Implementation Boundaries
 
-The shared resolver and app.yml persistence live in `clipmorph/configuration.py`.
-Per-source fan-out, checkpoint transitions, transcript revision persistence,
-artifact history, and upload attempts are owned by `clipmorph/service.py` and
-`clipmorph/job.py`. `clipmorph/cli.py` and `clipmorph/web.py` are command/route
+The shared resolver, the per-platform resolver
+(`resolve_platform_configuration`), the job schema validators, and app.yml
+persistence live in `clipmorph/configuration.py`. Per-source fan-out,
+conversion-group derivation (`conversion_groups`), checkpoint transitions,
+transcript revision persistence, artifact history, and upload attempts are
+owned by `clipmorph/service.py` and `clipmorph/job.py`.
+`clipmorph/platforms.py::resolve_upload_participants` owns participation
+resolution. `clipmorph/cli.py` and `clipmorph/web.py` are command/route
 adapters over those shared operations. The conversion renderer consumes
 `conversion.layout`; it does not expose a parallel camera-feed configuration.
 

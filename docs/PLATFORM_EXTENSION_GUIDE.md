@@ -77,7 +77,7 @@ when these markers and the registry disagree, in either direction.
 4. **Upload options and credentials surface — `clipmorph/platforms.py`,
    `clipmorph/auth.py`, and `clipmorph/preflight.py`.** Plain per-platform
    defaults live in `PLATFORM_DEFAULT_CONFIG`; explicit
-   `upload.platforms.<platform>` config values become `<platform>_<option>` keys
+   `platforms.<platform>` config values become `<platform>_<option>` keys
    and win over the default in `UploadPipeline._map_common_parameters`. There is
    no per-platform options route and no per-platform CLI flag to generate, and
    none is needed: the CLI runtime summary and the `GET /api/v1/credentials`

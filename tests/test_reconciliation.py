@@ -53,7 +53,8 @@ def _add_pending_attempt(manifest: JobManifest, jobs_dir: Path,
         "platform": "youtube",
         "artifact_id": artifact["id"],
         "artifact_hash": artifact["sha256"],
-        "configuration_snapshot": {"platforms": {"include": ["youtube"]}},
+        "configuration_snapshot": {"content": {"title": "Clip"},
+                                   "platform_options": {}},
         "configuration_hash": "configuration-hash",
         "content_hash": "content-hash",
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -127,6 +128,47 @@ class StartupReconciliationTests(unittest.TestCase):
                              "interrupted_by_restart")
             self.assertEqual(healed.status, "failed")
 
+    def test_interrupted_conversion_heals_each_group_separately(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            source_dir = data_dir / "sources"
+            source_dir.mkdir(parents=True)
+            source = source_dir / "clip.mp4"
+            source.write_bytes(b"video")
+            jobs_dir = data_dir / "jobs"
+            manifest = JobManifest.create(str(source), {
+                "general": {"source": "clip.mp4"},
+                "conversion": {"skip": False, "subtitles": {"skip": True}},
+                # Two distinct effective conversion sections -> two groups.
+                "platforms": {"youtube": {"conversion": {"strict": True}}},
+            }, jobs_dir)
+            groups = list(manifest.checkpoints["conversion"]["groups"])
+            self.assertEqual(len(groups), 2)
+            # One group finished before the crash; the other was in flight.
+            for group_id, statuses in ((groups[0], ("running", "completed")),
+                                       (groups[1], ("running",))):
+                for status in statuses:
+                    manifest = JobManifest.load(jobs_dir / manifest.job_id)
+                    revision = manifest.checkpoints["conversion"]["groups"][
+                        group_id]["revision"]
+                    manifest.transition_checkpoint(
+                        "conversion", status, revision, jobs_dir,
+                        group_id=group_id)
+            manifest = JobManifest.load(jobs_dir / manifest.job_id)
+            manifest.set_status("running", jobs_dir)
+
+            healed = self._heal(data_dir, manifest.job_id)
+
+            healed_groups = healed.checkpoints["conversion"]["groups"]
+            self.assertEqual(healed_groups[groups[0]]["status"], "completed")
+            self.assertEqual(healed_groups[groups[1]]["status"], "failed")
+            self.assertEqual(healed_groups[groups[1]]["error"]["code"],
+                             "interrupted_by_restart")
+            # The aggregate degrades to the worst group rather than losing the
+            # group that had already finished.
+            self.assertEqual(healed.checkpoints["conversion"]["status"], "failed")
+            self.assertEqual(healed.status, "failed")
+
     def test_scheduled_upload_attempts_are_left_running_for_re_arm(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
@@ -134,7 +176,6 @@ class StartupReconciliationTests(unittest.TestCase):
             publish_at = _future_iso(hours=2)
             _add_pending_attempt(manifest, jobs_dir, publish_at)
             _start_stage(manifest, jobs_dir, "upload")
-
             service = JobService(data_dir)
             try:
                 healed = service.get_job(manifest.job_id)

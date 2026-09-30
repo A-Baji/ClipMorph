@@ -11,18 +11,21 @@ from __future__ import annotations
 from typing import Any, Callable
 
 
-def content_options(upload_config: dict[str, Any],
-                    platforms: list[str]) -> dict[str, Any]:
-    """Build the common pipeline options for one upload submission."""
+def content_options(upload_config: dict[str, Any]) -> dict[str, Any]:
+    """Build the pipeline options for one upload binding.
+
+    The flat per-platform adapter options now live in the top-level
+    ``platforms`` map (not ``upload.platforms``) and are frozen per attempt,
+    already carrying their ``{platform}_{parameter}`` names under
+    ``platform_options``.  Every option in the snapshot was resolved for the
+    platforms this binding uploads to, so they apply verbatim.
+    """
     content = upload_config.get("content", {})
     options: dict[str, Any] = {
         "description": content.get("description", ""),
         "tags": content.get("tags", []),
     }
-    for platform, values in upload_config.get("platforms", {}).items():
-        if platform in platforms and isinstance(values, dict):
-            options.update({f"{platform}_{key}": value
-                            for key, value in values.items()})
+    options.update(upload_config.get("platform_options", {}))
     return options
 
 
@@ -46,7 +49,7 @@ def execute_upload_pipeline(platforms: list[str], artifact_path: str,
     content = upload_config.get("content", {})
     try:
         return pipeline.run(artifact_path, content.get("title", ""),
-                            **content_options(upload_config, platforms))
+                            **content_options(upload_config))
     except Exception as error:
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()
