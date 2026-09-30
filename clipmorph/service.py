@@ -959,14 +959,7 @@ class JobService:
 
             updated = merge_configuration(
                 manifest.configuration, {"upload": upload_configuration})
-            app_configuration = load_app_configuration(self.app_config_path)
-            layouts = list(app_configuration["layouts"])
-            conversion = updated.get("conversion", {})
-            layout_id = conversion.get("layout_id")
-            if (layout_id and not any(record.get("id") == layout_id for record in layouts)):
-                layouts.append({"id": layout_id, "name": layout_id,
-                                "layout": conversion.get("layout", {})})
-            updated = resolve_job_configuration({}, updated, layouts)
+            updated = self._resolve_upload_configuration_locked(updated)
             manifest.configuration = updated
             checkpoint = manifest.checkpoints["upload"]
             checkpoint["revision"] += 1
@@ -995,6 +988,229 @@ class JobService:
         default_upload = defaults.get("upload", {})
         return self.update_upload_draft(
             job_id, default_upload, expected_revision, reopen=reopen)
+
+    def _resolve_upload_configuration_locked(
+            self, updated: dict[str, Any]) -> dict[str, Any]:
+        """Validate and normalize a mutated upload configuration.
+
+        Mirrors ``update_upload_draft``'s resolution step: an inline
+        ``conversion.layout_id`` that is not in the app registry is carried as
+        an ad-hoc preset, then the whole effective configuration is resolved.
+        """
+        app_configuration = load_app_configuration(self.app_config_path)
+        layouts = list(app_configuration["layouts"])
+        conversion = updated.get("conversion", {})
+        layout_id = conversion.get("layout_id")
+        if (layout_id
+                and not any(record.get("id") == layout_id for record in layouts)):
+            layouts.append({"id": layout_id, "name": layout_id,
+                            "layout": conversion.get("layout", {})})
+        return resolve_job_configuration({}, updated, layouts)
+
+    def _replace_suggestions_locked(self, manifest: JobManifest,
+                                    block: dict[str, Any]) -> dict[str, Any]:
+        """Write the suggestions block and bump the draft revision.
+
+        Mirrors the ``update_upload_draft`` locked update pattern: the
+        configuration is resolved, the checkpoint revision increments, the
+        configuration hash is recomputed, and the manifest is persisted.
+        Returns the same ``{upload, checkpoint}`` shape as the draft
+        GET/PUT routes.
+        """
+        updated = deepcopy(manifest.configuration)
+        updated.setdefault("upload", {})["suggestions"] = block
+        updated = self._resolve_upload_configuration_locked(updated)
+        manifest.configuration = updated
+        checkpoint = manifest.checkpoints["upload"]
+        checkpoint["revision"] += 1
+        checkpoint["status"] = "awaiting_review"
+        checkpoint["configuration_hash"] = checkpoint_configuration_hash(
+            updated, "upload")
+        checkpoint["updated_at"] = datetime.now(timezone.utc).isoformat()
+        checkpoint["completed_at"] = None
+        checkpoint["error"] = None
+        checkpoint["invalidation_reason"] = None
+        if checkpoint["started_at"] is None:
+            checkpoint["started_at"] = checkpoint["updated_at"]
+        manifest._derive_status()
+        self._discard_scheduled_uploads_locked(manifest)
+        manifest.save(self.jobs_dir)
+        return {"upload": manifest.configuration["upload"],
+                "checkpoint": manifest.checkpoints["upload"]}
+
+    @staticmethod
+    def _suggestion_scalars(block: dict[str, Any] | None) -> dict[str, Any]:
+        """Return the provider/model selector scalars from a suggestions block."""
+        block = block or {}
+        return {"provider": block.get("provider", "template"),
+                "model": block.get("model")}
+
+    def _gather_suggestion_context_locked(
+            self, manifest: JobManifest, job_id: str
+    ) -> tuple[str, dict[str, Any]]:
+        """Return ``(transcript_excerpt, content_baseline)`` for generation."""
+        transcript_excerpt = ""
+        transcript_duration = None
+        if manifest.active_transcript:
+            transcript_path = (self.jobs_dir / job_id
+                               / manifest.active_transcript["path"])
+            if transcript_path.is_file():
+                from clipmorph.transcript import load_edit_session
+                session = load_edit_session(transcript_path)
+                transcript_excerpt = " ".join(
+                    str(segment.get("text", ""))
+                    for segment in session.get("segments", []))
+                transcript_duration = session.get("media_duration")
+
+        duration_seconds = None
+        if manifest.current_artifact_id:
+            artifact = manifest.artifacts.get(manifest.current_artifact_id)
+            if artifact:
+                duration_seconds = artifact.get("duration_seconds")
+        if duration_seconds is None:
+            duration_seconds = transcript_duration
+
+        upload_content = manifest.configuration.get("upload", {}).get("content", {})
+        content_baseline = {
+            "source_title": manifest.configuration.get(
+                "general", {}).get("source", ""),
+            "video_title": upload_content.get("title", ""),
+            "duration_seconds": duration_seconds,
+            "game_name": None,
+            "tags": upload_content.get("tags", []),
+        }
+        return transcript_excerpt, content_baseline
+
+    def suggest_upload_metadata(self, job_id: str,
+                               platforms: list[str] | None = None,
+                               provider: str | None = None,
+                               force: bool = False) -> dict[str, Any]:
+        """Generate platform-aware metadata suggestions for the upload draft.
+
+        The upload checkpoint must be ``awaiting_review`` (same gate as
+        ``update_upload_draft``). Suggestions are written into
+        ``configuration["upload"]["suggestions"]`` and the draft revision
+        is bumped. Dedup guard: skip regeneration when the existing
+        suggestion's ``configuration_hash`` matches the current
+        ``upload.content`` hash, unless ``force`` is True.
+        """
+        from clipmorph.policy import CAPABILITY_MATRIX
+        from clipmorph.suggest import suggest_metadata
+
+        with self._lock:
+            manifest = self.get_job(job_id)
+            checkpoint = manifest.checkpoints["upload"]
+            if checkpoint["status"] != "awaiting_review":
+                raise ValueError("upload checkpoint is not awaiting review")
+
+            platform_settings = manifest.configuration.get(
+                "upload", {}).get("platforms", {})
+            include = platforms or platform_settings.get("include")
+            selected = enabled_platforms(
+                {**platform_settings, "include": include})
+            if not selected:
+                raise ValueError("upload platforms are empty or unsupported")
+
+            upload_content = manifest.configuration.get(
+                "upload", {}).get("content", {})
+            transcript_excerpt, content_baseline = (
+                self._gather_suggestion_context_locked(manifest, job_id))
+
+            existing_block = manifest.configuration.get(
+                "upload", {}).get("suggestions", {}) or {}
+            scalars = self._suggestion_scalars(existing_block)
+            provider_name = provider or scalars["provider"]
+            model_override = scalars["model"]
+
+            content_hash = configuration_sha256(upload_content)
+            rows: dict[str, Any] = {}
+            all_unchanged = True
+            for platform in selected:
+                existing = existing_block.get(platform)
+                if (isinstance(existing, dict)
+                        and existing.get("configuration_hash") == content_hash
+                        and not force):
+                    rows[platform] = existing
+                    continue
+                all_unchanged = False
+                rule = CAPABILITY_MATRIX.get(platform)
+                limits = {"caption_limit": rule.caption_limit if rule else None}
+                suggestion = suggest_metadata(
+                    platform, transcript_excerpt, content_baseline, limits,
+                    provider_name, model_override)
+                suggestion["generated_at"] = datetime.now(
+                    timezone.utc).isoformat()
+                suggestion["configuration_hash"] = content_hash
+                rows[platform] = suggestion
+
+            if all_unchanged and not force:
+                return {"upload": manifest.configuration["upload"],
+                        "checkpoint": manifest.checkpoints["upload"]}
+
+            return self._replace_suggestions_locked(
+                manifest, {**scalars, **rows})
+
+    def accept_suggestions(self, job_id: str,
+                           platforms: list[str] | None = None) -> dict[str, Any]:
+        """Copy chosen suggestion rows into ``upload.content`` and clear them.
+
+        This is the bridge over the existing review gate: the suggestion's
+        title, description, and hashtags are copied into
+        ``configuration["upload"]["content"]``, and the accepted suggestion
+        rows are cleared (the provider/model selector scalars survive). When
+        ``platforms`` is omitted, every platform with a suggestion row is
+        accepted. Returns the updated draft.
+        """
+        with self._lock:
+            manifest = self.get_job(job_id)
+            checkpoint = manifest.checkpoints["upload"]
+            if checkpoint["status"] != "awaiting_review":
+                raise ValueError("upload checkpoint is not awaiting review")
+
+            block = manifest.configuration.get(
+                "upload", {}).get("suggestions", {}) or {}
+            chosen = list(platforms) if platforms else [
+                name for name in block
+                if name not in {"provider", "model"}]
+
+            content = deepcopy(
+                manifest.configuration.get("upload", {}).get("content", {}))
+            for platform in chosen:
+                suggestion = block.get(platform)
+                if not isinstance(suggestion, dict):
+                    raise ValueError(f"no suggestion for platform {platform}")
+                content["title"] = str(suggestion.get("title", ""))
+                content["description"] = str(suggestion.get("description", ""))
+                content["tags"] = [
+                    str(tag).strip("#").replace(" ", "")
+                    for tag in (suggestion.get("hashtags") or [])]
+
+            updated = deepcopy(manifest.configuration)
+            upload = updated.setdefault("upload", {})
+            upload["content"] = content
+            upload["suggestions"] = {
+                **self._suggestion_scalars(block),
+                **{name: row for name, row in block.items()
+                   if name not in chosen and name not in {"provider", "model"}},
+            }
+            updated = self._resolve_upload_configuration_locked(updated)
+            manifest.configuration = updated
+            checkpoint = manifest.checkpoints["upload"]
+            checkpoint["revision"] += 1
+            checkpoint["status"] = "awaiting_review"
+            checkpoint["configuration_hash"] = checkpoint_configuration_hash(
+                updated, "upload")
+            checkpoint["updated_at"] = datetime.now(timezone.utc).isoformat()
+            checkpoint["completed_at"] = None
+            checkpoint["error"] = None
+            checkpoint["invalidation_reason"] = None
+            if checkpoint["started_at"] is None:
+                checkpoint["started_at"] = checkpoint["updated_at"]
+            manifest._derive_status()
+            self._discard_scheduled_uploads_locked(manifest)
+            manifest.save(self.jobs_dir)
+            return {"upload": manifest.configuration["upload"],
+                    "checkpoint": manifest.checkpoints["upload"]}
 
     def submit_upload(self, job_id: str, platforms: list[str] | None = None,
                       artifact_id: str | None = None,

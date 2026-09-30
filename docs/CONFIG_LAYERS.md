@@ -170,6 +170,9 @@ upload:
     title: ''
     description: ''
     tags: []
+  suggestions:
+    provider: template           # template | hugging_face; selects the generator
+    model: null                  # provider-specific model id override
   platforms:
     include: []                  # only upload to these platforms (empty = all)
     exclude: []                  # exclude these platforms from an otherwise-included set
@@ -182,6 +185,23 @@ upload:
 `content` and `platforms` nest under `upload` — both are exclusively
 upload-time concerns (what gets published and where), so there's no reason
 for them to sit at the top level next to `general`/`conversion`.
+
+`upload.suggestions` selects the AI-assisted metadata generator and holds its
+drafts. Its `provider` (`template`, the deterministic default, or
+`hugging_face`) and `model` (a provider-specific id override, `null` for the
+provider default) are the *configuration*; `clipmorph job suggest` or
+`POST /api/v1/jobs/{id}/checkpoints/upload/suggest` additionally writes one
+generated row per selected platform under the same key, each carrying
+`{title, description, hashtags, generated_at, provider, model,
+configuration_hash}` and an optional `note` when the request degraded to the
+template provider. Suggestions are **draft-level only and never
+auto-publish**: they live inside the mutable upload draft, and accepting one
+(`clipmorph job accept-suggestions` or
+`POST /api/v1/jobs/{id}/checkpoints/upload/suggestions/accept`) is what copies
+its title, description, and hashtags into `upload.content`; only the existing
+review gate then submits that content. There is no "disabled" flag — the
+absence of a generated row *is* disabled, and an explicit Clear drops the rows
+while keeping the `provider`/`model` selector.
 
 `upload_to`/`skip` (the platform allowlist/denylist) move under
 `upload.platforms` and are renamed `include`/`exclude` — they select which
