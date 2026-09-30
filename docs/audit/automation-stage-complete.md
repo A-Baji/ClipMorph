@@ -1,8 +1,8 @@
-# Automation Stage Complete: #101
+# Automation Stage Complete: #209
 
 ## Issue
 
-#101 — feature: add analytics ingestion and performance feedback
+#209 — analytics: comparisons dashboard over stored snapshots (after #101 Phase 1)
 
 ## Gate results
 
@@ -11,31 +11,30 @@
 - `python -m ruff check --select E9,F clipmorph scripts tests quality` — PASSED
 - `python -m mypy --ignore-missing-imports clipmorph` — PASSED (0 issues, 34 files)
 - `python -m compileall -q clipmorph` — PASSED
-- `python -m unittest discover -s tests` — PASSED (372 tests, OK)
+- `python -m unittest discover -s tests` — PASSED (399 tests, OK)
+- `python -m clipmorph metrics compare --limit 10` — PASSED (empty state)
 
 ## Review cycles used
 
-2 of 3
+1 of 3
 
-- Cycle 1: ISSUES — 1 major gap (missing `_retry_request` backoff in collectors), 3 minor quality issues (unused parameter, awkward token lookup, missing retry test)
-- Cycle 2: PASS — patch plan correctly applied, no new issues
+- Cycle 1: PASS — all guide items implemented, 4 decisions accepted, 0 findings, no patch needed
 
 ## Files changed
 
-- `clipmorph/metrics.py` (new)
-- `clipmorph/service.py`
-- `clipmorph/cli.py`
+- `clipmorph/metrics.py`
 - `clipmorph/web.py`
-- `docs/AUTHENTICATION.md`
-- `docs/CLI_WEB_PARITY.md`
-- `docs/CONFIG_LAYERS.md`
+- `clipmorph/cli.py`
 - `frontend/src/App.svelte`
-- `tests/test_metrics.py` (new)
-- `tests/test_service.py`
+- `frontend/src/styles.css`
+- `clipmorph/web_assets` (rebuilt frontend bundle)
+- `docs/CLI_WEB_PARITY.md`
+- `tests/test_metrics.py`
 - `tests/test_web.py`
 - `tests/test_cli.py`
 - `tests/test_cli_surface.py`
+- `tests/test_e2e_dashboard.py`
 
 ## Commit
 
-`45a22db` on `dev` — "Resolve #101"
+`1dd729c` on `dev` — "Resolve #209"
