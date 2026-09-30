@@ -222,8 +222,6 @@ def execute_job(manifest: JobManifest, token: CancellationToken,
             conversion_pipeline = ConversionPipeline(
                 input_path=manifest.source_path,
                 skip_subtitles=bool(group_subtitles.get("skip")),
-                no_confirm=True,
-                strict=bool(group_conversion.get("strict", False)),
                 reviewed_transcript_path=transcript_path,
                 output_dir=str(output_dir),
                 layout=group_conversion.get("layout", {}),
