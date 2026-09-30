@@ -89,10 +89,10 @@ def documented_native_scheduling(path: Path, heading: str) -> dict[str, str]:
 
 
 class PlatformRegistryTests(unittest.TestCase):
-    def test_supported_platforms_are_the_documented_four(self):
+    def test_supported_platforms_are_the_documented_five(self):
         self.assertEqual(
             set(SUPPORTED_PLATFORMS),
-            {"youtube", "instagram", "tiktok", "twitter"})
+            {"youtube", "instagram", "tiktok", "twitter", "facebook"})
 
     def test_every_supported_platform_has_a_policy_rule(self):
         for platform in SUPPORTED_PLATFORMS:
@@ -112,7 +112,8 @@ class PlatformRegistryTests(unittest.TestCase):
 
     def test_membership_helper_is_case_insensitive(self):
         self.assertTrue(is_supported_platform("YouTube"))
-        self.assertFalse(is_supported_platform("facebook"))
+        self.assertTrue(is_supported_platform("Facebook"))
+        self.assertFalse(is_supported_platform("linkedin"))
 
     def test_defaults_cover_every_supported_platform(self):
         defaults = build_platform_default_config()
@@ -123,6 +124,8 @@ class PlatformRegistryTests(unittest.TestCase):
         self.assertEqual(defaults["tiktok"]["privacy_level"],
                          "PUBLIC_TO_EVERYONE")
         self.assertEqual(PLATFORM_DEFAULT_CONFIG["twitter"], {})
+        self.assertEqual(PLATFORM_DEFAULT_CONFIG["facebook"]["content_kind"],
+                         "reel")
 
     def test_empty_include_means_all_and_exclude_prunes(self):
         self.assertEqual(enabled_platforms({}), list(SUPPORTED_PLATFORMS))
@@ -165,7 +168,7 @@ class NativeSchedulingRegistryTests(unittest.TestCase):
             with self.subTest(platform=platform):
                 self.assertEqual(native_scheduling_support(platform),
                                  SUPPORTED_NATIVE_SCHEDULING[platform])
-        self.assertFalse(native_scheduling_support("facebook"))
+        self.assertFalse(native_scheduling_support("linkedin"))
 
     def test_every_platform_ships_disabled_until_the_probe_runs(self):
         for platform, enabled in SUPPORTED_NATIVE_SCHEDULING.items():
@@ -346,9 +349,9 @@ class PlatformCoverageDriftTests(unittest.TestCase):
         guard = PlatformCoverageDriftTests()
         with self.assertRaises(AssertionError) as caught:
             guard.assert_platform_in(
-                CAPABILITIES_DOC, platforms=(*SUPPORTED_PLATFORMS, "facebook"))
+                CAPABILITIES_DOC, platforms=(*SUPPORTED_PLATFORMS, "linkedin"))
 
-        self.assertIn("platform 'facebook' missing from "
+        self.assertIn("platform 'linkedin' missing from "
                       "'docs/PLATFORM_CAPABILITIES.md'",
                       str(caught.exception))
 

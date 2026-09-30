@@ -486,6 +486,47 @@ class WebApiTests(unittest.TestCase):
                     f"/api/v1/jobs/{job_id}/uploads?since=not-a-timestamp")
                 self.assertEqual(invalid.status_code, 422)
 
+    def test_facebook_content_kind_flows_into_the_pipeline(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"source")
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {
+                "conversion": {"skip": True, "subtitles": {"skip": True}},
+                "upload": {"platforms": {"include": ["facebook"],
+                                         "facebook": {"content_kind": "video"}}},
+            })
+            artifact_dir = data_dir / "output" / manifest.job_id
+            artifact_dir.mkdir(parents=True)
+            artifact_path = artifact_dir / "output.mp4"
+            artifact_path.write_bytes(b"rendered artifact")
+            manifest.set_artifact(str(artifact_path), service.jobs_dir)
+            service.close()
+
+            app = create_app(data_dir)
+            with TestClient(app) as client:
+                job_id = manifest.job_id
+                client.put(
+                    f"/api/v1/jobs/{job_id}/checkpoints/upload",
+                    json={"expected_revision": 0,
+                          "upload": {"content": {"title": "Frozen title"}}})
+                with patch("clipmorph.upload_pipeline.UploadPipeline") as pipeline_type:
+                    pipeline_type.return_value.run.return_value = {
+                        "Facebook": {"success": True, "result": "video-id"}}
+                    submitted = client.post(
+                        f"/api/v1/jobs/{job_id}/upload", json={})
+                    self.assertEqual(submitted.status_code, 202, submitted.text)
+                    app.state.job_service._futures[
+                        f"upload:{job_id}"].result(timeout=2)
+
+                sent = pipeline_type.return_value.run.call_args.kwargs
+                self.assertEqual(sent["facebook_content_kind"], "video")
+                attempts = client.get(f"/api/v1/jobs/{job_id}/uploads").json()
+                self.assertEqual(attempts[0]["platform"], "facebook")
+                self.assertEqual(attempts[0]["status"], "published")
+
     def test_cancel_scheduled_route_contract(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"

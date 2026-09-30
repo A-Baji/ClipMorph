@@ -82,6 +82,22 @@ class CommonParameterMappingTests(unittest.TestCase):
         self.assertLessEqual(
             len(sent["tweet_text"]), CAPABILITY_MATRIX["twitter"].caption_limit)
 
+    def test_facebook_receives_the_composed_description_and_kind_default(self):
+        sent = self._upload_kwargs("Facebook", "Boss fight",
+                                   description="No healing", tags=["gaming"])
+
+        self.assertEqual(set(sent) - {"video_path"},
+                         {"description", "content_kind"})
+        self.assertEqual(sent["description"],
+                         "Boss fight\n\nNo healing\n\n#gaming")
+        self.assertEqual(sent["content_kind"], "reel")
+
+    def test_facebook_content_kind_override_wins(self):
+        sent = self._upload_kwargs("Facebook", "Boss fight",
+                                   facebook_content_kind="video")
+
+        self.assertEqual(sent["content_kind"], "video")
+
     def test_platform_overrides_win_over_composed_values(self):
         sent = self._upload_kwargs(
             "Instagram", "Boss fight", tags=["gaming"],

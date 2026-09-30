@@ -8,6 +8,7 @@ from clipmorph.platforms import build_platform_default_config
 from clipmorph.policy import build_platform_metadata
 from clipmorph.policy import validate_artifact
 
+from .platforms import FacebookUploadPipeline
 from .platforms import InstagramUploadPipeline
 from .platforms import TikTokUploadPipeline
 from .platforms import TwitterUploadPipeline
@@ -34,6 +35,7 @@ class UploadPipeline:
     - Instagram: caption (title + hashtags + description combined)
     - TikTok: title (title + hashtags + description combined)
     - Twitter: tweet_text (title + hashtags + description combined)
+    - Facebook: description (title + hashtags + description combined)
 
     Platform-Specific Overrides:
     Use {platform}_{parameter} format to override any platform parameter:
@@ -42,6 +44,7 @@ class UploadPipeline:
     - instagram_share_to_feed: Instagram feed sharing (default: True)
     - instagram_thumb_offset: Instagram thumbnail offset (default: 0)
     - tiktok_privacy_level: TikTok privacy ('PUBLIC_TO_EVERYONE', 'MUTUAL_FOLLOW_FRIENDS', 'SELF_ONLY')
+    - facebook_content_kind: Facebook target ('reel' default, or 'video')
     """
 
     def __init__(self,
@@ -49,6 +52,7 @@ class UploadPipeline:
                  instagram: bool = False,
                  tiktok: bool = False,
                  twitter: bool = False,
+                 facebook: bool = False,
                  max_workers: int = 4,
                  progress_callback=None):
         """
@@ -59,6 +63,7 @@ class UploadPipeline:
             instagram: Whether to upload to Instagram
             tiktok: Whether to upload to TikTok
             twitter: Whether to upload to Twitter
+            facebook: Whether to upload to Facebook
             max_workers: Maximum number of parallel uploads
             progress_callback: Optional callable invoked with
                 ``(platform_name, percent)`` after each adapter step update;
@@ -93,6 +98,12 @@ class UploadPipeline:
                 self.enabled_platforms['Twitter'] = TwitterUploadPipeline()
             except Exception as e:
                 self._record_initialization_error('Twitter', e)
+
+        if facebook:
+            try:
+                self.enabled_platforms['Facebook'] = FacebookUploadPipeline()
+            except Exception as e:
+                self._record_initialization_error('Facebook', e)
 
     def _record_initialization_error(self, platform_name: str, error: Exception):
         message = (f"Unable to initialize {platform_name}: {error}. "

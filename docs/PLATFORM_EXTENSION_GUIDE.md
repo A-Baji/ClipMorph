@@ -29,7 +29,7 @@ when these markers and the registry disagree, in either direction.
 - [x] instagram
 - [x] tiktok
 - [x] twitter
-- [ ] facebook ([#175](https://github.com/A-Baji/ClipMorph/issues/175))
+- [x] facebook ([#175](https://github.com/A-Baji/ClipMorph/issues/175))
 
 ## Steps
 
