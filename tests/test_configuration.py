@@ -7,6 +7,7 @@ from unittest.mock import patch
 import yaml
 
 from clipmorph.configuration import APP_CONFIG_VERSION
+from clipmorph.configuration import DEFAULT_APP_CONFIGURATION
 from clipmorph.configuration import load_app_configuration
 from clipmorph.configuration import load_job_records
 from clipmorph.configuration import merge_source_configurations
@@ -15,6 +16,7 @@ from clipmorph.configuration import resolve_job_configuration
 from clipmorph.configuration import resolve_platform_configuration
 from clipmorph.configuration import save_app_configuration
 from clipmorph.configuration import discover_source_names
+from clipmorph.platforms import build_platform_default_config
 from clipmorph.job import JobManifest
 from clipmorph.job import MANIFEST_SCHEMA_VERSION
 from clipmorph.service import JobService
@@ -490,6 +492,22 @@ class AppConfigurationTests(unittest.TestCase):
             self.assertEqual(loaded["layouts"], [])
             self.assertTrue(path.exists())
             self.assertFalse(path.with_suffix(".yml.tmp").exists())
+
+    def test_app_template_includes_registry_platform_defaults(self):
+        """``clipmorph init`` carries the mandatory per-platform section.
+
+        The template's flat options are generated from the platform
+        registry (#225) instead of a hand-maintained copy, so the template
+        and the upload adapters cannot drift apart.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "app.yml"
+            save_app_configuration(path, DEFAULT_APP_CONFIGURATION)
+            loaded = load_app_configuration(path)
+
+        self.assertEqual(loaded["job_defaults"]["platforms"],
+                         build_platform_default_config())
+        self.assertIn("youtube", loaded["job_defaults"]["platforms"])
 
     def test_app_configuration_rejects_unknown_top_level_fields(self):
         with tempfile.TemporaryDirectory() as temp_dir:

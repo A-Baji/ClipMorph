@@ -6,9 +6,62 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import yaml
+
+from clipmorph import auth as auth_module
+from clipmorph.service import JobService
 from clipmorph.upload_pipeline.platforms.tiktok import TikTokUploadPipeline
 from clipmorph.upload_pipeline.platforms.twitter import TwitterUploadPipeline
 
+
+class AuthPersistenceTests(unittest.TestCase):
+    def test_job_service_loads_workspace_auth_and_persists_to_it(self):
+        """CLI-built services load auth.yaml once and stays bound to it.
+
+        Regexes do not appear in a path: the tokens the workspace stores are
+        visible to uploads, and tokens the OAuth flow issues are persisted
+        back into the SAME workspace file (#226) instead of the default
+        data dir.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            auth_path = data_dir / "auth.yaml"
+            auth_path.write_text(
+                "youtube:\n"
+                "    client_id: id\n"
+                "    client_secret: secret\n"
+                "    refresh_token: refreshed\n",
+                encoding="utf-8")
+
+            with patch.dict(os.environ):
+                os.environ.pop("GOOGLE_REFRESH_TOKEN", None)
+                service = JobService(data_dir)
+                try:
+                    self.assertEqual(
+                        os.environ.get("GOOGLE_REFRESH_TOKEN"), "refreshed")
+                    self.assertEqual(
+                        auth_module.active_auth_file_path(), auth_path)
+
+                    auth_module.persist_auth_credential(
+                        "youtube", "refresh_token", "rotated")
+                    persisted = yaml.safe_load(
+                        auth_path.read_text(encoding="utf-8"))
+                    self.assertEqual(
+                        persisted["youtube"]["refresh_token"], "rotated")
+                finally:
+                    service.close()
+
+    def test_service_default_launch_loads_auth_from_its_data_dir(self):
+        """A service without an auth.yaml leaves no token env behind."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ):
+                os.environ.pop("TWITTER_OAUTH2_ACCESS_TOKEN", None)
+                service = JobService(Path(temp_dir))
+                try:
+                    self.assertIsNone(
+                        os.environ.get("TWITTER_OAUTH2_ACCESS_TOKEN"))
+                finally:
+                    service.close()
 
 class OAuthTests(unittest.TestCase):
     def test_tiktok_video_init_includes_brand_content_toggle(self):

@@ -43,7 +43,15 @@ job_defaults:
     clean: false
   conversion: {}
   upload: {}
-  platforms: {}
+  # Generated from clipmorph.platforms.PLATFORM_DEFAULT_CONFIG; flat
+  # per-platform options here freeze into uploads when they differ from the
+  # registry.
+  platforms:
+    youtube: {category: '22', privacy_status: public}
+    instagram: {share_to_feed: true, thumb_offset: 0}
+    tiktok: {privacy_level: PUBLIC_TO_EVERYONE}
+    twitter: {}
+    facebook: {content_kind: reel}
 layouts: []
 retention:
   artifacts:

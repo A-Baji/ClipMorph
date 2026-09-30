@@ -16,6 +16,7 @@ import yaml
 from clipmorph.layout import normalize_layout
 from clipmorph.layout import resolve_layout_geometry
 from clipmorph.platforms import SUPPORTED_PLATFORMS
+from clipmorph.platforms import build_platform_default_config
 from clipmorph.layout import validate_layout
 
 
@@ -83,6 +84,12 @@ DEFAULT_APP_CONFIGURATION = {
             "content": {"title": "", "description": "", "tags": []},
             "suggestions": {"provider": "template", "model": None},
         },
+        # Per-platform job defaults are generated from the platform registry
+        # (clipmorph.platforms.PLATFORM_DEFAULT_CONFIG) so the template and
+        # the upload adapters cannot drift apart. Entries merge per job and
+        # per platform in the usual layered way (see docs/CONFIG_LAYERS.md);
+        # flat scalars freeze into ``{platform}_{option}`` upload kwargs.
+        "platforms": build_platform_default_config(),
     },
     "layouts": [],
     "retention": {
