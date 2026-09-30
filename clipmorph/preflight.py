@@ -68,7 +68,11 @@ class PreflightValidator:
         if (not isinstance(width, int) or not isinstance(height, int)
                 or width <= 0 or height <= 0):
             raise PreflightError("Video stream has invalid dimensions.")
-        duration = float(info.get("format", {}).get("duration", 0) or 0)
+        try:
+            duration = float(info.get("format", {}).get("duration", 0) or 0)
+        except (TypeError, ValueError) as error:
+            raise PreflightError(
+                "Video duration could not be determined.") from error
         if duration <= 0:
             raise PreflightError("Video duration could not be determined.")
         return video
