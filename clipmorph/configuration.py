@@ -549,96 +549,20 @@ def _validate_platform_entry(entry: Any, platform: str) -> None:
 
 
 def validate_job_configuration(configuration: dict[str, Any]) -> None:
-    """Validate the canonical general/conversion/upload/platforms job configuration shape."""
-    if not isinstance(configuration, dict):
-        raise ValueError("job configuration must be an object")
+    """Validate the canonical general/conversion/upload/platforms job configuration shape.
 
-    def check_object(value: Any, label: str, allowed: set[str]) -> dict[str, Any]:
-        if not isinstance(value, dict):
-            raise ValueError(f"{label} must be an object")
-        unknown = set(value) - allowed
-        if unknown:
-            raise ValueError(
-                f"Unknown {label} field(s): {', '.join(sorted(unknown))}")
-        return value
-
-    root = check_object(configuration, "job configuration",
-                        {"general", "conversion", "upload", "platforms"})
-    general = check_object(root.get("general", {}), "general",
-                           {"source", "no_confirm", "clean"})
-    if general.get("source") is not None:
-        validate_source_name(general["source"])
-    for key in ("no_confirm", "clean"):
-        if key in general and not isinstance(general[key], bool):
-            raise ValueError(f"general.{key} must be a boolean")
-
-    conversion = check_object(root.get("conversion", {}), "conversion", {
-        "layout_id", "layout", "skip", "strict", "no_confirm", "clean", "subtitles",
-    })
-    for key in ("skip", "strict"):
-        if key in conversion and not isinstance(conversion[key], bool):
-            raise ValueError(f"conversion.{key} must be a boolean")
-    for key in ("no_confirm", "clean"):
-        if key in conversion and conversion[key] is not None and not isinstance(conversion[key], bool):
-            raise ValueError(f"conversion.{key} must be a boolean or null")
-    if conversion.get("layout_id") is not None and not isinstance(conversion["layout_id"], str):
-        raise ValueError("conversion.layout_id must be a string or null")
-    if "layout" in conversion and not isinstance(conversion["layout"], dict):
-        raise ValueError("conversion.layout must be an object")
-    subtitles = check_object(conversion.get("subtitles", {}), "conversion.subtitles", {
-        "skip", "renderer", "no_confirm", "clean", "transcription_language",
-        "transcription_model", "transcription_device", "transcription_compute_type",
-    })
-    if subtitles.get("renderer", "overlay") not in {"overlay", "stacked"}:
-        raise ValueError("conversion.subtitles.renderer must be overlay or stacked")
-    for key in ("skip",):
-        if key in subtitles and not isinstance(subtitles[key], bool):
-            raise ValueError(f"conversion.subtitles.{key} must be a boolean")
-    for key in ("no_confirm", "clean"):
-        if key in subtitles and subtitles[key] is not None and not isinstance(subtitles[key], bool):
-            raise ValueError(f"conversion.subtitles.{key} must be a boolean or null")
-    for key in ("transcription_language", "transcription_model",
-                "transcription_device", "transcription_compute_type"):
-        if key in subtitles and not isinstance(subtitles[key], str):
-            raise ValueError(f"conversion.subtitles.{key} must be a string")
-
-    upload = check_object(root.get("upload", {}), "upload", {
-        "skip", "no_confirm", "schedule", "content", "suggestions",
-    })
-    if "skip" in upload and not isinstance(upload["skip"], bool):
-        raise ValueError("upload.skip must be a boolean")
-    if "no_confirm" in upload and upload["no_confirm"] is not None and not isinstance(upload["no_confirm"], bool):
-        raise ValueError("upload.no_confirm must be a boolean or null")
-    schedule = check_object(upload.get("schedule", {}), "upload.schedule",
-                            {"publish_at", "timezone", "mode"})
-    for key, value in schedule.items():
-        if value is not None and not isinstance(value, str):
-            raise ValueError(f"upload.schedule.{key} must be a string or null")
-    if schedule.get("mode") not in SCHEDULE_MODES:
-        raise ValueError("upload.schedule.mode must be one of: local, platform")
-    publish_at = schedule.get("publish_at")
-    if publish_at is not None:
-        try:
-            parsed_publish_at = datetime.fromisoformat(publish_at)
-        except ValueError as error:
-            raise ValueError(
-                f"upload.schedule.publish_at is not an ISO-8601 timestamp: {error}"
-            ) from error
-        if parsed_publish_at.tzinfo is None:
-            raise ValueError(
-                "upload.schedule.publish_at must include a UTC offset")
-    content = check_object(upload.get("content", {}), "upload.content",
-                           {"title", "description", "tags"})
-    for key in ("title", "description"):
-        if key in content and content[key] is not None and not isinstance(content[key], str):
-            raise ValueError(f"upload.content.{key} must be a string or null")
-    if "tags" in content and (not isinstance(content["tags"], list)
-                               or any(not isinstance(tag, str) for tag in content["tags"])):
-        raise ValueError("upload.content.tags must be a list of strings")
-    _validate_suggestions_section(upload.get("suggestions", {}),
-                                  "upload.suggestions")
-    platforms = check_object(root.get("platforms", {}), "platforms",
-                             set(SUPPORTED_PLATFORMS))
+    Each section's rules live in its dedicated ``_validate_*_section``
+    validator so the root configuration and per-platform overrides cannot
+    drift; the root validator composes them and keeps only the extra
+    structural level (the ``platforms`` map and its entries).
+    """
+    root = _check_object(configuration, "job configuration",
+                         {"general", "conversion", "upload", "platforms"})
+    _validate_general_section(root.get("general", {}))
+    _validate_conversion_section(root.get("conversion", {}))
+    _validate_upload_section(root.get("upload", {}))
+    platforms = _check_object(root.get("platforms", {}), "platforms",
+                              set(SUPPORTED_PLATFORMS))
     for platform in SUPPORTED_PLATFORMS:
         if platform in platforms:
             _validate_platform_entry(platforms[platform], platform)
@@ -715,6 +639,8 @@ def resolve_job_configuration(
 
     conversion = effective.setdefault("conversion", {})
     layout_id = conversion.get("layout_id")
+    # Materialize ``layout_id`` (even as None) so the resolved shape always
+    # carries the key; readers may index it directly.
     conversion.setdefault("layout_id", layout_id)
     inline_layout = conversion.get("layout")
     if layout_id is not None:
