@@ -52,6 +52,6 @@ This validator enforces the project’s mechanical rules for allowed top-level d
 ## Allowed exceptions
 
 - Hidden development metadata directories such as `.github/`, `.agents/`, `.claude/`, `.venv/`, and `.git/` are allowed for tooling and local development.
-- Root-level local state such as `.env`, `.gitignore`, `.gitattributes`, and certificate/private-key files may exist for workspace configuration or local credentials, but they are not source modules and should remain out of ordinary code changes.
+- Root-level local state such as `.env`, `.gitignore`, `.gitattributes`, generated subtitles, and certificate/private-key files (`*.pem`, `*.key`) may exist for workspace configuration or local credentials, but they are not source modules and should remain out of ordinary code changes. The validator allows their local presence by pattern and enforces that none of them are git-tracked.
 - Local runtime folders such as `input/`, `output/`, and `uploads/` may exist as working directories for the app’s current execution context.
 - Generated build outputs may appear in `build/` or `clipmorph.egg-info/` while packaging or working locally, but they are not source-of-truth locations.

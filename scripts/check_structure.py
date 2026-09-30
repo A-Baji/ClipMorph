@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import fnmatch
+import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -45,12 +47,20 @@ REQUIRED_ROOT_FILES = {
 }
 
 OPTIONAL_ROOT_FILES = {
-    ".env",
     "subtitles.srt",
-    "clipmorph-version-manager.2025-10-15.private-key.pem",
 }
 
-ALLOWED_ROOT_FILES = REQUIRED_ROOT_FILES | OPTIONAL_ROOT_FILES
+# Machine-local artifacts (local credentials, generated subtitle output) may
+# sit at the repo root for local runs.  They are matched by pattern so a new
+# key file with a new timestamp never requires editing this policy.  Their
+# presence is allowed; tracking them in git never is -- see
+# check_local_files_untracked.
+OPTIONAL_ROOT_FILE_PATTERNS = {
+    ".env",
+    ".env.*",
+    "*.key",
+    "*.pem",
+}
 
 REQUIRED_CLIPMORPH_ITEMS = {
     "__init__.py",
@@ -86,10 +96,43 @@ REQUIRED_DOCS = {
 }
 
 
+def _optional_file_allowed(name: str) -> bool:
+    lower = name.lower()
+    if name in OPTIONAL_ROOT_FILES:
+        return True
+    return any(fnmatch.fnmatch(lower, pattern)
+               for pattern in OPTIONAL_ROOT_FILE_PATTERNS)
+
+
 def find_unexpected_root_entries() -> list[str]:
     entries = {path.name for path in REPO_ROOT.iterdir()}
-    unexpected = sorted(entries - ALLOWED_ROOT_DIRS - ALLOWED_ROOT_FILES)
+    unexpected = sorted(
+        name for name in entries - ALLOWED_ROOT_DIRS
+        if not (name in REQUIRED_ROOT_FILES or _optional_file_allowed(name)))
     return unexpected
+
+
+def check_local_files_untracked() -> list[str]:
+    """Local artifact files that git tracks violate the policy.
+
+    Enforced here so the violation fails the structure check before it can
+    reach git.  Outside a git work tree (unit tests patch ``REPO_ROOT`` to a
+    plain temporary directory) there is nothing tracked, so the probe passes.
+    """
+    if not (REPO_ROOT / ".git").exists():
+        return []
+    candidates = sorted(
+        path.name for path in REPO_ROOT.iterdir()
+        if path.is_file() and path.name not in REQUIRED_ROOT_FILES
+        and _optional_file_allowed(path.name))
+    if not candidates:
+        return []
+    completed = subprocess.run(
+        ["git", "ls-files", "--", *candidates],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, check=False)
+    if completed.returncode != 0:
+        return []
+    return sorted(set(completed.stdout.split()) & set(candidates))
 
 
 def check_root_layout() -> list[str]:
@@ -104,6 +147,13 @@ def check_root_layout() -> list[str]:
     missing_files = sorted(name for name in REQUIRED_ROOT_FILES if not (REPO_ROOT / name).exists())
     if missing_files:
         problems.append("Missing required repository files: " + ", ".join(missing_files))
+
+    tracked_local_files = check_local_files_untracked()
+    if tracked_local_files:
+        problems.append(
+            "Local artifact files must not be git-tracked: "
+            + ", ".join(tracked_local_files)
+        )
 
     return problems
 
