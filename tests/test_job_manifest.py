@@ -13,12 +13,10 @@ class JobManifestTests(unittest.TestCase):
             jobs_dir = Path(temp_dir) / "jobs"
             manifest = JobManifest.create(str(source), {"dry_run": False},
                                           str(jobs_dir))
-            manifest.record_platform("YouTube", {"success": True},
-                                     str(jobs_dir))
             loaded = JobManifest.load(manifest.job_id, str(jobs_dir))
             self.assertEqual(loaded.schema_version, MANIFEST_SCHEMA_VERSION)
             self.assertEqual(loaded.source_sha256, manifest.source_sha256)
-            self.assertTrue(loaded.platforms["YouTube"]["success"])
+            self.assertEqual(loaded.platforms, {})
 
     def test_manifest_persists_step_and_artifact_metadata(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -78,9 +76,12 @@ class JobManifestTests(unittest.TestCase):
             source = Path(temp_dir) / "input.mp4"
             source.write_bytes(b"video")
             manifest = JobManifest.create(str(source), {}, temp_dir)
-            manifest.record_platform("YouTube", {"success": False}, temp_dir)
-            manifest.record_platform("TikTok", {"success": True}, temp_dir)
-            self.assertEqual(manifest.status, "partial_failure")
+            manifest.platforms["youtube"] = {"success": False}
+            manifest.platforms["tiktok"] = {"success": True}
+            manifest.save(temp_dir)
+            loaded = JobManifest.load(manifest.job_id, temp_dir)
+            self.assertFalse(loaded.platforms["youtube"]["success"])
+            self.assertTrue(loaded.platforms["tiktok"]["success"])
 
 
 if __name__ == "__main__":

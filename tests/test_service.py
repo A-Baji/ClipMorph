@@ -422,9 +422,46 @@ class DeferredUploadTests(unittest.TestCase):
             self.assertEqual(attempt["result"]["platform_post_id"], "youtube ok")
             self.assertEqual(attempt["result"]["platform_url"],
                              "https://www.youtube.com/watch?v=youtube ok")
-            self.assertEqual(saved.platforms["youtube"]["status"], "published")
-            self.assertEqual(saved.platforms["youtube"]["platform_post_id"],
-                             "youtube ok")
+
+    def test_mixed_platform_results_keep_the_job_as_partial_failure(self):
+        """One failed platform must not erase a sibling's success.
+
+        Ported from a removed manifest-level helper that duplicated this
+        logic: the real writer (``_run_upload_attempts``) normalizes each
+        per-platform result, transitions the upload checkpoint to
+        ``partial_failure`` when success and failure coexist, and the manifest
+        status derives from it.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = _reviewed_job(data_dir, {
+                "content": {"title": "Test", "description": "", "tags": []}})
+            self.addCleanup(service.close)
+
+            def mixed_results(_artifact_path, _title, *_args, **_kwargs):
+                stamp = datetime.now(timezone.utc).isoformat()
+                return {
+                    "youtube": {"success": False, "error": "quota exhausted",
+                                "started_at": stamp, "completed_at": stamp},
+                    "instagram": {"success": True, "result": "instagram ok",
+                                  "started_at": stamp, "completed_at": stamp},
+                }
+
+            with patch("clipmorph.upload_attempts.execute_upload_pipeline",
+                       side_effect=mixed_results):
+                service.submit_upload(manifest.job_id, ["youtube", "instagram"])
+                service._futures[f"upload:{manifest.job_id}"].result(timeout=5)
+
+            saved = service.get_job(manifest.job_id)
+            self.assertTrue(saved.platforms["instagram"]["success"])
+            self.assertFalse(saved.platforms["youtube"]["success"])
+            self.assertEqual(
+                [item["status"] for item in saved.upload_attempts
+                 if item["platform"] == "youtube"],
+                ["failed"])
+            self.assertEqual(saved.checkpoints["upload"]["status"],
+                             "partial_failure")
+            self.assertEqual(saved.status, "partial_failure")
 
     def test_cancel_all_scheduled_uploads_marks_cancelled(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -638,13 +638,3 @@ class JobManifest:
                     group["current_artifact_id"] = artifact_id
                     group.setdefault("references", {})["artifact_id"] = artifact_id
         self.save(jobs_dir)
-
-    def record_platform(self, platform: str, result: dict[str, Any],
-                        jobs_dir: str | Path | None = None):
-        self.platforms[platform] = result
-        if self.platforms and all(
-                item.get("success") for item in self.platforms.values()):
-            self.status = "published"
-        else:
-            self.status = "partial_failure"
-        self.save(jobs_dir)

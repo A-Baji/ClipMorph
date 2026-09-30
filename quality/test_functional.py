@@ -34,11 +34,16 @@ class FunctionalContractTests(unittest.TestCase):
             source = Path(temp_dir) / "source.mp4"
             source.write_bytes(b"source")
             manifest = JobManifest.create(str(source), {}, temp_dir)
-            manifest.record_platform("youtube", {"success": True}, temp_dir)
-            manifest.record_platform("twitter", {"success": False}, temp_dir)
+            # The upload writer inside ``JobService._run_upload_attempts``
+            # records each platform result and transitions the upload
+            # checkpoint (``partial_failure``/``failed``/``completed``), so
+            # the manifest contract here is persistence of per-platform state.
+            manifest.platforms["youtube"] = {"success": True}
+            manifest.platforms["twitter"] = {"success": False}
+            manifest.save(temp_dir)
             loaded = JobManifest.load(manifest.job_id, temp_dir)
             self.assertTrue(loaded.platforms["youtube"]["success"])
-            self.assertEqual(loaded.status, "partial_failure")
+            self.assertFalse(loaded.platforms["twitter"]["success"])
 
     def test_policy_transformation_contract(self):
         decision = validate_artifact("twitter", {"duration": 1}, {"title": "x" * 300})

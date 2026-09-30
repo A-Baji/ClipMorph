@@ -9,6 +9,6 @@
 - `PreflightValidator` rejects missing/empty input, invalid video, invalid crop, missing title, and title limits.
 - `execute_job` shares preflight and conversion/upload sequencing with web callers.
 - `UploadPipeline` records initialization errors and executes enabled platforms concurrently.
-- `record_platform` persists each platform result and derives aggregate status.
+- Upload orchestration records each platform result on the manifest and derives the aggregate upload status through the checkpoint transition.
 - `validate_artifact` emits warnings/blockers and can transform caption metadata.
 - CLI config values are flattened from documented YAML/JSON sections.
