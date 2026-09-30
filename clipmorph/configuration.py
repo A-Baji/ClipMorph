@@ -81,6 +81,7 @@ DEFAULT_APP_CONFIGURATION = {
             "no_confirm": None,
             "content": {"title": "", "description": "", "tags": []},
             "platforms": {"include": [], "exclude": []},
+            "suggestions": {"provider": "template", "model": None},
         },
     },
     "layouts": [],
@@ -440,7 +441,7 @@ def validate_job_configuration(configuration: dict[str, Any]) -> None:
             raise ValueError(f"conversion.subtitles.{key} must be a string")
 
     upload = check_object(root.get("upload", {}), "upload", {
-        "skip", "no_confirm", "schedule", "content", "platforms",
+        "skip", "no_confirm", "schedule", "content", "platforms", "suggestions",
     })
     if "skip" in upload and not isinstance(upload["skip"], bool):
         raise ValueError("upload.skip must be a boolean")
@@ -483,6 +484,23 @@ def validate_job_configuration(configuration: dict[str, Any]) -> None:
     for platform in SUPPORTED_PLATFORMS:
         if platform in platforms and not isinstance(platforms[platform], dict):
             raise ValueError(f"upload.platforms.{platform} must be an object")
+    # ``upload.suggestions`` doubles as the provider selector (the optional
+    # ``provider``/``model`` scalars) and the generated per-platform rows, so a
+    # supported platform name is a legal key alongside them.
+    suggestions = check_object(upload.get("suggestions", {}),
+                               "upload.suggestions",
+                               {"provider", "model", *SUPPORTED_PLATFORMS})
+    if "provider" in suggestions and (
+            not isinstance(suggestions["provider"], str)
+            or not suggestions["provider"].strip()):
+        raise ValueError("upload.suggestions.provider must be a non-empty string")
+    if "model" in suggestions and suggestions["model"] is not None and not isinstance(
+            suggestions["model"], str):
+        raise ValueError("upload.suggestions.model must be a string or null")
+    for platform in SUPPORTED_PLATFORMS:
+        if platform in suggestions and not isinstance(suggestions[platform], dict):
+            raise ValueError(
+                f"upload.suggestions.{platform} must be an object")
 
 def merge_configuration(global_defaults: dict[str, Any],
                         job_overrides: dict[str, Any]) -> dict[str, Any]:

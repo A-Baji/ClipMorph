@@ -42,9 +42,18 @@
   let uploadFilterStatus = '';
   let uploadFilterPlatform = '';
   let uploadFilterSince = '';
+  let suggestionEdits = {};
 
   $: selectedJob = jobs.find((job) => job.job_id === selectedJobId) || jobs[0];
   $: selectedCheckpoint = selectedJob?.checkpoints?.[selectedJob?.current_checkpoint];
+
+  // The suggestions block doubles as the provider selector and the generated
+  // per-platform rows, so drop the scalar keys before rendering cards.
+  $: suggestionBlock = selectedJob?.configuration?.upload?.suggestions || {};
+  $: suggestionProvider = suggestionBlock.provider || 'template';
+  $: uploadSuggestions = Object.entries(suggestionBlock)
+    .filter(([key]) => key !== 'provider' && key !== 'model')
+    .map(([platform, row]) => ({ platform, ...row }));
 
   // Latest attempt per platform: each submission appends one attempt per
   // selected platform, so the last attempt per platform is the latest set.
@@ -506,6 +515,90 @@
     } catch (error) { errors = [error.message]; }
   }
 
+  async function generateSuggestions(force = false) {
+    if (!selectedJob) return;
+    try {
+      await api(`/api/v1/jobs/${selectedJob.job_id}/checkpoints/upload/suggest`,
+        jsonOptions('POST', { platforms: uploadPlatforms, force }));
+      await loadJobDetails();
+      flash(force ? 'Suggestions regenerated' : 'Suggestions generated');
+    } catch (error) { errors = [error.message]; }
+  }
+
+  async function acceptSuggestion(platform) {
+    if (!selectedJob) return;
+    try {
+      await api(`/api/v1/jobs/${selectedJob.job_id}/checkpoints/upload/suggestions/accept`,
+        jsonOptions('POST', { platforms: [platform] }));
+      await loadJobDetails();
+      flash(`${platform} suggestion applied`);
+    } catch (error) { errors = [error.message]; }
+  }
+
+  async function acceptAllSuggestions() {
+    if (!selectedJob || !uploadSuggestions.length) return;
+    try {
+      await api(`/api/v1/jobs/${selectedJob.job_id}/checkpoints/upload/suggestions/accept`,
+        jsonOptions('POST', { platforms: uploadSuggestions.map((row) => row.platform) }));
+      await loadJobDetails();
+      flash('All suggestions applied');
+    } catch (error) { errors = [error.message]; }
+  }
+
+  // Clearing drops every generated row but keeps the provider/model selector;
+  // absence of a row is the "disabled" state.
+  async function clearSuggestions() {
+    if (!selectedJob) return;
+    try {
+      const upload = structuredClone(selectedJob.configuration.upload || {});
+      const block = upload.suggestions || {};
+      upload.suggestions = {
+        provider: block.provider || 'template',
+        model: block.model ?? null,
+      };
+      await api(`/api/v1/jobs/${selectedJob.job_id}/checkpoints/upload`,
+        jsonOptions('PUT', {
+          expected_revision: selectedJob.checkpoints.upload.revision, upload,
+        }));
+      await loadJobDetails();
+      flash('Suggestions cleared');
+    } catch (error) { errors = [error.message]; }
+  }
+
+  function editSuggestion(row, key, value) {
+    const current = suggestionEdits[row.platform] || {
+      title: row.title || '',
+      description: row.description || '',
+      hashtags: (row.hashtags || []).join(', '),
+    };
+    suggestionEdits = {
+      ...suggestionEdits,
+      [row.platform]: { ...current, [key]: value },
+    };
+  }
+
+  async function saveSuggestionEdits(platform) {
+    if (!selectedJob || !suggestionEdits[platform]) return;
+    const edit = suggestionEdits[platform];
+    try {
+      const upload = structuredClone(selectedJob.configuration.upload || {});
+      const block = upload.suggestions || {};
+      block[platform] = {
+        ...(block[platform] || {}),
+        title: edit.title,
+        description: edit.description,
+        hashtags: edit.hashtags.split(',').map((tag) => tag.trim()).filter(Boolean),
+      };
+      upload.suggestions = block;
+      await api(`/api/v1/jobs/${selectedJob.job_id}/checkpoints/upload`,
+        jsonOptions('PUT', {
+          expected_revision: selectedJob.checkpoints.upload.revision, upload,
+        }));
+      await loadJobDetails();
+      flash(`${platform} suggestion updated`);
+    } catch (error) { errors = [error.message]; }
+  }
+
   async function submitUpload() {
     if (!selectedJob) return;
     try {
@@ -800,6 +893,19 @@
           {#each platforms as platform}<label><input type="checkbox" checked={uploadPlatforms.includes(platform)} onchange={(event) => uploadPlatforms = event.currentTarget.checked ? [...uploadPlatforms, platform] : uploadPlatforms.filter((item) => item !== platform)} /> {platform}</label>{/each}
           {#if uploadPlatforms.includes('facebook')}<label class="field-label">Facebook content kind<select bind:value={uploadContentKind}><option value="reel">Reel</option><option value="video">Page video</option></select></label>{/if}
           <span class="card-index">ARTIFACTS</span>{#each artifacts as artifact}<div class="saved-row"><div><b>{artifact.display_name || artifact.kind} · r{artifact.revision}</b><small>{artifact.state} · {artifact.sha256 || 'unavailable'}</small></div><a class="text-button" href={`/api/v1/jobs/${selectedJob.job_id}/artifacts/${artifact.id}/preview`} target="_blank">Preview</a><a class="text-button" href={`/api/v1/jobs/${selectedJob.job_id}/artifacts/${artifact.id}/download`}>Download</a><button class="quiet-action" onclick={() => renameArtifact(artifact)} aria-label="Rename artifact">✎</button><button class="quiet-action" onclick={() => deleteArtifact(artifact)} aria-label="Delete artifact">×</button></div>{/each}
+        </div><div class="form-card suggestions-card"><div class="suggestions-head"><span class="card-index">AI SUGGESTIONS</span><span class="provider-chip">{suggestionProvider}</span></div>
+          <div class="field-row"><button class="secondary-action" onclick={() => generateSuggestions(false)}>Generate suggestions</button><button class="secondary-action" onclick={() => generateSuggestions(true)} disabled={!uploadSuggestions.length}>Regenerate</button><button class="secondary-action" onclick={acceptAllSuggestions} disabled={!uploadSuggestions.length}>Apply all</button><button class="quiet-action" onclick={clearSuggestions} disabled={!uploadSuggestions.length}>Clear</button></div>
+          {#if !uploadSuggestions.length}<div class="empty-inline">No suggestions yet. Generate drafts from the transcript; nothing is published until you apply and submit.</div>{/if}
+          {#each uploadSuggestions as row}
+            <div class="suggestion-card">
+              <div class="suggestion-head"><b>{row.platform}</b><span class="provider-chip">{row.provider}{row.model ? ` · ${row.model}` : ''}</span></div>
+              {#if row.note}<small class="schedule-note">{row.note}</small>{/if}
+              <label class="field-label">Title<input aria-label={`${row.platform} suggestion title`} value={suggestionEdits[row.platform]?.title ?? row.title ?? ''} oninput={(event) => editSuggestion(row, 'title', event.currentTarget.value)} /></label>
+              <label class="field-label">Description<textarea aria-label={`${row.platform} suggestion description`} rows="2" value={suggestionEdits[row.platform]?.description ?? row.description ?? ''} oninput={(event) => editSuggestion(row, 'description', event.currentTarget.value)}></textarea></label>
+              <label class="field-label">Hashtags<input aria-label={`${row.platform} suggestion hashtags`} value={suggestionEdits[row.platform]?.hashtags ?? (row.hashtags || []).join(', ')} oninput={(event) => editSuggestion(row, 'hashtags', event.currentTarget.value)} /></label>
+              <div class="field-row"><button class="secondary-action" onclick={() => saveSuggestionEdits(row.platform)}>Save edits</button><button class="primary-action" onclick={() => acceptSuggestion(row.platform)}>Apply</button></div>
+            </div>
+          {/each}
         </div><div class="form-card"><span class="card-index">ATTEMPT HISTORY</span><div class="field-row"><label class="field-label">Status<select bind:value={uploadFilterStatus} onchange={applyUploadFilters}><option value="">All</option>{['pending', 'scheduled', 'running', 'published', 'failed', 'cancelled'].map((s) => `<option value="${s}">${s}</option>`).join('')}</select></label><label class="field-label">Platform<select bind:value={uploadFilterPlatform} onchange={applyUploadFilters}><option value="">All</option>{platforms.map((p) => `<option value="${p}">${p}</option>`).join('')}</select></label><label class="field-label">Since<input type="datetime-local" bind:value={uploadFilterSince} onchange={applyUploadFilters} /></label></div>{#each filteredUploadAttempts as attempt}<div class="saved-row"><div><b>{attempt.platform} · {attempt.status}</b><small>{attempt.configuration_snapshot?.content?.title} · {attempt.artifact_hash}</small>{#if scheduleLabel(attempt)}<small class="schedule-note">{scheduleLabel(attempt)}</small>{/if}{#if attemptUrl(attempt)}<a class="text-button" href={attemptUrl(attempt)} target="_blank">View post</a>{/if}</div><div class="attempt-progress">{#if uploadProgress[selectedJobId]?.[attempt.platform] !== undefined}<span class="attempt-progress-live">{uploadProgress[selectedJobId][attempt.platform]}%</span>{:else if attempt.result?.progress_percent !== undefined}<span class="attempt-progress-final">{attempt.result.progress_percent}%</span>{/if}</div>{#if attempt.status === 'failed'}<button class="text-button" onclick={() => retryUpload(attempt)}>Retry</button>{/if}</div>{/each}</div>
         <div class="form-card"><span class="card-index">METRICS</span>{#if !metricSnapshots.length}<div class="empty-inline">No metrics yet. Pull fresh data to see engagement.</div>{/if}{#each metricSnapshots as snapshot}<div class="saved-row"><div><b>{snapshot.platform} · {snapshot.captured_at}</b>{#if snapshot.unavailable}<small class="schedule-note">{snapshot.unavailable_reason}</small>{:else}<small>{Object.entries(snapshot.metrics || {}).map(([k, v]) => `${k}: ${v}`).join(' · ')}</small>{/if}</div></div>{/each}</div></div>{/if}
       </section>

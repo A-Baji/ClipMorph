@@ -58,3 +58,8 @@ nav { display:grid; gap:5px; }.nav-item { border:0; color:#9ca49e; background:tr
 .metric-delta-head b { font-size:12px; }
 .metric-delta-row { display:grid; grid-template-columns:1fr auto auto; gap:14px; padding:5px 0 5px 34px; font-size:11px; color:#a9b1aa; }
 .metric-delta-row b { color:var(--paper); font-weight:600; }
+
+.suggestions-card { gap:12px; }
+.suggestions-head,.suggestion-head { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+.suggestion-card { border:1px solid var(--line); padding:12px; display:grid; gap:10px; }
+.provider-chip { border:1px solid var(--line); color:#8b978d; font:9px 'DM Mono'; text-transform:uppercase; letter-spacing:.08em; padding:3px 7px; }

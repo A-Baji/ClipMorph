@@ -1091,6 +1091,63 @@ def job_metrics_command(
     } for record in snapshots], columns)
 
 
+@job_app.command("suggest")
+def job_suggest_command(
+        ctx: typer.Context,
+        job_id: Annotated[str, typer.Argument(help="Job ID.")],
+        platform: Annotated[Optional[list[str]], typer.Option(
+            "--platform", help="Limit generation to this platform; repeatable."
+        )] = None,
+        provider: Annotated[Optional[str], typer.Option(
+            "--provider", help="Provider override (template | hugging_face)."
+        )] = None,
+        force: Annotated[bool, typer.Option(
+            "--force", help="Regenerate even when the content hash is unchanged."
+        )] = False,
+        json_output: JsonOption = False,
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """Generate platform-aware metadata suggestions for the upload draft."""
+    from clipmorph.service import JobService
+
+    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    with closing(JobService(selected_data_dir,
+                           app_config_path=selected_config)) as service:
+        result = service.suggest_upload_metadata(
+            job_id, platform, provider, force)
+    if json_output:
+        _print_json(result)
+        return
+    _print_fields(f"Suggestions for job {job_id}",
+                  [("upload", result.get("upload")),
+                   ("checkpoint", result.get("checkpoint"))])
+
+
+@job_app.command("accept-suggestions")
+def job_accept_suggestions_command(
+        ctx: typer.Context,
+        job_id: Annotated[str, typer.Argument(help="Job ID.")],
+        platform: Annotated[Optional[list[str]], typer.Option(
+            "--platform", help="Accept suggestions for this platform; repeatable."
+        )] = None,
+        json_output: JsonOption = False,
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """Copy chosen suggestion rows into the upload content and clear them."""
+    from clipmorph.service import JobService
+
+    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    with closing(JobService(selected_data_dir,
+                           app_config_path=selected_config)) as service:
+        result = service.accept_suggestions(job_id, platform)
+    if json_output:
+        _print_json(result)
+        return
+    _print_fields(f"Accepted suggestions for job {job_id}",
+                  [("upload", result.get("upload")),
+                   ("checkpoint", result.get("checkpoint"))])
+
+
 @metrics_app.command("compare")
 def metrics_compare_command(
         ctx: typer.Context,

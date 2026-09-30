@@ -166,6 +166,53 @@ class JobConfigurationTests(unittest.TestCase):
         self.assertEqual(configuration["upload"]["schedule"]["mode"],
                          "platform")
 
+    def test_suggestions_block_accepts_scalars_and_platform_rows(self):
+        configuration = resolve_job_configuration({}, {
+            "general": {"source": "clip.mp4"},
+            "upload": {"suggestions": {
+                "provider": "hugging_face",
+                "model": "test-model",
+                "youtube": {
+                    "title": "A title",
+                    "description": "A description",
+                    "hashtags": ["gaming"],
+                    "generated_at": "2026-09-30T00:00:00+00:00",
+                    "provider": "template",
+                    "model": None,
+                },
+            }},
+        })
+
+        suggestions = configuration["upload"]["suggestions"]
+        self.assertEqual(suggestions["provider"], "hugging_face")
+        self.assertEqual(suggestions["model"], "test-model")
+        self.assertEqual(suggestions["youtube"]["title"], "A title")
+
+    def test_suggestions_block_rejects_unknown_keys_and_bad_rows(self):
+        invalid = [
+            {"unknown_key": "value"},
+            {"youtube": "not an object"},
+        ]
+        for suggestions in invalid:
+            with self.subTest(suggestions=suggestions):
+                with self.assertRaisesRegex(ValueError, "Unknown|object"):
+                    resolve_job_configuration({}, {
+                        "general": {"source": "clip.mp4"},
+                        "upload": {"suggestions": suggestions},
+                    })
+
+    def test_suggestions_provider_and_model_types_are_validated(self):
+        with self.assertRaisesRegex(ValueError, "provider"):
+            resolve_job_configuration({}, {
+                "general": {"source": "clip.mp4"},
+                "upload": {"suggestions": {"provider": ""}},
+            })
+        with self.assertRaisesRegex(ValueError, "model"):
+            resolve_job_configuration({}, {
+                "general": {"source": "clip.mp4"},
+                "upload": {"suggestions": {"model": 123}},
+            })
+
     def test_resolver_materializes_minimal_selected_caption_renderer(self):
         configuration = resolve_job_configuration(
             {}, {"general": {"source": "clip.mp4"}})

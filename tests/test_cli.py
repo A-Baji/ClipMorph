@@ -393,6 +393,34 @@ class CliHumanOutputTests(unittest.TestCase):
             self.assertIn("[red]watch out[/]", output)
             self.assertIn("boom [bold]now[/]", output)
 
+    def test_job_suggest_and_accept_suggestions_shapes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            source_dir = data_dir / "sources"
+            source_dir.mkdir(parents=True)
+            (source_dir / "clip.mp4").write_bytes(b"video")
+            service = JobService(data_dir)
+            manifest = service.create_job("clip.mp4", {
+                "conversion": {"skip": True, "subtitles": {"skip": True}}})
+            manifest.transition_checkpoint(
+                "upload", "awaiting_review",
+                manifest.checkpoints["upload"]["revision"], service.jobs_dir)
+            service.close()
+
+            code, result = invoke_json([
+                "--data-dir", str(data_dir), "job", "suggest", manifest.job_id])
+            self.assertEqual(code, 0)
+            self.assertIn("upload", result)
+            self.assertIn("suggestions", result["upload"])
+            self.assertIn("youtube", result["upload"]["suggestions"])
+
+            code, result = invoke_json([
+                "--data-dir", str(data_dir), "job", "accept-suggestions",
+                manifest.job_id, "--platform", "youtube"])
+            self.assertEqual(code, 0)
+            self.assertIn("upload", result)
+            self.assertIn("content", result["upload"])
+
     def test_human_output_survives_a_locale_that_cannot_encode_the_data(self):
         """Non-encodable titles become escapes instead of a codec crash.
 

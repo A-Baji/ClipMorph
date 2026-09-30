@@ -644,6 +644,139 @@ class WebApiTests(unittest.TestCase):
                 self.assertEqual(stale.status_code, 409)
                 self.assertEqual(stale.json()["error"]["code"], "conflict")
 
+    def _reviewed_upload_job(self, data_dir: Path):
+        """Create a job at the upload review gate."""
+        (data_dir / "sources").mkdir(parents=True)
+        source = data_dir / "sources" / "clip.mp4"
+        source.write_bytes(b"source")
+        service = JobService(data_dir)
+        manifest = service.create_job(source.name, {
+            "conversion": {"skip": True, "subtitles": {"skip": True}},
+        })
+        manifest.transition_checkpoint(
+            "upload", "awaiting_review",
+            manifest.checkpoints["upload"]["revision"], service.jobs_dir)
+        return service, manifest
+
+    def test_suggest_route_writes_block_and_get_carries_it(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = self._reviewed_upload_job(data_dir)
+            service.close()
+
+            with TestClient(create_app(data_dir)) as client:
+                job_id = manifest.job_id
+                response = client.post(
+                    f"/api/v1/jobs/{job_id}/checkpoints/upload/suggest", json={})
+                self.assertEqual(response.status_code, 202, response.text)
+                body = response.json()
+                self.assertIn("upload", body)
+                self.assertIn("suggestions", body["upload"])
+                self.assertIn("youtube", body["upload"]["suggestions"])
+
+                # GET carries the block
+                fetched = client.get(f"/api/v1/jobs/{job_id}/checkpoints/upload")
+                self.assertEqual(fetched.status_code, 200)
+                self.assertIn("suggestions", fetched.json()["upload"])
+
+    def test_suggest_round_trips_through_a_following_draft_put(self):
+        # The generated block lives inside ``upload``, so the validator must
+        # accept the platform rows or every subsequent draft PUT would fail.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = self._reviewed_upload_job(data_dir)
+            service.close()
+
+            with TestClient(create_app(data_dir)) as client:
+                job_id = manifest.job_id
+                suggested = client.post(
+                    f"/api/v1/jobs/{job_id}/checkpoints/upload/suggest", json={})
+                self.assertEqual(suggested.status_code, 202, suggested.text)
+                revision = suggested.json()["checkpoint"]["revision"]
+
+                put = client.put(
+                    f"/api/v1/jobs/{job_id}/checkpoints/upload",
+                    json={"expected_revision": revision,
+                          "upload": {"content": {"title": "Edited after generate"}}})
+                self.assertEqual(put.status_code, 200, put.text)
+                body = put.json()
+                self.assertEqual(body["upload"]["content"]["title"],
+                                 "Edited after generate")
+                self.assertIn("youtube", body["upload"]["suggestions"])
+
+    def test_suggest_route_404_for_unknown_job(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            with TestClient(create_app(data_dir)) as client:
+                response = client.post(
+                    "/api/v1/jobs/unknown/checkpoints/upload/suggest", json={})
+                self.assertEqual(response.status_code, 404)
+                self.assertEqual(response.json()["error"]["code"], "not_found")
+
+    def test_suggest_route_422_before_awaiting_review(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"source")
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {})
+            service.close()
+
+            with TestClient(create_app(data_dir)) as client:
+                response = client.post(
+                    f"/api/v1/jobs/{manifest.job_id}/checkpoints/upload/suggest",
+                    json={})
+                self.assertEqual(response.status_code, 409)
+
+    def test_accept_suggestions_route_copies_and_clears(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = self._reviewed_upload_job(data_dir)
+            service.close()
+
+            with TestClient(create_app(data_dir)) as client:
+                job_id = manifest.job_id
+                suggested = client.post(
+                    f"/api/v1/jobs/{job_id}/checkpoints/upload/suggest", json={})
+                self.assertEqual(suggested.status_code, 202, suggested.text)
+                suggestion = suggested.json()["upload"]["suggestions"]["youtube"]
+
+                accepted = client.post(
+                    f"/api/v1/jobs/{job_id}/checkpoints/upload/suggestions/accept",
+                    json={"platforms": ["youtube"]})
+                self.assertEqual(accepted.status_code, 202, accepted.text)
+                body = accepted.json()
+                self.assertEqual(body["upload"]["content"]["title"],
+                                 suggestion["title"])
+                self.assertNotIn("youtube", body["upload"]["suggestions"])
+
+    def test_accept_suggestions_route_404_for_unknown_job(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            with TestClient(create_app(data_dir)) as client:
+                response = client.post(
+                    "/api/v1/jobs/unknown/checkpoints/upload/suggestions/accept",
+                    json={"platforms": ["youtube"]})
+                self.assertEqual(response.status_code, 404)
+                self.assertEqual(response.json()["error"]["code"], "not_found")
+
+    def test_accept_suggestions_route_422_for_missing_platform(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = self._reviewed_upload_job(data_dir)
+            service.close()
+
+            with TestClient(create_app(data_dir)) as client:
+                job_id = manifest.job_id
+                client.post(
+                    f"/api/v1/jobs/{job_id}/checkpoints/upload/suggest",
+                    json={"platforms": ["youtube"]})
+                response = client.post(
+                    f"/api/v1/jobs/{job_id}/checkpoints/upload/suggestions/accept",
+                    json={"platforms": ["tiktok"]})
+                self.assertEqual(response.status_code, 422)
+
 
 class _PretendRemoteStorage:
     """A non-local backend that owns no bytes on this machine."""

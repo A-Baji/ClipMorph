@@ -449,6 +449,32 @@ def create_app(data_dir: str | Path | None = None,
         return {"upload": manifest.configuration["upload"],
                 "checkpoint": manifest.checkpoints["upload"]}
 
+    @app.post("/api/v1/jobs/{job_id}/checkpoints/upload/suggest", status_code=202)
+    def suggest_upload_metadata(job_id: str, payload: dict):
+        try:
+            return service.suggest_upload_metadata(
+                job_id, payload.get("platforms"), payload.get("provider"),
+                bool(payload.get("force", False)))
+        except FileNotFoundError:
+            fail(404, "not_found", "job not found")
+        except ValueError as error:
+            service_failure(error)
+
+    @app.post("/api/v1/jobs/{job_id}/checkpoints/upload/suggestions/accept",
+               status_code=202)
+    def accept_suggestions(job_id: str, payload: dict):
+        platforms = payload.get("platforms")
+        if platforms is not None and (
+                not isinstance(platforms, list) or any(
+                    not isinstance(item, str) for item in platforms)):
+            fail(422, "invalid_request", "platforms must be a list of strings")
+        try:
+            return service.accept_suggestions(job_id, platforms)
+        except FileNotFoundError:
+            fail(404, "not_found", "job not found")
+        except ValueError as error:
+            service_failure(error)
+
     @app.get("/api/v1/jobs/{job_id}/uploads")
     def list_uploads(job_id: str, status: str | None = None,
                      platform: str | None = None, since: str | None = None):
