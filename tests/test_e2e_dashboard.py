@@ -179,5 +179,82 @@ class DashboardBrowserTests(unittest.TestCase):
                 browser.close()
 
 
+    def test_metrics_view_renders_cross_job_table_with_deltas(self):
+        import shutil
+        from clipmorph.metrics import append_snapshot
+        # Use a dedicated source and clean up afterward so the shared
+        # clip.mp4 source and single-source layout the other dashboard tests
+        # rely on are restored.
+        (self.source_dir / "metrics.mp4").write_bytes(b"metrics source")
+        service = self.app.state.job_service
+        manifest = service.create_job("metrics.mp4", {})
+        job_id = manifest.job_id
+        job_dir = service.jobs_dir / job_id
+        try:
+            attempt = {
+                "attempt_id": "test-attempt",
+                "platform": "youtube",
+                "artifact_id": manifest.current_artifact_id,
+                "configuration_snapshot": {
+                    "upload": {"content": {"title": "Fixture clip"}},
+                },
+                "configuration_hash": "hash",
+                "content_hash": "content",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "status": "published",
+                "result": {
+                    "success": True,
+                    "platform_post_id": "yt123",
+                    "platform_url": "https://www.youtube.com/watch?v=yt123",
+                },
+            }
+            manifest.upload_attempts.append(attempt)
+            manifest.save(service.jobs_dir)
+            append_snapshot(job_dir, {
+                "captured_at": "2026-01-01T00:00:00+00:00",
+                "platform": "youtube",
+                "platform_post_id": "yt123",
+                "platform_url": "https://www.youtube.com/watch?v=yt123",
+                "metrics": {"views": 100, "likes": 10, "comments": 2},
+                "source": "youtube:videos.list",
+                "unavailable": False,
+                "unavailable_reason": None,
+                "duration_seconds": 45,
+            })
+            append_snapshot(job_dir, {
+                "captured_at": "2026-01-02T00:00:00+00:00",
+                "platform": "youtube",
+                "platform_post_id": "yt123",
+                "platform_url": "https://www.youtube.com/watch?v=yt123",
+                "metrics": {"views": 150, "likes": 15, "comments": 3},
+                "source": "youtube:videos.list",
+                "unavailable": False,
+                "unavailable_reason": None,
+                "duration_seconds": 45,
+            })
+
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch()
+                try:
+                    page = browser.new_page(viewport=DESKTOP_VIEWPORT)
+                    page.goto(f"http://127.0.0.1:{self.port}/")
+                    page.wait_for_load_state("networkidle")
+                    page.locator(
+                        'nav[aria-label="Primary navigation"] button'
+                    ).filter(has_text="Metrics").click()
+                    page.wait_for_selector(".metric-table")
+                    content = page.content()
+                    self.assertIn("youtube", content)
+                    self.assertIn("Fixture clip", content)
+                    self.assertIn("150", content)
+                    self.assertIn("+50", content)
+                    self.assertIn("[30,60)", content)
+                finally:
+                    browser.close()
+        finally:
+            shutil.rmtree(job_dir, ignore_errors=True)
+            (self.source_dir / "metrics.mp4").unlink(missing_ok=True)
+
+
 if __name__ == "__main__":
     unittest.main()

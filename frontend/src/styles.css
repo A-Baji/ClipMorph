@@ -39,3 +39,22 @@ nav { display:grid; gap:5px; }.nav-item { border:0; color:#9ca49e; background:tr
 .attempt-progress { min-width:36px; text-align:right; font:10px 'DM Mono'; color:#8b978d; }
 .attempt-progress-live { color:var(--acid); }
 .attempt-progress-final { color:#6e786f; }
+.metric-filters { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:22px; }
+.filter-chip { border:1px solid var(--line); background:transparent; color:#9ca79c; padding:8px 13px; font:11px 'DM Mono'; text-transform:uppercase; letter-spacing:.06em; }
+.filter-chip.active { color:var(--acid); border-color:var(--acid); }
+.metric-table-wrap { border:1px solid var(--line); overflow-x:auto; }
+.metric-table { width:100%; border-collapse:collapse; font-size:12px; }
+.metric-table th { text-align:left; color:#7f8b82; font:10px 'DM Mono'; text-transform:uppercase; letter-spacing:.08em; padding:13px 14px; border-bottom:1px solid var(--line); }
+.metric-table td { padding:12px 14px; border-bottom:1px solid var(--line); color:var(--paper); }
+.metric-table tbody tr:hover { background:rgba(255,255,255,.04); }
+.metric-table tr.unavailable td { color:#7d887e; }
+.metric-title { max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.metric-unavailable { color:#8a948b; font-style:italic; }
+.delta-positive { color:var(--acid); }
+.delta-negative { color:var(--amber); }
+.metrics-panel { border-top:1px solid var(--line); padding-top:16px; margin-top:16px; }
+.metric-delta-card { border-top:1px solid var(--line); padding:12px 0; }
+.metric-delta-head { display:flex; align-items:center; gap:10px; margin-bottom:8px; }
+.metric-delta-head b { font-size:12px; }
+.metric-delta-row { display:grid; grid-template-columns:1fr auto auto; gap:14px; padding:5px 0 5px 34px; font-size:11px; color:#a9b1aa; }
+.metric-delta-row b { color:var(--paper); font-weight:600; }

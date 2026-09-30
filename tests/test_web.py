@@ -7,7 +7,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import yaml
-from clipmorph.configuration import APP_CONFIG_VERSION
+from clipmorph.configuration import APP_CONFIG_VERSION, save_app_configuration
+from clipmorph.metrics import append_snapshot
 from clipmorph.service import JobService
 from clipmorph.upload_pipeline.platforms.base import BaseUploadPipeline
 
@@ -753,6 +754,168 @@ class WebMetricsTests(unittest.TestCase):
                 listed = client.get(f"/api/v1/jobs/{job_id}/metrics")
                 self.assertEqual(listed.status_code, 200)
                 self.assertEqual(len(listed.json()), 1)
+
+    def _seed_published_attempt(self, service, manifest, configuration=None):
+        attempt = {
+            "attempt_id": "test-attempt",
+            "platform": "youtube",
+            "artifact_id": manifest.current_artifact_id,
+            "configuration_snapshot": configuration or {},
+            "configuration_hash": "hash",
+            "content_hash": "content",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "status": "published",
+            "result": {
+                "success": True,
+                "message": "ok",
+                "platform_post_id": "yt123",
+                "platform_url": "https://www.youtube.com/watch?v=yt123",
+                "published_at": "2026-01-01T00:00:02+00:00",
+            },
+        }
+        manifest.upload_attempts.append(attempt)
+        manifest.save(service.jobs_dir)
+
+    def test_metrics_include_dimensions_join(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"source")
+            save_app_configuration(data_dir / "app.yml", {
+                "layouts": [{"id": "l1", "name": "L1", "layout": {}}],
+            })
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {
+                "conversion": {
+                    "layout_id": "l1",
+                    "subtitles": {"renderer": "overlay"},
+                },
+            })
+            job_id = manifest.job_id
+            self._seed_published_attempt(service, manifest, {
+                "upload": {"content": {"title": "Clip Title"}},
+            })
+            append_snapshot(service.jobs_dir / job_id, {
+                "captured_at": "2026-01-01T00:00:00+00:00",
+                "platform": "youtube",
+                "platform_post_id": "yt123",
+                "metrics": {"views": 100},
+                "unavailable": False,
+                "unavailable_reason": None,
+                "duration_seconds": 45,
+            })
+            service.close()
+
+            with TestClient(create_app(data_dir)) as client:
+                raw = client.get(f"/api/v1/jobs/{job_id}/metrics")
+                self.assertEqual(raw.status_code, 200)
+                self.assertNotIn("layout_id", raw.json()[0])
+
+                joined = client.get(
+                    f"/api/v1/jobs/{job_id}/metrics?include=dimensions")
+                self.assertEqual(joined.status_code, 200)
+                record = joined.json()[0]
+                self.assertEqual(record["layout_id"], "l1")
+                self.assertEqual(record["subtitles_renderer"], "overlay")
+                self.assertEqual(record["title"], "Clip Title")
+                self.assertEqual(record["duration_seconds"], 45)
+                self.assertIsNone(record["platform_overrides"])
+
+                bad = client.get(f"/api/v1/jobs/{job_id}/metrics?include=nope")
+                self.assertEqual(bad.status_code, 422)
+                self.assertEqual(bad.json()["error"]["code"], "invalid_include")
+
+    def test_metrics_empty_include_is_raw(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"source")
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {})
+            job_id = manifest.job_id
+            service.close()
+
+            with TestClient(create_app(data_dir)) as client:
+                response = client.get(f"/api/v1/jobs/{job_id}/metrics?include=")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json(), [])
+
+    def test_comparison_route_empty_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            with TestClient(create_app(data_dir)) as client:
+                response = client.get("/api/v1/metrics/comparison")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json(), [])
+
+    def test_comparison_route_returns_latest_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"source")
+            save_app_configuration(data_dir / "app.yml", {
+                "layouts": [{"id": "l1", "name": "L1", "layout": {}}],
+            })
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {
+                "conversion": {"layout_id": "l1",
+                               "subtitles": {"renderer": "overlay"}},
+            })
+            job_id = manifest.job_id
+            self._seed_published_attempt(service, manifest, {
+                "upload": {"content": {"title": "Clip"}},
+            })
+            job_dir = service.jobs_dir / job_id
+            append_snapshot(job_dir, {
+                "captured_at": "2026-01-01T00:00:00+00:00",
+                "platform": "youtube", "platform_post_id": "yt123",
+                "metrics": {"views": 100, "likes": 10},
+                "unavailable": False, "unavailable_reason": None,
+            })
+            append_snapshot(job_dir, {
+                "captured_at": "2026-01-02T00:00:00+00:00",
+                "platform": "youtube", "platform_post_id": "yt123",
+                "metrics": {"views": 150, "likes": 15},
+                "unavailable": False, "unavailable_reason": None,
+            })
+            service.close()
+
+            with TestClient(create_app(data_dir)) as client:
+                response = client.get("/api/v1/metrics/comparison")
+                self.assertEqual(response.status_code, 200)
+                rows = response.json()
+                self.assertEqual(len(rows), 1)
+                row = rows[0]
+                self.assertEqual(row["platform"], "youtube")
+                self.assertEqual(row["views"], 150)
+                self.assertEqual(row["views_delta"], 50)
+                self.assertEqual(row["likes_delta"], 5)
+                self.assertEqual(row["duration_bucket"], "unknown")
+                self.assertEqual(row["title"], "Clip")
+                self.assertEqual(row["layout_id"], "l1")
+
+    def test_comparison_route_platform_validation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            with TestClient(create_app(data_dir)) as client:
+                response = client.get("/api/v1/metrics/comparison?platform=unknown")
+                self.assertEqual(response.status_code, 422)
+                self.assertEqual(response.json()["error"]["code"], "invalid_platform")
+
+    def test_comparison_route_limit_bounds(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            with TestClient(create_app(data_dir)) as client:
+                self.assertEqual(
+                    client.get("/api/v1/metrics/comparison?limit=0").status_code, 422)
+                self.assertEqual(
+                    client.get("/api/v1/metrics/comparison?limit=501").status_code, 422)
+                self.assertEqual(
+                    client.get("/api/v1/metrics/comparison?limit=100").status_code, 200)
 
 
 if __name__ == "__main__":

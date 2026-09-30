@@ -15,6 +15,8 @@ from clipmorph.auth import credential_status, load_auth_config, persist_auth_cre
 from clipmorph.configuration import discover_source_names, load_app_configuration
 from clipmorph.configuration import save_app_configuration
 from clipmorph.job import default_data_dir, resolve_output_dir
+from clipmorph.metrics import compare_metrics, join_dimensions
+from clipmorph.platforms import SUPPORTED_PLATFORMS, is_supported_platform
 from clipmorph.service import JobService
 from clipmorph.service import UnknownUploadAttempt
 
@@ -644,9 +646,17 @@ def create_app(data_dir: str | Path | None = None,
             fail(409, "conflict", f"artifact bytes could not be recycled: {error}")
 
     @app.get("/api/v1/jobs/{job_id}/metrics")
-    def get_metrics(job_id: str):
+    def get_metrics(job_id: str, include: str | None = None):
         try:
-            return service.list_metrics(job_id)
+            snapshots = service.list_metrics(job_id)
+            if include:
+                if include != "dimensions":
+                    fail(422, "invalid_include",
+                         "include must be 'dimensions' when present")
+                manifest = service.get_job(job_id)
+                snapshots = [{**record, **join_dimensions(record, manifest)}
+                             for record in snapshots]
+            return snapshots
         except FileNotFoundError:
             fail(404, "not_found", "job not found")
 
@@ -656,6 +666,17 @@ def create_app(data_dir: str | Path | None = None,
             return service.pull_metrics(job_id)
         except FileNotFoundError:
             fail(404, "not_found", "job not found")
+
+    @app.get("/api/v1/metrics/comparison")
+    def compare_metrics_route(platform: str | None = None, limit: int = 100):
+        if platform is not None and not is_supported_platform(platform):
+            fail(422, "invalid_platform",
+                 "platform must be one of: " + ", ".join(SUPPORTED_PLATFORMS))
+        if not 1 <= limit <= 500:
+            fail(422, "invalid_limit", "limit must be between 1 and 500")
+        return compare_metrics(service.jobs_dir,
+                               platform=platform.lower() if platform else None,
+                               limit=limit)
 
     @app.get("/api/v1/jobs/{job_id}/events")
     def job_events(job_id: str):
