@@ -1,0 +1,76 @@
+{
+  "issue": 101,
+  "cycle": 1,
+  "verdict": "ISSUES",
+  "summary": "The implementation covers all seven guide sections (metrics module, service, CLI, web, frontend, docs, tests) and all three recorded decisions are acceptable. However, the guide requires '_retry_request`-style backoff consistent with the upload pipelines' for all collector requests; the Instagram and TikTok collectors call requests.get/post directly with no retry logic, and no retry-on-500 test exists. Three minor quality issues also exist: _unavailable_snapshot ignores its reason parameter, the Instagram collector's token lookup is awkward, and the retry-on-500 test is missing.",
+  "decisions": [
+    {
+      "decision": "Guide left open: how to handle the quality/spec_audits/analytics_capabilities.md reference in the Twitter unavailable reason. The guide's Twitter collector emits an unavailable reason referencing quality/spec_audits/analytics_capabilities.md, but that file does not exist in the repository. I chose to keep the reference as-is in the reason string because the guide explicitly specifies this text and the file is referenced as a research artifact that may be created separately.",
+      "ruling": "accept",
+      "severity": "none",
+      "why": "The guide explicitly specifies the Twitter unavailable reason text including the reference. The file does not exist yet, but the reference is user-facing documentation pointing to research that established the metering wall. Keeping the guide-specified text is correct."
+    },
+    {
+      "decision": "Guide left open: how to stamp correlation fields (duration_seconds, title, configuration_hash) when artifact records may not have them. The guide says 'Nulls, not errors, when missing.' I chose to look up the artifact record by artifact_id from the attempt and read duration_seconds and title from it, falling back to None when the artifact or field is absent. The configuration_hash comes from the attempt record's own configuration_hash field, which is always present on published attempts.",
+      "ruling": "accept",
+      "severity": "none",
+      "why": "The guide says 'Nulls, not errors, when missing.' The implementer correctly looks up the artifact record and falls back to None when fields are absent. The configuration_hash comes from the attempt record's own field, which is always present on published attempts."
+    },
+    {
+      "decision": "Guide left open: whether the collect_platform_metrics function should be called with a timeout. The guide says 'bounded' but does not specify a timeout value. I chose a 120-second timeout on the future result, which is generous enough for platform API calls while preventing indefinite hangs. The dedicated executor is short-lived and shut down after each pull.",
+      "ruling": "accept",
+      "severity": "none",
+      "why": "The guide says 'bounded' but does not specify a timeout value. A 120-second timeout is a reasonable choice that prevents indefinite hangs while being generous enough for platform API calls."
+    }
+  ],
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "major",
+      "type": "gap",
+      "where": "clipmorph/metrics.py:114-172,175-227",
+      "what": "The Instagram and TikTok collectors use requests.get/post directly without _retry_request`-style backoff. The guide requires 'all requests through `requests` + `_retry_request`-style backoff consistent with the upload pipelines'. Neither collector implements any retry logic for transient failures (500/502/503/504).",
+      "why": "Guide section 1: 'Per-platform collector functions (private, lazily imported, all requests through `requests` + `_retry_request`-style backoff consistent with the upload pipelines)'.",
+      "fix": "Add a module-level _retry_request helper (or reuse BaseUploadPipeline._retry_request via a shared mixin) and wrap the Instagram requests.get and TikTok requests.post calls with it, retrying on 500/502/503/504 with exponential backoff."
+    },
+    {
+      "id": "F2",
+      "severity": "minor",
+      "type": "quality",
+      "where": "clipmorph/metrics.py:294-296",
+      "what": "The _unavailable_snapshot(reason: str) function takes a reason parameter but ignores it, always returning {}. The function signature suggests it uses the reason but does not.",
+      "why": "AGENTS.md scope gate: dead parameters are draft leftover code. The reason is stamped by the caller in service.py, so the parameter is unused.",
+      "fix": "Remove the reason parameter from _unavailable_snapshot, or have it return a dict containing the reason so callers do not need to stamp it separately."
+    },
+    {
+      "id": "F3",
+      "severity": "minor",
+      "type": "quality",
+      "where": "clipmorph/metrics.py:124-128",
+      "what": "The Instagram collector token lookup is awkward: it checks attempt.get('_access_token'), then calls load_auth_config(), then checks attempt.get('_access_token') again. The second check always returns the same result as the first because load_auth_config() does not modify the attempt dict.",
+      "why": "AGENTS.md scope gate: awkward code that does not match repo conventions. The correct pattern is to call load_auth_config() first, then read the token from the environment.",
+      "fix": "Call load_auth_config() first, then get the token from the environment via _get_env_token('instagram'). Remove the attempt.get('_access_token') checks."
+    },
+    {
+      "id": "F4",
+      "severity": "minor",
+      "type": "gap",
+      "where": "tests/test_metrics.py",
+      "what": "The guide requires a 'retry-on-500 path exercising the shared backoff helper' test, but no such test exists in tests/test_metrics.py.",
+      "why": "Guide section 7: 'retry-on-500 path exercising the shared backoff helper'.",
+      "fix": "Add a test that mocks requests.get or requests.post to return a 500 response followed by a 200 response, and verify the collector retries and succeeds."
+    }
+  ],
+  "evidence": [
+    "Guide section 1: 'Per-platform collector functions (private, lazily imported, all requests through `requests` + `_retry_request`-style backoff consistent with the upload pipelines)'",
+    "Guide section 7: 'retry-on-500 path exercising the shared backoff helper'",
+    "AGENTS.md scope gate: 'Stop and get explicit user approval of that minimal design before writing implementation code'",
+    "AGENTS.md scope gate: 'Do not introduce an abstraction before its third concrete occurrence'",
+    "Guide section 2: 'the network collectors run OUTSIDE the lock on a dedicated short-lived executor'",
+    "Guide section 3: 'clipmorph job metrics JOB --pull triggers a bounded pull, then lists'",
+    "Guide section 4: 'No GET-triggered network calls (read routes are pure reads)'",
+    "Guide section 6: 'docs/CLI_WEB_PARITY.md: two new rows'",
+    "Guide section 6: 'docs/CONFIG_LAYERS.md: the metrics/snapshots.jsonl file spec'",
+    "Guide section 6: 'docs/AUTHENTICATION.md: documented re-consent steps for IG instagram_manage_insights and TikTok video.list'"
+  ]
+}

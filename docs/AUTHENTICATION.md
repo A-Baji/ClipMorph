@@ -165,6 +165,13 @@ The scopes the adapter requests are `instagram_basic`, `pages_show_list`,
 `instagram_content_publish`
 ([content publishing](https://developers.facebook.com/docs/instagram-platform/instagram-api-with-instagram-login/content-publishing/)).
 
+To pull engagement metrics (`clipmorph job metrics ID --pull`), the token also
+needs `instagram_manage_insights`. This is a re-consent step: add the scope in
+the Meta App Dashboard under **Instagram API with Instagram Login →
+Permissions and features**, then re-derive the Page token. Without it the
+metrics adapter returns an `unavailable` snapshot with reason
+`missing_scopes:instagram_manage_insights`.
+
 ### Step-by-step console navigation
 
 1. Create an app in the [Meta App Dashboard](https://developers.facebook.com/apps/),
@@ -358,6 +365,12 @@ These authorize `clipmorph/upload_pipeline/platforms/tiktok.py` to publish
 videos to the authorized TikTok account, requesting the scopes
 `user.info.basic,video.upload,video.publish`
 ([content posting](https://developers.tiktok.com/doc/content-posting-api-get-started)).
+
+To pull engagement metrics (`clipmorph job metrics ID --pull`), the app also
+needs the `video.list` scope. Add it in the TikTok Developer Portal under
+**Products → Video Upload → Scopes**, then re-authorize. Without it the
+metrics adapter returns an `unavailable` snapshot with reason
+`missing_scopes:video.list`.
 
 There is deliberately no access-token or open-id field: the adapter derives a
 short-lived access token from `refresh_token` on every upload and persists a

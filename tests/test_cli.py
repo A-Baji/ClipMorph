@@ -711,5 +711,44 @@ class AuthStatusProbeTests(unittest.TestCase):
         self.assertIn("failed", output)
 
 
+class CliMetricsTests(unittest.TestCase):
+    def test_job_metrics_list_empty_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest = seed_job(data_dir)
+
+            code, output = invoke(["--data-dir", str(data_dir), "job",
+                                   "metrics", manifest.job_id])
+
+            self.assertEqual(code, 0)
+            self.assertIn("Metrics", output)
+
+    def test_job_metrics_list_json(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest = seed_job(data_dir)
+
+            code, records = invoke_json(["--data-dir", str(data_dir), "job",
+                                         "metrics", manifest.job_id])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(records, [])
+
+    def test_job_metrics_pull_triggers_pull(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest = seed_job(data_dir)
+
+            with patch("clipmorph.service.JobService.pull_metrics",
+                       return_value={"job_id": manifest.job_id, "snapshots": [],
+                                     "pulled": 0}) as pull:
+                code, records = invoke_json(["--data-dir", str(data_dir), "job",
+                                             "metrics", manifest.job_id, "--pull"])
+
+            self.assertEqual(code, 0)
+            pull.assert_called_once_with(manifest.job_id)
+            self.assertEqual(records, [])
+
+
 if __name__ == "__main__":
     unittest.main()

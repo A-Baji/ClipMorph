@@ -23,6 +23,7 @@ from clipmorph.job import checkpoint_configuration_hash
 from clipmorph.job import configuration_sha256
 from clipmorph.job import safe_error_message
 from clipmorph.job import source_sha256
+from clipmorph.metrics import append_snapshot, collect_platform_metrics, load_snapshots
 from clipmorph.platforms import enabled_platforms
 from clipmorph.platforms import native_scheduling_support
 from clipmorph.platforms import SUPPORTED_PLATFORMS_SET
@@ -68,6 +69,16 @@ def _platform_url(platform: str, post_id: str) -> str | None:
     """Return the public URL for one platform post id, when addressable."""
     template = PLATFORM_URL_TEMPLATES.get(platform)
     return template.format(post_id=post_id) if template else None
+
+
+def _metrics_source(platform: str) -> str:
+    """Return the API source label for a platform's metrics."""
+    return {
+        "youtube": "videos.list",
+        "instagram": "media/insights",
+        "tiktok": "video/query",
+        "twitter": "unavailable",
+    }.get(platform, "unknown")
 
 
 def _upload_adapter(platform: str):
@@ -1600,6 +1611,116 @@ class JobService:
         except Exception as error:  # cleanup must not mask job results
             logger.warning("Retention enforcement failed for %s: %s",
                            job_id, error)
+
+    def pull_metrics(self, job_id: str) -> dict[str, Any]:
+        """Pull engagement metrics for a job's published posts.
+
+        Runs in three phases: (1) gather published attempts under the lock,
+        (2) run network collectors outside the lock on a dedicated executor,
+        (3) re-acquire the lock to append snapshot records and persist.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        with self._lock:
+            manifest = self.get_job(job_id)
+            published = [
+                attempt for attempt in manifest.upload_attempts
+                if attempt.get("status") == "published"
+                and (attempt.get("result") or {}).get("platform_post_id")
+            ]
+            if not published:
+                return {"job_id": job_id, "snapshots": [], "pulled": 0}
+
+            # Copy the fields collectors need.
+            attempts_data: list[dict[str, Any]] = []
+            for attempt in published:
+                result = attempt.get("result") or {}
+                attempts_data.append({
+                    "platform": attempt.get("platform"),
+                    "platform_post_id": result.get("platform_post_id"),
+                    "platform_url": result.get("platform_url"),
+                })
+
+            # Gather correlation stamps from artifacts.
+            correlation = {}
+            for attempt in published:
+                artifact_id = attempt.get("artifact_id")
+                if artifact_id is not None:
+                    artifact = manifest.artifacts.get(str(artifact_id), {})
+                    correlation[attempt["attempt_id"]] = {
+                        "duration_seconds": artifact.get("duration_seconds"),
+                        "title": artifact.get("title"),
+                        "configuration_hash": attempt.get("configuration_hash"),
+                    }
+
+        platforms = list({a["platform"] for a in attempts_data})
+        collected: dict[str, dict] = {}
+
+        # Run collectors outside the lock on a dedicated short-lived executor.
+        with ThreadPoolExecutor(max_workers=1) as collector_executor:
+            future = collector_executor.submit(
+                collect_platform_metrics, platforms, attempts_data)
+            try:
+                collected = future.result(timeout=120)
+            except Exception as error:
+                logger.warning("Metrics collection failed for %s: %s",
+                               job_id, safe_error_message(error))
+
+        # Build and persist snapshot records.
+        snapshots: list[dict] = []
+        now = datetime.now(timezone.utc).isoformat()
+        for attempt in attempts_data:
+            post_id = attempt["platform_post_id"]
+            platform = attempt["platform"]
+            metrics = collected.get(post_id, {})
+            is_available = bool(metrics)
+
+            # Determine unavailability reason.
+            reason = None
+            if not is_available:
+                if platform == "twitter":
+                    reason = (
+                        "metrics not available at the standard tier: "
+                        "X API reads are metered per post"
+                    )
+                else:
+                    reason = f"{platform} metrics unavailable"
+
+            record = {
+                "captured_at": now,
+                "platform": platform,
+                "platform_post_id": post_id,
+                "platform_url": attempt.get("platform_url"),
+                "metrics": metrics,
+                "source": _metrics_source(platform),
+                "unavailable": not is_available,
+                "unavailable_reason": reason,
+                "duration_seconds": None,
+                "title": None,
+                "configuration_hash": None,
+            }
+
+            # Stamp correlation fields.
+            corr = correlation.get(attempt.get("attempt_id"), {})
+            record["duration_seconds"] = corr.get("duration_seconds")
+            record["title"] = corr.get("title")
+            record["configuration_hash"] = corr.get("configuration_hash")
+
+            snapshots.append(record)
+
+        # Persist under the lock.
+        with self._lock:
+            job_dir = self.jobs_dir / job_id
+            for record in snapshots:
+                append_snapshot(job_dir, record)
+
+        return {"job_id": job_id, "snapshots": snapshots, "pulled": len(snapshots)}
+
+    def list_metrics(self, job_id: str) -> list[dict]:
+        """Return a job's metric snapshots (read-only)."""
+        with self._lock:
+            job_dir = self.jobs_dir / job_id
+            return load_snapshots(job_dir)
 
     def _run(self, job_id: str, runner: Callable,
              token: CancellationToken) -> None:

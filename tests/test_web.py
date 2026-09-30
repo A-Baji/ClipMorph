@@ -678,5 +678,82 @@ class WebArtifactStorageTests(unittest.TestCase):
             self.assertEqual(tombstoned.status_code, 404)
 
 
+@unittest.skipUnless(TestClient and create_app, "web extra is not installed")
+class WebMetricsTests(unittest.TestCase):
+    def test_metrics_routes_empty_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"source")
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {})
+            service.close()
+
+            with TestClient(create_app(data_dir)) as client:
+                job_id = manifest.job_id
+                response = client.get(f"/api/v1/jobs/{job_id}/metrics")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json(), [])
+
+    def test_metrics_pull_route_404_for_unknown_job(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            with TestClient(create_app(data_dir)) as client:
+                response = client.post("/api/v1/jobs/unknown/metrics/pull")
+                self.assertEqual(response.status_code, 404)
+                self.assertEqual(response.json()["error"]["code"], "not_found")
+
+    def test_metrics_pull_route_with_mocked_collectors(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"source")
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {})
+            job_id = manifest.job_id
+
+            # Add a published attempt.
+            attempt = {
+                "attempt_id": "test-attempt",
+                "platform": "youtube",
+                "artifact_id": manifest.current_artifact_id,
+                "artifact_hash": "abc",
+                "configuration_snapshot": {},
+                "configuration_hash": "hash",
+                "content_hash": "content",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "started_at": "2026-01-01T00:00:01+00:00",
+                "completed_at": "2026-01-01T00:00:02+00:00",
+                "status": "published",
+                "result": {
+                    "success": True,
+                    "message": "ok",
+                    "platform_post_id": "yt123",
+                    "platform_url": "https://www.youtube.com/watch?v=yt123",
+                    "published_at": "2026-01-01T00:00:02+00:00",
+                },
+            }
+            manifest.upload_attempts.append(attempt)
+            manifest.save(service.jobs_dir)
+            service.close()
+
+            with TestClient(create_app(data_dir)) as client:
+                with patch("clipmorph.service.collect_platform_metrics",
+                           return_value={"yt123": {"views": 42}}):
+                    response = client.post(f"/api/v1/jobs/{job_id}/metrics/pull")
+                self.assertEqual(response.status_code, 202)
+                body = response.json()
+                self.assertEqual(body["pulled"], 1)
+                self.assertEqual(body["snapshots"][0]["platform"], "youtube")
+                self.assertEqual(body["snapshots"][0]["metrics"], {"views": 42})
+
+                # Verify the snapshot is persisted.
+                listed = client.get(f"/api/v1/jobs/{job_id}/metrics")
+                self.assertEqual(listed.status_code, 200)
+                self.assertEqual(len(listed.json()), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

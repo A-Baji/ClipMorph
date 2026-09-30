@@ -1045,6 +1045,36 @@ def job_uploads_command(
         nowrap=("attempt_id",))
 
 
+@job_app.command("metrics")
+def job_metrics_command(
+        ctx: typer.Context,
+        job_id: Annotated[str, typer.Argument(help="Job ID.")],
+        pull: Annotated[bool, typer.Option(
+            "--pull", help="Pull fresh metrics from platforms before listing.")] = False,
+        json_output: JsonOption = False,
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """List a job's metric snapshots, optionally pulling fresh data first."""
+    from clipmorph.service import JobService
+
+    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    with closing(JobService(selected_data_dir,
+                           app_config_path=selected_config)) as service:
+        if pull:
+            service.pull_metrics(job_id)
+        snapshots = service.list_metrics(job_id)
+    if json_output:
+        _print_json(snapshots)
+        return
+    _print_table(f"Metrics for job {job_id}", [{
+        "platform": record.get("platform"),
+        "captured_at": record.get("captured_at"),
+        "unavailable": record.get("unavailable"),
+        "metrics": record.get("metrics"),
+    } for record in snapshots],
+        ["platform", "captured_at", "unavailable", "metrics"])
+
+
 @job_app.command("cancel-scheduled")
 def job_cancel_scheduled_command(
         ctx: typer.Context,

@@ -107,6 +107,26 @@ available on demand as `clipmorph job artifacts prune ID` and
 "bytes_freed": N}`; the no-policy case returns `{"pruned": []}` without
 touching the manifest.
 
+### Metrics Snapshots
+
+Engagement metrics pulled from published posts are stored in
+`jobs/<job_id>/metrics/snapshots.jsonl` — one JSON record per captured pull,
+append-only, newest last. The file is per-job local state, deliberately outside
+the manifest (no schema bump). Retention treats it like a sibling of `job.yml`.
+
+Each record carries `captured_at`, `platform`, `platform_post_id`,
+`platform_url`, `metrics` (a `{name: numeric}` mapping), `source` (the API
+endpoint that produced it), `unavailable` (bool), `unavailable_reason`
+(string or null), and the pull-time correlation stamps `duration_seconds`,
+`title`, and `configuration_hash` (nulls when local state does not have them).
+
+Metric names are normalized to a stable lowercase set: `views`, `likes`,
+`comments`, `shares`, `saves`, `reach`, `total_interactions`.
+
+Pulls are explicit only: `clipmorph job metrics ID --pull` or
+`POST /api/v1/jobs/{id}/metrics/pull`. There is no scheduler or background
+daemon.
+
 When multiple jobs are created together, the UI may present a shared override
 form initialized from `app.yml:job_defaults`. Changed fields are copied into
 each selected job's override object. The effective configuration for each job

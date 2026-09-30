@@ -840,5 +840,96 @@ class LiveProgressTests(unittest.TestCase):
             self.assertEqual(persisted["result"]["progress_percent"], 75)
 
 
+class PullMetricsTests(unittest.TestCase):
+    def _published_job(self, data_dir: Path) -> tuple[JobService, JobManifest]:
+        """Create a service with one published upload attempt."""
+        service, manifest = _reviewed_job(data_dir)
+        attempt = {
+            "attempt_id": "test-attempt-id",
+            "platform": "youtube",
+            "artifact_id": manifest.current_artifact_id,
+            "artifact_hash": "abc123",
+            "configuration_snapshot": {"platforms": {"include": ["youtube"]}},
+            "configuration_hash": "hash123",
+            "content_hash": "content123",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "started_at": "2026-01-01T00:00:01+00:00",
+            "completed_at": "2026-01-01T00:00:02+00:00",
+            "status": "published",
+            "result": {
+                "success": True,
+                "message": "uploaded",
+                "platform_post_id": "yt123",
+                "platform_url": "https://www.youtube.com/watch?v=yt123",
+                "published_at": "2026-01-01T00:00:02+00:00",
+            },
+        }
+        manifest.upload_attempts.append(attempt)
+        manifest.save(service.jobs_dir)
+        return service, manifest
+
+    def test_pull_metrics_no_published_attempts_is_noop(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = _reviewed_job(data_dir)
+            self.addCleanup(service.close)
+            result = service.pull_metrics(manifest.job_id)
+            self.assertEqual(result["pulled"], 0)
+            self.assertEqual(result["snapshots"], [])
+
+    def test_pull_metrics_collects_and_persists_snapshots(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = self._published_job(data_dir)
+            self.addCleanup(service.close)
+
+            with patch("clipmorph.service.collect_platform_metrics",
+                       return_value={"yt123": {"views": 100, "likes": 5}}):
+                result = service.pull_metrics(manifest.job_id)
+
+            self.assertEqual(result["pulled"], 1)
+            snapshot = result["snapshots"][0]
+            self.assertEqual(snapshot["platform"], "youtube")
+            self.assertEqual(snapshot["platform_post_id"], "yt123")
+            self.assertEqual(snapshot["metrics"], {"views": 100, "likes": 5})
+            self.assertFalse(snapshot["unavailable"])
+
+            # Verify persistence.
+            loaded = service.list_metrics(manifest.job_id)
+            self.assertEqual(len(loaded), 1)
+            self.assertEqual(loaded[0]["platform_post_id"], "yt123")
+
+    def test_pull_metrics_isolation_on_platform_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = self._published_job(data_dir)
+            self.addCleanup(service.close)
+
+            with patch("clipmorph.service.collect_platform_metrics",
+                       side_effect=RuntimeError("network error")):
+                result = service.pull_metrics(manifest.job_id)
+
+            # Should still return a snapshot, marked unavailable.
+            self.assertEqual(result["pulled"], 1)
+            snapshot = result["snapshots"][0]
+            self.assertTrue(snapshot["unavailable"])
+            self.assertIn("unavailable", snapshot["unavailable_reason"])
+
+    def test_pull_metrics_redacts_error_text(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = self._published_job(data_dir)
+            self.addCleanup(service.close)
+
+            with patch("clipmorph.service.collect_platform_metrics",
+                       side_effect=RuntimeError("token=secret123")):
+                result = service.pull_metrics(manifest.job_id)
+
+            snapshot = result["snapshots"][0]
+            self.assertTrue(snapshot["unavailable"])
+            # The raw error should not contain the secret.
+            self.assertNotIn("secret123", str(snapshot))
+
+
 if __name__ == "__main__":
     unittest.main()
