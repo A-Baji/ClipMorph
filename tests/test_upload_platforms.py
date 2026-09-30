@@ -1,9 +1,13 @@
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from clipmorph.job import source_sha256
 from clipmorph.policy import CAPABILITY_MATRIX, validate_artifact
 from clipmorph.upload_pipeline import UploadPipeline
 from clipmorph.upload_pipeline.platforms.base import BaseUploadPipeline
+from clipmorph.upload_pipeline.platforms.youtube import YouTubeUploadPipeline
 
 
 class UploadPipelineTests(unittest.TestCase):
@@ -94,6 +98,87 @@ class CommonParameterMappingTests(unittest.TestCase):
 
         self.assertEqual(set(sent) - {"video_path"},
                          {"caption", "share_to_feed", "thumb_offset"})
+
+
+class YouTubeNativeSchedulingTests(unittest.TestCase):
+    """The scheduled insert body, and the unchanged unscheduled one."""
+
+    def setUp(self):
+        # MediaFileUpload holds the file open, so cleanup must tolerate it.
+        self._temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self._temp.cleanup)
+        self.video = Path(self._temp.name) / "clip.mp4"
+        self.video.write_bytes(b"video")
+        self.adapter = YouTubeUploadPipeline(google_client_id="id",
+                                             google_client_secret="secret")
+        self.adapter.credentials = object()
+        self.adapter.youtube_service = MagicMock()
+        # A plain mapping is what a real execute() hands back; the retry
+        # helper inspects the response for HTTP-shaped attributes.
+        self.adapter.youtube_service.videos.return_value.delete.return_value \
+            .execute.return_value = {}
+
+    def _run(self, **kwargs):
+        """Run the adapter with the transfer stubbed, returning the insert call."""
+        with patch.object(self.adapter, "_validate_video_file",
+                          return_value=1024), patch.object(
+                self.adapter, "_execute_resumable_upload",
+                return_value="post-1"):
+            self.adapter.run(str(self.video), "Boss fight",
+                             description="No healing", keywords=["gaming"],
+                             category="22", **kwargs)
+        return self.adapter.youtube_service.videos().insert.call_args
+
+    def test_scheduled_insert_carries_publish_at_private_and_notify(self):
+        call = self._run(privacy_status="public",
+                         scheduled_publish_at="2026-10-01T12:30:00+00:00",
+                         notify_subscribers=True)
+
+        body = call.kwargs["body"]
+        # A scheduled upload is only accepted as a private video, so the
+        # request carries the future instant and drops public visibility.
+        self.assertEqual(body["status"],
+                         {"privacyStatus": "private",
+                          "publishAt": "2026-10-01T12:30:00Z"})
+        self.assertTrue(call.kwargs["notifySubscribers"])
+        self.assertEqual(call.kwargs["part"], "snippet,status")
+
+    def test_scheduled_insert_can_withhold_the_subscriber_notification(self):
+        call = self._run(scheduled_publish_at="2026-10-01T12:30:00+00:00",
+                         notify_subscribers=False)
+
+        self.assertFalse(call.kwargs["notifySubscribers"])
+
+    def test_unscheduled_insert_body_is_unchanged(self):
+        call = self._run()
+
+        self.assertEqual(call.kwargs["body"], {
+            "snippet": {"title": "Boss fight", "description": "No healing\n\n"
+                        "clip:" + source_sha256(self.video),
+                        "tags": ["gaming"], "categoryId": "22"},
+            "status": {"privacyStatus": "public"},
+        })
+        self.assertNotIn("notifySubscribers", call.kwargs)
+        self.assertEqual(call.kwargs["part"], "snippet,status")
+
+    def test_publish_at_is_normalized_to_utc(self):
+        call = self._run(scheduled_publish_at="2026-10-01T08:30:00-04:00")
+
+        self.assertEqual(call.kwargs["body"]["status"]["publishAt"],
+                         "2026-10-01T12:30:00Z")
+
+    def test_naive_publish_at_fails_before_an_upload_session_is_opened(self):
+        with self.assertRaisesRegex(ValueError, "must include a UTC offset"):
+            self.adapter.run(str(self.video), "Boss fight",
+                             scheduled_publish_at="2026-10-01T12:30:00")
+
+        self.adapter.youtube_service.videos().insert.assert_not_called()
+
+    def test_cancel_scheduled_post_deletes_the_future_post(self):
+        self.adapter.cancel_scheduled_post("post-1")
+
+        self.adapter.youtube_service.videos.return_value.delete \
+            .assert_called_once_with(id="post-1")
 
 
 class _FakeAdapter(BaseUploadPipeline):

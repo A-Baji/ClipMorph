@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from clipmorph.job import JobManifest
 from clipmorph.service import INTERRUPTED_ERROR, JobService
@@ -68,6 +69,25 @@ def _add_pending_attempt(manifest: JobManifest, jobs_dir: Path,
     manifest.checkpoints["upload"]["references"]["attempt_ids"] = [
         attempt["attempt_id"]]
     manifest.save(jobs_dir)
+
+
+def _as_platform_scheduled(manifest: JobManifest, jobs_dir: Path,
+                           result: dict | None) -> None:
+    """Mark the lone attempt as platform-held, as a platform submission does."""
+    attempt = manifest.upload_attempts[0]
+    attempt["scheduled_via"] = "platform"
+    attempt["result"] = result
+    manifest.save(jobs_dir)
+
+
+class _StubAdapter:
+    """Adapter stub whose existing-post lookup returns a fixed answer."""
+
+    def __init__(self, post_id: str | None):
+        self.post_id = post_id
+
+    def find_existing_post(self, _artifact_sha: str) -> str | None:
+        return self.post_id
 
 
 class StartupReconciliationTests(unittest.TestCase):
@@ -153,6 +173,92 @@ class StartupReconciliationTests(unittest.TestCase):
             self.assertEqual(healed.upload_attempts[0]["scheduled_publish_at"],
                              offset_stamp)
             self.assertEqual(armed, {f"upload:{manifest.job_id}": 1})
+
+    def test_platform_scheduled_attempt_with_an_existing_post_completes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest, jobs_dir = _create_manifest(data_dir)
+            publish_at = _future_iso(hours=2)
+            _add_pending_attempt(manifest, jobs_dir, publish_at)
+            _as_platform_scheduled(manifest, jobs_dir, None)
+            _start_stage(manifest, jobs_dir, "upload")
+
+            with patch("clipmorph.service._upload_adapter",
+                       return_value=_StubAdapter("post-1")):
+                service = JobService(data_dir)
+                try:
+                    healed = service.get_job(manifest.job_id)
+                    armed = dict(service._scheduled_timers)
+                finally:
+                    service.close()
+
+            attempt = healed.upload_attempts[0]
+            # The platform already holds the upload, so it is re-attached
+            # rather than uploaded again.
+            self.assertEqual(attempt["status"], "published")
+            self.assertEqual(attempt["result"]["platform_post_id"], "post-1")
+            self.assertEqual(attempt["result"]["platform_url"],
+                             "https://www.youtube.com/watch?v=post-1")
+            self.assertEqual(armed, {})
+            self.assertEqual(healed.checkpoints["upload"]["status"], "failed")
+            self.assertEqual(healed.checkpoints["upload"]["error"]["code"],
+                             "interrupted_by_restart")
+
+    def test_platform_scheduled_attempt_without_an_existing_post_fails_retryable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest, jobs_dir = _create_manifest(data_dir)
+            _add_pending_attempt(manifest, jobs_dir, _future_iso(hours=2))
+            _as_platform_scheduled(manifest, jobs_dir, None)
+            _start_stage(manifest, jobs_dir, "upload")
+
+            with patch("clipmorph.service._upload_adapter",
+                       return_value=_StubAdapter(None)):
+                service = JobService(data_dir)
+                try:
+                    healed = service.get_job(manifest.job_id)
+                finally:
+                    service.close()
+
+            attempt = healed.upload_attempts[0]
+            self.assertEqual(attempt["status"], "failed")
+            self.assertEqual(attempt["errors"][-1]["code"],
+                             "platform_schedule_unconfirmed")
+            self.assertTrue(attempt["errors"][-1]["retryable"])
+
+    def test_recorded_platform_schedule_is_never_rearmed_locally(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest, jobs_dir = _create_manifest(data_dir)
+            publish_at = _future_iso(hours=2)
+            _add_pending_attempt(manifest, jobs_dir, publish_at)
+            _as_platform_scheduled(manifest, jobs_dir, {
+                "success": True,
+                "message": "uploaded private; platform holds publication",
+                "platform_post_id": "post-2",
+                "platform_url": "https://www.youtube.com/watch?v=post-2",
+                "scheduled_publish_at": publish_at,
+                "published_at": None,
+            })
+            _start_stage(manifest, jobs_dir, "upload")
+
+            with patch("clipmorph.service._upload_adapter",
+                       return_value=_StubAdapter("post-2")) as adapter:
+                service = JobService(data_dir)
+                try:
+                    healed = service.get_job(manifest.job_id)
+                    armed = dict(service._scheduled_timers)
+                finally:
+                    service.close()
+
+            # A recorded result is the platform's own truth: no lookup, no
+            # local timer, and the attempt is not rewritten.
+            adapter.assert_not_called()
+            self.assertEqual(armed, {})
+            self.assertEqual(healed.upload_attempts[0]["status"], "scheduled")
+            self.assertEqual(healed.upload_attempts[0]["result"]
+                             ["platform_post_id"], "post-2")
+            self.assertEqual(healed.checkpoints["upload"]["status"], "failed")
 
     def test_unscheduled_pending_upload_attempts_fail(self):
         with tempfile.TemporaryDirectory() as temp_dir:

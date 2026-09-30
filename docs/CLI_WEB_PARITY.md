@@ -66,6 +66,7 @@ interruption.
 | `clipmorph job review ID CHECKPOINT [--edits FILE] [--accept] [--json]`; `job render ID` | `--edits` supplies a complete transcript edit-session YAML/JSON object. Review acceptance uses the current manifest revision; render creates a new immutable artifact. |
 | `clipmorph job upload ID [--platform PLATFORM] [--json]`; `job upload retry ID PLATFORM [--attempt-id ID]` | Submit the accepted upload draft or retry one failed attempt. Retries use frozen artifact/settings and upload immediately; historical use requires explicit ID and confirmation. PLATFORM is a supported id (`youtube`, `instagram`, `tiktok`, `twitter`) validated against `clipmorph/platforms.py::SUPPORTED_PLATFORMS`, which stays the single source of truth. |
 | `clipmorph job uploads ID [--status S] [--platform P] [--since ISO] [--json]` | List a job's upload attempt history with optional status, platform, and since filters. Returns filtered attempts with result fields (`platform_post_id`, `platform_url`, `published_at`). |
+| `clipmorph job cancel-scheduled ID ATTEMPT_ID [--json]` | Cancel one scheduled upload attempt before its publication, whether it is `scheduled_via: local` or `platform`. A local attempt loses its batch timer and the surviving members of that group are re-armed; a platform-scheduled attempt is deleted on the platform first, so a platform refusal exits `2` and leaves the attempt `scheduled` with a `platform_cancel_failed` note. An unknown attempt id or an attempt that is not `scheduled` is refused. |
 | `clipmorph job artifacts list ID [--json]`; `job artifacts preview ID ARTIFACT_ID`; `job artifacts download ID ARTIFACT_ID --destination PATH`; `job artifacts rename ID ARTIFACT_ID --name NAME`; `job artifacts delete ID ARTIFACT_ID --yes`; `job artifacts prune ID [--json]` | Operate on registered artifact IDs; rename changes display metadata only, delete recycles the bytes through the storage backend and retains a manifest tombstone. `prune` applies `app.yml:retention.artifacts` and prints `{pruned,bytes_freed}`. |
 | `clipmorph layout list [--json]`; `layout create FILE [--json]`; `layout get ID [--json]`; `layout delete ID --yes` | CRUD validated global `{id,name,layout}` records; create reads YAML/JSON. |
 | `clipmorph doctor [--json] [--source PATH]` | Read-only environment health check (FFmpeg/FFprobe binaries, app.yml, source/output directories, layouts, fonts, credentials, transcription device, artifact storage backend, and optional source media); text report by default, `--json` emits `{"checks":[{"id","status","detail"}]}` with status `ok\|warning\|failed\|unavailable`. The `artifacts_storage` check probes the configured backend (a `.<uuid>.probe` object written and recycled inside the artifact root) and reports `unavailable` when the backend cannot be built. CLI-only surface; no API route — an intentional CLI-only mechanic. Exit `0` when no check failed (warnings and `unavailable` allowed), `1` when at least one failed. |
@@ -106,6 +107,7 @@ root-level names under `source_dir`; validate before queueing.
 | `GET/PUT/DELETE /jobs/{id}/checkpoints/upload` | GET returns `{upload,checkpoint}`; PUT body `{expected_revision,upload,reopen?}` updates only the pending draft; DELETE query `expected_revision` resets it to frozen global defaults. Mutations do not change prior attempts. A draft change also discards a schedule armed by an earlier submission: its timers are cancelled and its pending attempts are unmarked, so only the next submission uploads. |
 | `GET /jobs/{id}/uploads?status=&platform=&since=`; `POST /jobs/{id}/upload` | Read append-only history with optional status, platform, and since filters; submit pending draft after review against current artifact; accepted work `202 {job_id,attempts,scheduled,status_url,detection}`. A snapshot whose `upload.schedule.publish_at` is in the future returns `scheduled: true` and leaves the attempts `scheduled` for a later timer. Attempt statuses are `pending`, `scheduled`, `running`, `published`, `failed`, `cancelled`. A duplicate active submission returns `409`. Platform-side detection may mark attempts `published` without running a pipeline. A completed attempt's `result` carries `progress_percent`, the last observed live upload percent (not extrapolated); live percents are never rewritten into a terminal record. |
 | `POST /jobs/{id}/uploads/{platform}/retry` | Body names failed `attempt_id`; reuse frozen settings/artifact. Historical retry requires matching `artifact_id` and `confirm_historical_artifact:true`. A retry ignores any `publish_at` in the frozen snapshot and uploads immediately. |
+| `DELETE /jobs/{id}/scheduled/{attempt_id}` | `202 {job_id,attempt_id,platform,scheduled_via,status}`; an unknown attempt id is `404`, an attempt that is not `scheduled` is `422`, and a platform that refuses to drop its held post is `422` with the attempt left `scheduled`. Only ever touches one attempt: a local disarm re-arms the surviving members of the cancelled attempt's timer group, and a platform-scheduled attempt is deleted through the adapter. |
 | `GET /jobs/{id}/artifacts`; `GET /jobs/{id}/artifacts/{artifact_id}/preview`; `GET .../download` | List immutable revisions with their `{backend, key}` storage reference and no local path; stream registered bytes from the local backend; missing/deleted bytes or paths outside allowed roots return `404`, and a backend that owns no local bytes returns `409 storage_unavailable`. |
 | `GET/PATCH/DELETE /jobs/{id}/artifacts/{artifact_id}` | PATCH body `{display_name}` changes display metadata only. DELETE requires `confirm=true`, recycles the bytes through the storage backend but retains a manifest tombstone/upload references; source artifacts cannot be deleted. |
 | `POST /jobs/{id}/artifacts/prune` | Apply the `app.yml:retention.artifacts` policy; `202 {pruned,bytes_freed}`, `404` for a missing job, `409` when bytes could not be recycled (nothing is saved). Only superseded non-source artifacts are candidates; `current`/`stale` are never pruned. No policy set is a no-op. |
@@ -124,6 +126,20 @@ timer and unmark its scheduled attempts. The next submission is the only thing
 that re-arms an upload, and to abandon a schedule without uploading, cancel
 the job (which aborts scheduled attempts to `cancelled`).
 
+`upload.schedule.mode` selects who holds that publication, and every surface
+reports it as `scheduled_via` on the submission response and the attempt:
+`local` (the default) is the deferral above, and `platform` uploads at
+submission time and lets the platform hold the future post. A platform-scheduled
+attempt is created `scheduled` with its `scheduled_publish_at` and stays
+`scheduled` after a successful upload, because only the platform knows when the
+post becomes visible; its result carries `platform_post_id`, `platform_url`,
+`scheduled_publish_at`, and a message saying the platform holds publication, and
+the queue/history surfaces render that status with the publish instant and the
+post URL. The mode is refused before any attempt exists for a platform the
+registry has not blessed, and it ships disabled for every platform until the
+maintainer's probe has run, so in a default build `mode: platform` reports the
+registry's strict error.
+
 Every service construction reconciles manifests left `running` by a process
 that never returned, so both surfaces heal phantom queue entries on first
 touch: the in-flight checkpoint becomes `failed` with
@@ -131,8 +147,14 @@ touch: the in-flight checkpoint becomes `failed` with
 checkpoint whose every `scheduled` attempt waits on a future `publish_at`
 is left alone, and reconciliation runs before the re-arm scan restores those
 timers. A past-due `scheduled` attempt is healed as an interrupted failure,
-never published unattended. Nothing is resumed automatically and no remote
-upload is repeated without an explicit user action.
+never published unattended. A platform-scheduled attempt is not waiting on this
+process, so it never keeps a `running` upload checkpoint alive, and an attempt
+stranded between the platform accepting the upload and the result being written
+is settled from platform state first: a post that exists completes the attempt
+as `published` with its id and URL (no re-upload), and no post marks it
+`failed` with a retryable `platform_schedule_unconfirmed` note, which makes the
+ordinary retry both the re-upload and the refresh. Nothing is resumed
+automatically and no remote upload is repeated without an explicit user action.
 
 ### Response And Validation Boundaries
 
@@ -246,10 +268,11 @@ CONFIG_LAYERS.md remains authoritative for field meaning.
 | Pre-upload review | GET/PUT/DELETE checkpoint upload | Content/platform review | Expected revision/platform policy/title/current artifact | Pending upload config only | Draft checkpoint; prior attempts unchanged | CLI 2; API 404/409/422 | Review gate/update/discard |
 | Upload/retry/status | POST /upload; GET /uploads; POST per-platform retry | Submit/result/retry | Platform/credentials/review; attempt artifact and frozen config | upload fields/snapshot | Append-only attempt history | CLI 1; API 202/404/409/422 | Mocked upload/history/retry |
 | Schedule deferral | POST /upload with `upload.schedule.publish_at`; draft PUT/DELETE | Future instant defers instead of uploading | Snapshot `publish_at` parse/future check; review gate | upload.schedule.publish_at | Attempts marked `scheduled`; timers re-armed on startup; superseding draft/rerender disarms them | CLI 1; API 202 | Service/web deferral, re-arm, disarm, immediate retry |
+| Platform publish scheduling | POST /upload with `upload.schedule.mode: platform`; `job cancel-scheduled ID ATTEMPT_ID`; DELETE /jobs/{id}/scheduled/{attempt_id} | Scheduled attempt shows publish instant + post URL; attempt cancel action | Registry `SUPPORTED_NATIVE_SCHEDULING` gate; adapter `cancel_scheduled_post` | `scheduled_via`, per-platform `scheduled_publish_at` override | Attempts `scheduled` until the platform publishes; platform hold deleted on cancel/rerender | CLI 1/2; API 202/404/422 | Registry/config/adapter/service/web tests; probe script |
 | Upload history/filters | `job uploads ID [--status --platform --since]`; GET /uploads?status=&platform=&since= | Filter chips on Uploads view | Status/platform/since filter validation | Read-only | Filtered attempt history with result fields | CLI 0/2; API 200/422 | Scheduling history filter tests |
 | Dedup guard | POST /upload; POST /uploads/{platform}/retry | Submission blocked while active attempt exists | Same platform + artifact + content hash + active status | None | `409` on duplicate active attempt | CLI 2; API 409 | Service dedup guard tests |
 | Platform-side detection | POST /upload (YouTube with read scope) | Existing post detected, upload skipped | `find_existing_post` hook per adapter | None | Attempt `published` with found id/url; `unavailable` note on scope failure | CLI 1; API 202 | Detection hook tests |
-| Cancel scheduled | POST /jobs/{id}/cancel (job in `scheduled` status) | Scheduled attempts aborted pre-firing | Disarm timers + mark `cancelled` | None | Attempts `cancelled`; job `cancelled` | CLI 0; API 200 | Service cancel path tests |
+| Cancel scheduled | POST /jobs/{id}/cancel (job in `scheduled` status); `job cancel-scheduled ID ATTEMPT_ID`; DELETE /jobs/{id}/scheduled/{attempt_id} | Scheduled attempts aborted pre-firing; per-attempt cancel | Disarm timers + mark `cancelled`; platform hold deleted first | None | Attempts `cancelled`; job `cancelled` when nothing is left to publish | CLI 0/2; API 200/202/404/422 | Service cancel path tests |
 | Artifact preview/download/rename/delete | GET/PATCH/DELETE artifact by ID plus preview/download | Table/preview/download/display-name/trash | Registered immutable ID, safe metadata, availability, confirmation | Display metadata or artifact availability only | Manifest revisions/tombstones with `storage` refs; bytes recycled through the backend; upload references retained | CLI 1/2; API 200/400/404/409 | Bytes/headers/containment/rename/delete |
 | Artifact storage backend | `app.yml:storage.backend`; doctor `artifacts_storage` | Settings backend selector; doctor report | Unknown backend `422`; backend health probe | None (app-level) | Every artifact keyed relative to `output_dir` | CLI 1; API 422 | `tests/test_storage.py`; `tests/test_doctor.py` |
 | Retention/prune | `job artifacts prune ID`; POST /jobs/{id}/artifacts/prune | Apply app-level retention policy | superseded + non-source only; `current`/`stale` protected | None (app-level, not part of the job merge) | Tombstoned manifest entries; bytes to trash | CLI 0/1; API 202/404 | `tests/test_retention.py`; CLI/web cases |

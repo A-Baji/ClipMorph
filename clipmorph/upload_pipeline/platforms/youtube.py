@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import logging
 import os
 import random
@@ -226,11 +227,24 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
 
     def _prepare_upload_request(self, video_path: str, title: str,
                                 description: str, category: str,
-                                keywords: List[str], privacy_status: str):
+                                keywords: List[str], privacy_status: str,
+                                scheduled_publish_at: Optional[str] = None,
+                                notify_subscribers: bool = True):
         """
         Prepares the upload request with metadata and media upload object.
+
+        When ``scheduled_publish_at`` is set, the platform holds the future
+        publication: the request body carries ``status.publishAt`` in RFC3339
+        UTC and the caller has already forced ``privacyStatus`` to ``private``,
+        because YouTube only accepts a scheduled upload as a private video.
+        Without it the request is byte-identical to an unscheduled one.
         """
         tags = [k.strip() for k in keywords if k.strip()] if keywords else None
+
+        status = {'privacyStatus': privacy_status}
+        if scheduled_publish_at:
+            status['publishAt'] = self._publish_at_rfc3339(
+                scheduled_publish_at)
 
         body = {
             'snippet': {
@@ -239,22 +253,45 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
                 'tags': tags,
                 'categoryId': category
             },
-            'status': {
-                'privacyStatus': privacy_status
-            }
+            'status': status
         }
 
         media = MediaFileUpload(video_path,
                                 chunksize=self.chunk_size,
                                 resumable=True)
 
+        request_kwargs = {}
+        if scheduled_publish_at:
+            # notifySubscribers only means anything for a scheduled premiere;
+            # sending it on an ordinary upload would be a behavior change.
+            request_kwargs['notifySubscribers'] = bool(notify_subscribers)
+
         request = self.youtube_service.videos().insert(part=','.join(
             body.keys()),
                                                        body=body,
-                                                       media_body=media)
+                                                       media_body=media,
+                                                       **request_kwargs)
 
         self._update_progress("prepare_upload", "Upload request prepared")
         return request
+
+    @staticmethod
+    def _publish_at_rfc3339(scheduled_publish_at: str) -> str:
+        """Return one scheduled instant as the RFC3339 UTC stamp YouTube wants.
+
+        ``scheduled_publish_at`` arrives as ClipMorph's own UTC ISO-8601 stamp
+        (``datetime.isoformat()`` of an aware UTC value), so it already
+        carries an offset. A naive value is rejected rather than assumed to be
+        UTC: an unzoned instant would silently schedule the video at the wrong
+        time.
+        """
+        parsed = datetime.fromisoformat(scheduled_publish_at)
+        if parsed.tzinfo is None:
+            raise ValueError(
+                "scheduled_publish_at must include a UTC offset: "
+                f"{scheduled_publish_at}")
+        return parsed.astimezone(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
 
     def _execute_resumable_upload(self, request, video_size_mb: float):
         """
@@ -384,10 +421,12 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
             description: Optional[str] = None,
             keywords: Optional[List[str]] = None,
             category: str = "20",  # Gaming
-            privacy_status: str = "public"):
+            privacy_status: str = "public",
+            scheduled_publish_at: Optional[str] = None,
+            notify_subscribers: bool = True):
         """
         Main method to handle the complete YouTube upload process.
-        
+
         Args:
             video_path (str): Path to the video file to upload
             title (str): Video title
@@ -395,7 +434,14 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
             category (str): Numeric video category (default: 22 for People & Blogs)
             keywords (List[str], optional): List of keywords/tags for the video
             privacy_status (str): 'public', 'private', or 'unlisted'
-            
+            scheduled_publish_at (str, optional): ISO-8601 instant with a UTC
+                offset, as produced by ``datetime.isoformat()`` on an aware UTC
+                value. When set, the upload is submitted private with
+                ``status.publishAt`` and YouTube holds the publication until
+                that instant; the returned id is the future post's id.
+            notify_subscribers (bool): Passed as ``notifySubscribers`` on a
+                scheduled insert only; ignored on an ordinary upload.
+
         Returns:
             str: Video ID of the uploaded video
         """
@@ -407,6 +453,14 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
         if privacy_status not in valid_privacy:
             raise ValueError(f"Invalid privacy status: {privacy_status}. "
                              f"Must be one of: {', '.join(valid_privacy)}")
+
+        if scheduled_publish_at:
+            # YouTube accepts a scheduled publication only on a private video,
+            # so the configured privacy status cannot win here.
+            privacy_status = "private"
+            # Validate the instant before opening an upload session, so a
+            # malformed value fails without transferring any bytes.
+            self._publish_at_rfc3339(scheduled_publish_at)
 
         total_progress = sum(self.progress_allocations.values())
         video_id = None
@@ -425,7 +479,8 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
                 request = self._prepare_upload_request(
                     video_path, title,
                     self._embed_marker(video_path, description or ""),
-                    category, keywords, privacy_status)
+                    category, keywords, privacy_status,
+                    scheduled_publish_at, notify_subscribers)
 
                 # Execute upload
                 video_id = self._execute_resumable_upload(
@@ -493,3 +548,26 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
                 if video_id:
                     return video_id
         return None
+
+    def cancel_scheduled_post(self, platform_post_id: str) -> None:
+        """Delete a future publication YouTube is holding for this job.
+
+        ``videos.delete`` removes the private future post, which is the only
+        remote action that can undo a platform-scheduled publication. It costs
+        50 quota units per call and is idempotent enough for a retry: a 404 or
+        410 means the post is already gone, so it is treated as success and the
+        caller may still record the attempt as cancelled.
+        """
+        if not self.youtube_service:
+            if not self.refresh_token and not os.getenv("GOOGLE_REFRESH_TOKEN"):
+                raise RuntimeError(
+                    "Cancelling a scheduled YouTube post needs credentials")
+            self._authenticate()
+        try:
+            self._retry_request(
+                lambda: self.youtube_service.videos().delete(
+                    id=platform_post_id).execute())
+        except HttpError as error:
+            if error.resp.status in {404, 410}:
+                return
+            raise

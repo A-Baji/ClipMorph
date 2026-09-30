@@ -6,7 +6,10 @@ from unittest.mock import patch
 
 from clipmorph.job import JobManifest
 from clipmorph.service import JobService
+from clipmorph.service import UnknownUploadAttempt
+from clipmorph.service import UploadAttemptNotScheduled
 from clipmorph.storage import LocalArtifactStorage
+from clipmorph.upload_attempts import content_options
 
 
 class JobServiceTests(unittest.TestCase):
@@ -434,7 +437,7 @@ class DeferredUploadTests(unittest.TestCase):
             self.assertEqual(saved.platforms["youtube"]["platform_post_id"],
                              "youtube ok")
 
-    def test_cancel_scheduled_upload_marks_cancelled(self):
+    def test_cancel_all_scheduled_uploads_marks_cancelled(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
             service, manifest = _reviewed_job(data_dir)
@@ -447,12 +450,259 @@ class DeferredUploadTests(unittest.TestCase):
                     "schedule": {"publish_at": future},
                     "content": {"title": "Test", "description": "", "tags": []}})
 
-            cancelled = service.cancel_scheduled_upload(manifest.job_id)
+            cancelled = service.cancel_all_scheduled_uploads(manifest.job_id)
             self.assertEqual(cancelled, 1)
 
             saved = service.get_job(manifest.job_id)
             self.assertEqual(saved.upload_attempts[0]["status"], "cancelled")
             self.assertIsNotNone(saved.upload_attempts[0]["completed_at"])
+
+
+class _RecordingAdapter:
+    """Stand-in upload adapter recording scheduled-post cancellations."""
+
+    def __init__(self, error: Exception | None = None):
+        self.cancelled: list[str] = []
+        self.error = error
+
+    def cancel_scheduled_post(self, platform_post_id: str) -> None:
+        if self.error is not None:
+            raise self.error
+        self.cancelled.append(platform_post_id)
+
+
+class PlatformScheduledUploadTests(unittest.TestCase):
+    """``upload.schedule.mode: platform`` hands publication to the platform."""
+
+    def _submit(self, service, manifest, platforms, publish_at, mode="platform",
+                notify_subscribers=None):
+        overrides = {"include": platforms}
+        if notify_subscribers is not None:
+            overrides["youtube"] = {"notify_subscribers": notify_subscribers}
+        return service.submit_upload(
+            manifest.job_id, platforms,
+            configuration_snapshot={
+                "platforms": overrides,
+                "schedule": {"publish_at": publish_at, "mode": mode},
+                "content": {"title": "Test", "description": "", "tags": []}})
+
+    def test_platform_mode_names_every_ineligible_platform_before_any_attempt(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = _reviewed_job(data_dir)
+            self.addCleanup(service.close)
+            publish_at = (datetime.now(timezone.utc)
+                          + timedelta(hours=1)).isoformat()
+
+            with self.assertRaises(ValueError) as raised:
+                self._submit(service, manifest, ["youtube", "instagram"],
+                             publish_at)
+
+            self.assertIn(
+                "upload.schedule.mode platform is not enabled for: "
+                "youtube, instagram", str(raised.exception))
+            self.assertIn("scheduling_probe.py", str(raised.exception))
+            untouched = service.get_job(manifest.job_id)
+            self.assertEqual(untouched.upload_attempts, [])
+            self.assertEqual(untouched.checkpoints["upload"]["status"],
+                             "awaiting_review")
+
+    def test_platform_schedule_uploads_immediately_and_stays_scheduled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = _reviewed_job(data_dir)
+            self.addCleanup(service.close)
+            publish_at = (datetime.now(timezone.utc)
+                          + timedelta(hours=1)).isoformat()
+
+            with patch.dict("clipmorph.platforms.SUPPORTED_NATIVE_SCHEDULING",
+                            {"youtube": True}), patch(
+                "clipmorph.upload_attempts.execute_upload_pipeline",
+                side_effect=_upload_results(["youtube"])) as pipeline:
+                result = self._submit(service, manifest, ["youtube"], publish_at)
+                service._futures[f"upload:{manifest.job_id}"].result(timeout=5)
+
+            # The platform holds the timer, so nothing is armed locally.
+            self.assertEqual(service._scheduled_timers, {})
+            self.assertEqual(result["scheduled_via"], "platform")
+            attempt = result["attempts"][0]
+            self.assertEqual(attempt["status"], "scheduled")
+            self.assertEqual(attempt["scheduled_via"], "platform")
+            self.assertEqual(attempt["scheduled_publish_at"], publish_at)
+
+            # The resolved instant rides the per-platform override into the
+            # adapter keyword the production mapping derives from it.
+            options = content_options(pipeline.call_args.args[2], ["youtube"])
+            self.assertEqual(options["youtube_scheduled_publish_at"], publish_at)
+
+            saved = service.get_job(manifest.job_id)
+            self.assertEqual(saved.upload_attempts[0]["status"], "scheduled")
+            attempt_result = saved.upload_attempts[0]["result"]
+            self.assertTrue(attempt_result["success"])
+            self.assertEqual(attempt_result["platform_post_id"], "youtube ok")
+            self.assertEqual(attempt_result["scheduled_publish_at"], publish_at)
+            self.assertIsNone(attempt_result["published_at"])
+            self.assertIn("platform holds publication", attempt_result["message"])
+            self.assertEqual(saved.platforms["youtube"]["status"], "scheduled")
+            self.assertIsNone(saved.platforms["youtube"]["published_at"])
+            self.assertEqual(saved.checkpoints["upload"]["status"], "completed")
+
+    def test_local_schedule_keeps_its_own_timer_and_sends_no_platform_kwarg(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = _reviewed_job(data_dir)
+            self.addCleanup(service.close)
+            publish_at = (datetime.now(timezone.utc)
+                          + timedelta(hours=1)).isoformat()
+
+            with patch.object(service, "_schedule_attempts") as schedule:
+                result = self._submit(service, manifest, ["youtube"],
+                                      publish_at, mode="local")
+
+            self.assertEqual(result["scheduled_via"], "local")
+            self.assertEqual(result["attempts"][0]["scheduled_via"], "local")
+            self.assertEqual(
+                service.get_job(manifest.job_id).checkpoints["upload"]["status"],
+                "running")
+            # The local path is untouched: one timer, and nothing in what the
+            # worker is handed tells the adapter about a scheduled publication.
+            schedule.assert_called_once()
+            options = content_options(schedule.call_args.args[3], ["youtube"])
+            self.assertNotIn("youtube_scheduled_publish_at", options)
+
+    def test_cancelled_attempt_is_not_resurrected_by_a_stale_batch_timer(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = _reviewed_job(data_dir)
+            self.addCleanup(service.close)
+            publish_at = (datetime.now(timezone.utc)
+                          + timedelta(hours=1)).isoformat()
+            result = self._submit(service, manifest, ["youtube"], publish_at,
+                                  mode="local")
+            attempt_id = result["attempts"][0]["attempt_id"]
+            service.cancel_scheduled_upload(manifest.job_id, attempt_id)
+
+            with patch("clipmorph.upload_attempts.execute_upload_pipeline",
+                       side_effect=_upload_results(["youtube"])) as pipeline:
+                service._run_upload_attempts(
+                    manifest.job_id, [attempt_id], "artifact-key",
+                    {"platforms": {"include": ["youtube"]}}, ["youtube"])
+
+            pipeline.assert_not_called()
+            self.assertEqual(
+                service.get_job(manifest.job_id).upload_attempts[0]["status"],
+                "cancelled")
+
+    def test_cancelling_one_local_attempt_rearms_the_rest_of_its_batch(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = _reviewed_job(data_dir)
+            self.addCleanup(service.close)
+            publish_at = (datetime.now(timezone.utc)
+                          + timedelta(hours=1)).isoformat()
+            result = self._submit(service, manifest,
+                                  ["youtube", "instagram"], publish_at,
+                                  mode="local")
+            armed = service._scheduled_timers[f"upload:{manifest.job_id}"][0]
+            by_platform = {attempt["platform"]: attempt
+                           for attempt in result["attempts"]}
+
+            cancelled = service.cancel_scheduled_upload(
+                manifest.job_id, by_platform["youtube"]["attempt_id"])
+
+            self.assertEqual(cancelled["status"], "cancelled")
+            self.assertEqual(cancelled["scheduled_via"], "local")
+            self.assertTrue(armed.finished.is_set())
+            saved = service.get_job(manifest.job_id)
+            statuses = {attempt["platform"]: attempt["status"]
+                        for attempt in saved.upload_attempts}
+            self.assertEqual(statuses, {"youtube": "cancelled",
+                                        "instagram": "scheduled"})
+            # The surviving member is still armed through the re-arm path.
+            rearmed = service._scheduled_timers[f"upload:{manifest.job_id}"]
+            self.assertEqual(len(rearmed), 1)
+            self.assertIsNot(rearmed[0], armed)
+            rearmed[0].cancel()
+
+    def test_platform_cancel_deletes_the_post_and_marks_the_attempt_cancelled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = _reviewed_job(data_dir)
+            self.addCleanup(service.close)
+            publish_at = (datetime.now(timezone.utc)
+                          + timedelta(hours=1)).isoformat()
+            adapter = _RecordingAdapter()
+
+            with patch.dict("clipmorph.platforms.SUPPORTED_NATIVE_SCHEDULING",
+                            {"youtube": True}), patch(
+                "clipmorph.upload_attempts.execute_upload_pipeline",
+                side_effect=_upload_results(["youtube"])):
+                result = self._submit(service, manifest, ["youtube"], publish_at)
+                service._futures[f"upload:{manifest.job_id}"].result(timeout=5)
+
+            with patch("clipmorph.service._upload_adapter",
+                       return_value=adapter):
+                cancelled = service.cancel_scheduled_upload(
+                    manifest.job_id, result["attempts"][0]["attempt_id"])
+
+            self.assertEqual(adapter.cancelled, ["youtube ok"])
+            self.assertEqual(cancelled["scheduled_via"], "platform")
+            self.assertEqual(cancelled["status"], "cancelled")
+            attempt = service.get_job(manifest.job_id).upload_attempts[0]
+            self.assertEqual(attempt["status"], "cancelled")
+            self.assertEqual(attempt["result"]["platform_post_id"], "youtube ok")
+            self.assertIn("cancelled", attempt["result"]["message"])
+
+    def test_platform_cancel_failure_leaves_the_attempt_scheduled_with_a_reason(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = _reviewed_job(data_dir)
+            self.addCleanup(service.close)
+            publish_at = (datetime.now(timezone.utc)
+                          + timedelta(hours=1)).isoformat()
+
+            with patch.dict("clipmorph.platforms.SUPPORTED_NATIVE_SCHEDULING",
+                            {"youtube": True}), patch(
+                "clipmorph.upload_attempts.execute_upload_pipeline",
+                side_effect=_upload_results(["youtube"])):
+                result = self._submit(service, manifest, ["youtube"], publish_at)
+                service._futures[f"upload:{manifest.job_id}"].result(timeout=5)
+
+            with patch("clipmorph.service._upload_adapter",
+                       return_value=_RecordingAdapter(
+                           RuntimeError("quota exceeded"))):
+                with self.assertRaisesRegex(
+                        ValueError, "refused to cancel post youtube ok"):
+                    service.cancel_scheduled_upload(
+                        manifest.job_id, result["attempts"][0]["attempt_id"])
+
+            attempt = service.get_job(manifest.job_id).upload_attempts[0]
+            self.assertEqual(attempt["status"], "scheduled")
+            self.assertEqual(attempt["errors"][-1]["code"],
+                             "platform_cancel_failed")
+            self.assertTrue(attempt["errors"][-1]["retryable"])
+
+    def test_cancel_refuses_an_unknown_or_unscheduled_attempt(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = _reviewed_job(data_dir)
+            self.addCleanup(service.close)
+            with patch("clipmorph.upload_attempts.execute_upload_pipeline",
+                       side_effect=_upload_results(["youtube"])):
+                service.submit_upload(
+                    manifest.job_id, ["youtube"],
+                    configuration_snapshot={
+                        "platforms": {"include": ["youtube"]},
+                        "content": {"title": "Test", "description": "",
+                                    "tags": []}})
+                service._futures[f"upload:{manifest.job_id}"].result(timeout=5)
+
+            with self.assertRaises(UnknownUploadAttempt):
+                service.cancel_scheduled_upload(manifest.job_id, "missing")
+            attempt_id = service.get_job(
+                manifest.job_id).upload_attempts[0]["attempt_id"]
+            with self.assertRaises(UploadAttemptNotScheduled):
+                service.cancel_scheduled_upload(manifest.job_id, attempt_id)
 
 
 class _ArmedStagingStorage(LocalArtifactStorage):

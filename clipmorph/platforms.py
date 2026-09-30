@@ -10,6 +10,14 @@ share-to-feed, thumbnail offset), not content rules. How ``upload.content``
 (title, description, tags) becomes a platform payload, and every character
 limit applied to it, is owned by ``clipmorph.policy``; this module only reports
 which platform a default belongs to.
+
+Native scheduling contract (``SUPPORTED_NATIVE_SCHEDULING``): an entry is
+``True`` only after the maintainer has run ``quality/research/scheduling_probe.py``
+with sandbox credentials and observed a full schedule -> inspect -> cancel
+cycle. Flipping an entry is a maintainer action that updates this dict and the
+"Native publish scheduling" row in ``docs/PLATFORM_CAPABILITIES.md`` in the
+same commit, with the probe date recorded in the doc; until then every entry is
+``False`` and ``upload.schedule.mode: platform`` is rejected at submission.
 """
 
 from __future__ import annotations
@@ -37,6 +45,19 @@ PLATFORM_DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
     "twitter": {},
 }
 
+# Whether each platform's own API can hold a future publication, which is what
+# ``upload.schedule.mode: platform`` selects. Every entry ships ``False``: a
+# platform is only marked ``True`` after the maintainer's sandbox probe has run
+# (see the module docstring). Instagram, TikTok, and X expose no scheduled
+# publication parameter at all, so they stay ``False`` permanently unless their
+# APIs gain one.
+SUPPORTED_NATIVE_SCHEDULING: dict[str, bool] = {
+    "youtube": False,
+    "instagram": False,
+    "tiktok": False,
+    "twitter": False,
+}
+
 
 def build_platform_default_config() -> dict[str, dict[str, Any]]:
     """Return a fresh copy of per-platform upload defaults."""
@@ -47,6 +68,15 @@ def build_platform_default_config() -> dict[str, dict[str, Any]]:
 def is_supported_platform(platform: str) -> bool:
     """Return True when the lowercase platform name is supported."""
     return str(platform).lower() in SUPPORTED_PLATFORMS_SET
+
+
+def native_scheduling_support(platform: str) -> bool:
+    """Report whether a platform's own API can hold a future publication.
+
+    Unknown platforms are reported as unsupported: only a registry entry the
+    maintainer's probe has blessed may back ``upload.schedule.mode: platform``.
+    """
+    return bool(SUPPORTED_NATIVE_SCHEDULING.get(str(platform).lower(), False))
 
 
 def enabled_platforms(platforms_config: dict[str, Any] | None) -> list[str]:

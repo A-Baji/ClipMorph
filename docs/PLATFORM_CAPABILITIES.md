@@ -86,4 +86,40 @@ unavailable until the user re-runs `clipmorph auth youtube` to grant the read
 scope. The marker is embedded in the video description at publish time and is
 truncated to stay within the platform's description limit.
 
-Last reviewed: 2026-09-29.
+## Native publish scheduling
+
+`upload.schedule.mode: platform` hands the future publication to the platform
+itself instead of holding a ClipMorph timer, so it may only name a platform
+whose registry entry in `clipmorph/platforms.py::SUPPORTED_NATIVE_SCHEDULING`
+is `True`. An entry is flipped only after the maintainer has run
+`quality/research/scheduling_probe.py` against the live API with sandbox
+credentials and observed a complete schedule -> inspect -> cancel cycle; the
+registry dict and this row change in the same commit, with the probe date
+recorded in the cell. Every entry ships `False`, so a submission naming a
+platform before its probe is refused with
+`upload.schedule.mode platform is not enabled for: <platforms>` and no attempt
+is created. Instagram, TikTok, and X are permanently `Not available`: their
+current APIs expose no scheduled-publication parameter (verified 2026-09-27
+against the container/`media_publish` flow, direct-post `post_info`, and
+`POST /2/tweets`), so the local timer stays their only mode.
+
+| Platform | Native publish scheduling | Adapter surface | Detection role |
+| --- | --- | --- | --- |
+| youtube | Not enabled (probe not run) | `scheduled_publish_at` -> `status.publishAt` with `privacyStatus=private`; `notifySubscribers` on a scheduled insert; `cancel_scheduled_post` -> `videos.delete` (50 quota units) | Required to re-attach a scheduled post stranded by a restart |
+| instagram | Not available | none | n/a |
+| tiktok | Not available | none | n/a |
+| twitter | Not available | none | n/a |
+
+YouTube accepts a scheduled publication only on a private video, so a
+scheduled insert forces `privacyStatus=private` regardless of the configured
+`upload.platforms.youtube.privacy_status`; an unscheduled insert is unchanged.
+A successful platform-scheduled attempt is recorded as `scheduled`, not
+`published`: the platform still holds the publication, and only the platform
+knows when it became visible, so the terminal flip belongs to the metrics pull
+rather than to a local guess. Because the platform holds the post, cancelling
+it is a remote action — `job cancel-scheduled` (web
+`DELETE /api/v1/jobs/{id}/scheduled/{attempt_id}`) calls the adapter hook
+instead of a local timer, and a rerender that supersedes an armed schedule
+deletes the held post on a best-effort basis.
+
+Last reviewed: 2026-09-30.

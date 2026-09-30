@@ -1045,6 +1045,31 @@ def job_uploads_command(
         nowrap=("attempt_id",))
 
 
+@job_app.command("cancel-scheduled")
+def job_cancel_scheduled_command(
+        ctx: typer.Context,
+        job_id: Annotated[str, typer.Argument(help="Job ID.")],
+        attempt_id: Annotated[str, typer.Argument(
+            metavar="ATTEMPT_ID",
+            help="Scheduled upload attempt ID to cancel.")],
+        json_output: JsonOption = False,
+        data_dir: DataDirOption = None,
+        app_config: AppConfigOption = None) -> None:
+    """Cancel one scheduled upload attempt before its publication."""
+    from clipmorph.service import JobService
+
+    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    with closing(JobService(selected_data_dir,
+                           app_config_path=selected_config)) as service:
+        result = service.cancel_scheduled_upload(job_id, attempt_id)
+    if json_output:
+        _print_json(result)
+        return
+    _print_table(f"Cancelled upload attempt {result['attempt_id']}", [result],
+                 ["job_id", "attempt_id", "platform", "scheduled_via", "status"],
+                 nowrap=("attempt_id",))
+
+
 @artifact_app.command("list")
 def artifacts_list_command(
         ctx: typer.Context,

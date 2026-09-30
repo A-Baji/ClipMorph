@@ -132,6 +132,40 @@ class JobConfigurationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "Unknown|unsupported"):
                     resolve_job_configuration({}, configuration)
 
+    def test_schedule_mode_selects_who_holds_the_publication(self):
+        publish_at = "2026-10-01T12:00:00+00:00"
+
+        for mode in (None, "local", "platform"):
+            with self.subTest(mode=mode):
+                configuration = resolve_job_configuration({}, {
+                    "general": {"source": "clip.mp4"},
+                    "upload": {"schedule": {"publish_at": publish_at,
+                                            "mode": mode}},
+                })
+                self.assertEqual(
+                    configuration["upload"]["schedule"]["mode"], mode)
+
+    def test_schedule_mode_rejects_an_unknown_holder(self):
+        with self.assertRaisesRegex(
+                ValueError, "upload.schedule.mode must be one of: local, platform"):
+            resolve_job_configuration({}, {
+                "general": {"source": "clip.mp4"},
+                "upload": {"schedule": {"publish_at": "2026-10-01T12:00:00+00:00",
+                                        "mode": "youtube"}},
+            })
+
+    def test_schedule_mode_alone_schedules_nothing(self):
+        # The key is inert without a future publish_at: the service resolves
+        # the holder only when a publication is actually deferred.
+        configuration = resolve_job_configuration({}, {
+            "general": {"source": "clip.mp4"},
+            "upload": {"schedule": {"mode": "platform"}},
+        })
+
+        self.assertIsNone(configuration["upload"]["schedule"].get("publish_at"))
+        self.assertEqual(configuration["upload"]["schedule"]["mode"],
+                         "platform")
+
     def test_resolver_materializes_minimal_selected_caption_renderer(self):
         configuration = resolve_job_configuration(
             {}, {"general": {"source": "clip.mp4"}})
