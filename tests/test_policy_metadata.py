@@ -98,7 +98,7 @@ class BuildPlatformMetadataTests(unittest.TestCase):
     def test_composed_text_is_what_the_policy_decision_publishes(self):
         content = {"title": "Boss fight", "description": "d" * 900,
                    "tags": ["gaming", "speedrun"]}
-        for platform in ("instagram", "tiktok", "twitter"):
+        for platform in ("instagram", "tiktok", "twitter", "facebook"):
             with self.subTest(platform=platform):
                 composed = next(iter(
                     build_platform_metadata(platform, content).values()))
@@ -111,7 +111,7 @@ class BuildPlatformMetadataTests(unittest.TestCase):
             build_platform_metadata("twitter", {"title": "x"}))
 
     def test_unknown_platform_has_no_metadata(self):
-        self.assertEqual(build_platform_metadata("facebook", {"title": "x"}), {})
+        self.assertEqual(build_platform_metadata("linkedin", {"title": "x"}), {})
 
     def test_options_replace_content_for_one_composition(self):
         metadata = build_platform_metadata(
@@ -137,6 +137,8 @@ class BuildPlatformMetadataTests(unittest.TestCase):
     def test_empty_content_composes_an_empty_value(self):
         self.assertEqual(build_platform_metadata("twitter", {}),
                          {"tweet_text": ""})
+        self.assertEqual(build_platform_metadata("facebook", {}),
+                         {"description": ""})
         self.assertEqual(build_platform_metadata("youtube", {}),
                          {"title": "", "description": "Uploaded via API",
                           "keywords": []})

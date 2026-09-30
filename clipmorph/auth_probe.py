@@ -140,6 +140,42 @@ def _instagram_gcs_check(pipeline: Any) -> tuple[bool, str]:
     return True, "gcs bucket ok"
 
 
+def _probe_facebook() -> tuple[str, str]:
+    """Prove the shared Meta Page token can read and post to the Page.
+
+    Facebook reuses Instagram's Meta app and Page token, so this is the same
+    page-token check plus a capability read: the Page ``tasks`` list confirms
+    the token may publish content (reels need ``CREATE_CONTENT``). No video is
+    uploaded and no value is printed.
+    """
+    from clipmorph.upload_pipeline.platforms.facebook import FacebookUploadPipeline
+
+    try:
+        pipeline = FacebookUploadPipeline()
+    except Exception:
+        return "unavailable", "incomplete credentials"
+    return _facebook_graph_check(pipeline)
+
+
+def _facebook_graph_check(pipeline: Any) -> tuple[str, str]:
+    url = (f"{pipeline.FACEBOOK_GRAPH_BASE_URL}/{pipeline.api_version}/"
+           f"{pipeline.page_id}?fields=id,tasks&access_token={pipeline.access_token}")
+    try:
+        response = requests.get(url, timeout=10)
+        payload = response.json()
+    except Exception as error:
+        return "failed", f"graph api failed: {safe_error_message(str(error))}"
+    if response.status_code != 200:
+        return ("failed", "graph api failed: "
+                f"{safe_error_message(f'status {response.status_code} {response.text}')}")
+    if payload.get("id") != pipeline.page_id:
+        return "failed", "graph api failed: page id mismatch"
+    tasks = payload.get("tasks") or []
+    if isinstance(tasks, list) and "CREATE_CONTENT" in tasks:
+        return "ok", "graph api ok; reels capability granted"
+    return "ok", "graph api ok; reels capability not confirmed"
+
+
 def _probe_tiktok() -> tuple[str, str]:
     """Prove the TikTok refresh token yields a working access token.
 
@@ -215,4 +251,5 @@ _PROBES: dict[str, Callable[[], tuple[str, str]]] = {
     "instagram": _probe_instagram,
     "tiktok": _probe_tiktok,
     "twitter": _probe_twitter,
+    "facebook": _probe_facebook,
 }

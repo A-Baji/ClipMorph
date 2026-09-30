@@ -1,5 +1,5 @@
 <script>
-  const platforms = ['youtube', 'instagram', 'tiktok', 'twitter'];
+  const platforms = ['youtube', 'instagram', 'tiktok', 'twitter', 'facebook'];
   const nav = ['Queue', 'New Job', 'Captions', 'Layouts', 'Uploads', 'Metrics', 'Settings'];
   let activeView = 'Queue';
   let jobs = [];
@@ -37,6 +37,7 @@
     placement: 'top', renderer: 'overlay', caption: true, caption_text: '',
   };
   let uploadDraft = { title: '', description: '', tags: '', publishAt: '' };
+  let uploadContentKind = 'reel';
   let uploadPlatforms = [...platforms];
   let uploadFilterStatus = '';
   let uploadFilterPlatform = '';
@@ -489,6 +490,12 @@
           .split(',').map((tag) => tag.trim()).filter(Boolean),
       };
       upload.platforms = { ...(upload.platforms || {}), include: uploadPlatforms };
+      if (uploadPlatforms.includes('facebook')) {
+        upload.platforms.facebook = {
+          ...(upload.platforms.facebook || {}),
+          content_kind: uploadContentKind,
+        };
+      }
       const publishAt = toUtcTimestamp(uploadDraft.publishAt);
       if (publishAt) upload.schedule = { ...(upload.schedule || {}), publish_at: publishAt };
       else delete upload.schedule;
@@ -791,6 +798,7 @@
       <section class="form-page"><div class="section-heading"><div><span class="section-kicker">Pre-upload checkpoint</span><h2>Content and artifact</h2></div><div class="top-actions"><button class="secondary-action" onclick={saveUploadDraft}>Save draft</button><button class="secondary-action" onclick={refreshMetrics}>Refresh metrics</button><button class="primary-action" onclick={submitUpload}>Submit upload</button></div></div>
         {#if !selectedJob}<div class="empty-view"><h2>Select a job first</h2></div>{:else}<div class="upload-layout"><div class="form-card upload-draft-fields"><span class="card-index">UPLOAD DRAFT</span><label class="field-label">Title<input aria-label="Upload title" bind:value={uploadDraft.title} /></label><label class="field-label">Description<textarea aria-label="Upload description" rows="4" bind:value={uploadDraft.description}></textarea></label><label class="field-label">Tags<input aria-label="Upload tags" bind:value={uploadDraft.tags} placeholder="tag one, tag two" /></label><label class="field-label">Schedule for<input aria-label="Upload schedule for" type="datetime-local" bind:value={uploadDraft.publishAt} /><small>Leave empty to upload as soon as you submit. A future time defers every selected platform; a retry always runs immediately.</small></label>
           {#each platforms as platform}<label><input type="checkbox" checked={uploadPlatforms.includes(platform)} onchange={(event) => uploadPlatforms = event.currentTarget.checked ? [...uploadPlatforms, platform] : uploadPlatforms.filter((item) => item !== platform)} /> {platform}</label>{/each}
+          {#if uploadPlatforms.includes('facebook')}<label class="field-label">Facebook content kind<select bind:value={uploadContentKind}><option value="reel">Reel</option><option value="video">Page video</option></select></label>{/if}
           <span class="card-index">ARTIFACTS</span>{#each artifacts as artifact}<div class="saved-row"><div><b>{artifact.display_name || artifact.kind} · r{artifact.revision}</b><small>{artifact.state} · {artifact.sha256 || 'unavailable'}</small></div><a class="text-button" href={`/api/v1/jobs/${selectedJob.job_id}/artifacts/${artifact.id}/preview`} target="_blank">Preview</a><a class="text-button" href={`/api/v1/jobs/${selectedJob.job_id}/artifacts/${artifact.id}/download`}>Download</a><button class="quiet-action" onclick={() => renameArtifact(artifact)} aria-label="Rename artifact">✎</button><button class="quiet-action" onclick={() => deleteArtifact(artifact)} aria-label="Delete artifact">×</button></div>{/each}
         </div><div class="form-card"><span class="card-index">ATTEMPT HISTORY</span><div class="field-row"><label class="field-label">Status<select bind:value={uploadFilterStatus} onchange={applyUploadFilters}><option value="">All</option>{['pending', 'scheduled', 'running', 'published', 'failed', 'cancelled'].map((s) => `<option value="${s}">${s}</option>`).join('')}</select></label><label class="field-label">Platform<select bind:value={uploadFilterPlatform} onchange={applyUploadFilters}><option value="">All</option>{platforms.map((p) => `<option value="${p}">${p}</option>`).join('')}</select></label><label class="field-label">Since<input type="datetime-local" bind:value={uploadFilterSince} onchange={applyUploadFilters} /></label></div>{#each filteredUploadAttempts as attempt}<div class="saved-row"><div><b>{attempt.platform} · {attempt.status}</b><small>{attempt.configuration_snapshot?.content?.title} · {attempt.artifact_hash}</small>{#if scheduleLabel(attempt)}<small class="schedule-note">{scheduleLabel(attempt)}</small>{/if}{#if attemptUrl(attempt)}<a class="text-button" href={attemptUrl(attempt)} target="_blank">View post</a>{/if}</div><div class="attempt-progress">{#if uploadProgress[selectedJobId]?.[attempt.platform] !== undefined}<span class="attempt-progress-live">{uploadProgress[selectedJobId][attempt.platform]}%</span>{:else if attempt.result?.progress_percent !== undefined}<span class="attempt-progress-final">{attempt.result.progress_percent}%</span>{/if}</div>{#if attempt.status === 'failed'}<button class="text-button" onclick={() => retryUpload(attempt)}>Retry</button>{/if}</div>{/each}</div>
         <div class="form-card"><span class="card-index">METRICS</span>{#if !metricSnapshots.length}<div class="empty-inline">No metrics yet. Pull fresh data to see engagement.</div>{/if}{#each metricSnapshots as snapshot}<div class="saved-row"><div><b>{snapshot.platform} · {snapshot.captured_at}</b>{#if snapshot.unavailable}<small class="schedule-note">{snapshot.unavailable_reason}</small>{:else}<small>{Object.entries(snapshot.metrics || {}).map(([k, v]) => `${k}: ${v}`).join(' · ')}</small>{/if}</div></div>{/each}</div></div>{/if}

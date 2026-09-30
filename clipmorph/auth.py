@@ -45,6 +45,16 @@ AUTH_ENVIRONMENT_KEYS = {
         "oauth2_refresh_token": "TWITTER_OAUTH2_REFRESH_TOKEN",
         "oauth2_expires_at": "TWITTER_OAUTH2_EXPIRES_AT",
     },
+    # Facebook publishes through the same Meta app and Page token as Instagram,
+    # so this schema aliases the shared FACEBOOK_* environment keys rather than
+    # introducing a second credential block. A user configures the Instagram
+    # section once and both adapters read it (see docs/AUTHENTICATION.md).
+    "facebook": {
+        "app_id": "FACEBOOK_APP_ID",
+        "app_secret": "FACEBOOK_APP_SECRET",
+        "page_id": "FACEBOOK_PAGE_ID",
+        "access_token": "FACEBOOK_ACCESS_TOKEN",
+    },
     "hugging_face": {
         "access_token": "HUGGING_FACE_ACCESS_TOKEN",
     },

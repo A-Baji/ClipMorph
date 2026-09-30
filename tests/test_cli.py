@@ -665,6 +665,7 @@ class AuthStatusProbeTests(unittest.TestCase):
             "| instagram    | no         |",
             "| tiktok       | no         |",
             "| twitter      | no         |",
+            "| facebook     | no         |",
             "| hugging_face | no         |",
             "+--------------+------------+",
         ])
@@ -689,7 +690,7 @@ class AuthStatusProbeTests(unittest.TestCase):
             fake = {platform: {"configured": False, "probe": "unavailable",
                                "detail": "not configured"}
                     for platform in ("youtube", "instagram", "tiktok", "twitter",
-                                     "hugging_face")}
+                                     "facebook", "hugging_face")}
             with patch("clipmorph.auth_probe.probe_credentials",
                        return_value=fake) as probe_fn:
                 code, output = invoke(["--data-dir", str(data_dir), "auth",
@@ -697,7 +698,8 @@ class AuthStatusProbeTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         probe_fn.assert_called_once_with(
-            ["youtube", "instagram", "tiktok", "twitter", "hugging_face"])
+            ["youtube", "instagram", "tiktok", "twitter", "facebook",
+             "hugging_face"])
 
     def test_auth_status_with_probe_exits_1_when_a_probe_fails(self):
         with tempfile.TemporaryDirectory() as temp_dir:

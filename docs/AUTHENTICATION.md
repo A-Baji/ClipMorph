@@ -50,6 +50,7 @@ clipmorph auth set youtube
 clipmorph auth set instagram
 clipmorph auth set tiktok
 clipmorph auth set twitter
+clipmorph auth set facebook   # same shared Meta fields as instagram
 clipmorph auth set hugging_face
 ```
 
@@ -159,6 +160,13 @@ These authorize `clipmorph/upload_pipeline/platforms/instagram.py` to publish
 reels to one Instagram professional account. The Facebook half talks to Graph
 API `v23.0`; the Google half only hosts the video bytes for the signed-URL
 hand-off that the container-publishing flow requires.
+
+This is also the shared Meta-app/page block for Facebook uploads: the same app
+and Page token authorize `clipmorph/upload_pipeline/platforms/facebook.py` to
+publish Page Reels and Page videos. There is no separate Facebook credential
+section — configure this block once, and both adapters read the `FACEBOOK_*`
+values. `clipmorph auth set facebook` prompts for the same four Meta fields and
+writes the same environment keys.
 
 The scopes the adapter requests are `instagram_basic`, `pages_show_list`,
 `pages_read_engagement`, `pages_manage_posts`, and

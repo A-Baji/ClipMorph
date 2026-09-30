@@ -233,6 +233,83 @@ class TwitterProbeTests(unittest.TestCase):
         self.assertNotIn(FAKE_TOKEN, result["twitter"]["detail"])
 
 
+class FacebookProbeTests(unittest.TestCase):
+    def _pipeline(self, pipeline_cls):
+        pipeline = pipeline_cls.return_value
+        pipeline.api_version = "v23.0"
+        pipeline.page_id = "123456789"
+        pipeline.access_token = FAKE_TOKEN
+        return pipeline
+
+    def test_ok_reports_page_and_reels_capability(self):
+        with patch.dict(os.environ, ALL_CREDENTIALS, clear=True), \
+                patch("clipmorph.upload_pipeline.platforms.facebook."
+                      "FacebookUploadPipeline") as pipeline_cls, \
+                patch("clipmorph.auth_probe.requests.get") as get:
+            self._pipeline(pipeline_cls)
+            get.return_value.status_code = 200
+            get.return_value.json.return_value = {
+                "id": "123456789", "tasks": ["CREATE_CONTENT", "MANAGE"]}
+            result = probe_credentials(["facebook"])
+
+        self.assertEqual(result["facebook"]["probe"], "ok")
+        self.assertIn("reels capability granted", result["facebook"]["detail"])
+
+    def test_ok_without_publish_task_notes_unconfirmed_capability(self):
+        with patch.dict(os.environ, ALL_CREDENTIALS, clear=True), \
+                patch("clipmorph.upload_pipeline.platforms.facebook."
+                      "FacebookUploadPipeline") as pipeline_cls, \
+                patch("clipmorph.auth_probe.requests.get") as get:
+            self._pipeline(pipeline_cls)
+            get.return_value.status_code = 200
+            get.return_value.json.return_value = {
+                "id": "123456789", "tasks": ["ANALYZE"]}
+            result = probe_credentials(["facebook"])
+
+        self.assertEqual(result["facebook"]["probe"], "ok")
+        self.assertIn("reels capability not confirmed",
+                      result["facebook"]["detail"])
+
+    def test_graph_failure_is_masked(self):
+        with patch.dict(os.environ, ALL_CREDENTIALS, clear=True), \
+                patch("clipmorph.upload_pipeline.platforms.facebook."
+                      "FacebookUploadPipeline") as pipeline_cls, \
+                patch("clipmorph.auth_probe.requests.get") as get:
+            self._pipeline(pipeline_cls)
+            get.return_value.status_code = 403
+            get.return_value.text = f"access_token={FAKE_TOKEN} rejected"
+            result = probe_credentials(["facebook"])
+
+        self.assertEqual(result["facebook"]["probe"], "failed")
+        self.assertNotIn(FAKE_TOKEN, result["facebook"]["detail"])
+        self.assertIn("[REDACTED]", result["facebook"]["detail"])
+
+    def test_page_id_mismatch_fails(self):
+        with patch.dict(os.environ, ALL_CREDENTIALS, clear=True), \
+                patch("clipmorph.upload_pipeline.platforms.facebook."
+                      "FacebookUploadPipeline") as pipeline_cls, \
+                patch("clipmorph.auth_probe.requests.get") as get:
+            self._pipeline(pipeline_cls)
+            get.return_value.status_code = 200
+            get.return_value.json.return_value = {"id": "a-different-page"}
+            result = probe_credentials(["facebook"])
+
+        self.assertEqual(result["facebook"]["probe"], "failed")
+        self.assertIn("page id mismatch", result["facebook"]["detail"])
+
+    def test_incomplete_credentials_are_unavailable(self):
+        env = _without("FACEBOOK_ACCESS_TOKEN")
+        with patch.dict(os.environ, env, clear=True), \
+                patch("clipmorph.upload_pipeline.platforms.facebook."
+                      "FacebookUploadPipeline",
+                      side_effect=ValueError("missing credentials")):
+            result = probe_credentials(["facebook"])
+
+        self.assertEqual(result["facebook"]["probe"], "unavailable")
+        self.assertEqual(result["facebook"]["detail"],
+                         "incomplete credentials")
+
+
 class ProbeRoutingTests(unittest.TestCase):
     def test_hugging_face_is_always_unavailable(self):
         with patch.dict(os.environ, ALL_CREDENTIALS, clear=True):
@@ -254,10 +331,12 @@ class ProbeRoutingTests(unittest.TestCase):
     def test_every_platform_gets_a_record(self):
         with patch.dict(os.environ, {}, clear=True):
             result = probe_credentials(
-                ["youtube", "instagram", "tiktok", "twitter", "hugging_face"])
+                ["youtube", "instagram", "tiktok", "twitter", "facebook",
+                 "hugging_face"])
 
         self.assertEqual(set(result),
-                         {"youtube", "instagram", "tiktok", "twitter", "hugging_face"})
+                         {"youtube", "instagram", "tiktok", "twitter",
+                          "facebook", "hugging_face"})
         for record in result.values():
             self.assertEqual(record["probe"], "unavailable")
 

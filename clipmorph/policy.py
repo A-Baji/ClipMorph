@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 import sys
 from typing import Any
 
-POLICY_VERSION = "2026-09-27"
+POLICY_VERSION = "2026-09-30"
 
 
 @dataclass(frozen=True)
@@ -73,6 +73,15 @@ CAPABILITY_MATRIX = {
         caption_limit=280,
         content_mode="combined",
         output_keys=("tweet_text",),
+    ),
+    "facebook": CapabilityRule(
+        minimum_duration=3,
+        maximum_duration=2700,
+        maximum_bytes=1879048192,  # 1.75 GB, Meta's resumable page-video bound
+        codecs=("h264", "hevc"),
+        caption_limit=63206,
+        content_mode="combined",
+        output_keys=("description",),
     ),
 }
 

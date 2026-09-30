@@ -25,7 +25,7 @@ from __future__ import annotations
 from typing import Any
 
 SUPPORTED_PLATFORMS: tuple[str, ...] = (
-    "youtube", "instagram", "tiktok", "twitter")
+    "youtube", "instagram", "tiktok", "twitter", "facebook")
 SUPPORTED_PLATFORMS_SET: frozenset[str] = frozenset(SUPPORTED_PLATFORMS)
 
 # Platform display order used by surfaces that show a stable list.
@@ -34,15 +34,19 @@ PLATFORM_TITLE = {
     "instagram": "Instagram",
     "tiktok": "TikTok",
     "twitter": "Twitter/X",
+    "facebook": "Facebook",
 }
 
 # Per-platform upload defaults, consumed by the upload pipeline when it folds
-# them into composed metadata and by the CLI runtime summary.
+# them into composed metadata and by the CLI runtime summary. Facebook's
+# content kind selects the Reels or the regular Page video endpoint family;
+# both are published by the same adapter.
 PLATFORM_DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
     "youtube": {"category": "22", "privacy_status": "public"},
     "instagram": {"share_to_feed": True, "thumb_offset": 0},
     "tiktok": {"privacy_level": "PUBLIC_TO_EVERYONE"},
     "twitter": {},
+    "facebook": {"content_kind": "reel"},
 }
 
 # Whether each platform's own API can hold a future publication, which is what
@@ -50,12 +54,14 @@ PLATFORM_DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
 # platform is only marked ``True`` after the maintainer's sandbox probe has run
 # (see the module docstring). Instagram, TikTok, and X expose no scheduled
 # publication parameter at all, so they stay ``False`` permanently unless their
-# APIs gain one.
+# APIs gain one; Facebook ships ``False`` like every entry until its own probe
+# is run, even though the Reels finish phase carries a scheduled-publish field.
 SUPPORTED_NATIVE_SCHEDULING: dict[str, bool] = {
     "youtube": False,
     "instagram": False,
     "tiktok": False,
     "twitter": False,
+    "facebook": False,
 }
 
 

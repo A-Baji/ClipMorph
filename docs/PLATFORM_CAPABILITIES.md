@@ -15,6 +15,7 @@ fails when a platform is missing from any touchpoint this document names.
 | Instagram Reels | [Graph API v25.0 media](https://developers.facebook.com/docs/instagram-api/reference/ig-user/media) | 3-900 seconds, max 1920 horizontal pixels, max 300 MB, H.264/HEVC, 23-60 FPS, AAC audio |
 | TikTok | [media transfer guide](https://developers.tiktok.com/doc/content-posting-api-media-transfer-guide) | MP4/MOV/WebM, H.264/H.265/VP8/VP9, 23-60 FPS, 360-4096 pixel dimensions, max 4 GB, minimum 3 seconds |
 | X | [API v2.168 upload](https://docs.x.com/x-api/media/upload-media) and [create posts](https://docs.x.com/x-api/posts/create-post) | one video per post, default 20 minutes/8 GB; account tier may allow 125 minutes/16 GB |
+| Facebook | [Page videos](https://developers.facebook.com/docs/graph-api/reference/page/videos/) and [Page Reels](https://developers.facebook.com/docs/graph-api/reference/page/video_reels/) | 3-2700 seconds, max 1.75 GB, H.264/HEVC, MP4/MOV/MKV/AVI/WMV; Reels additionally require a 9:16 ratio and 3-60 seconds |
 
 ## Upload metadata rules
 
@@ -29,6 +30,7 @@ if the two drift apart.
 | instagram | caption | caption | 2200 |
 | tiktok | combined | title | 4000 |
 | twitter | combined | tweet_text | 280 |
+| facebook | combined | description | 63206 |
 
 `separate` keeps the three content fields apart: YouTube trims its title to 100
 characters, its keyword string to 500 characters, and its description to
@@ -49,6 +51,10 @@ category. Unknown tier information produces a warning rather than disabling X.
 - Instagram containers are asynchronous, expire after 24 hours, and are subject
 to account/API publishing limits. Upload adapters retain platform status for
 these asynchronous outcomes.
+- Facebook shares Instagram's Meta app and Page token; the Page `tasks` list
+(read by `clipmorph auth status --probe`) reports whether that token may
+publish. Reels require a 9:16 ratio and 3-60 seconds, which the platform
+enforces at publish time rather than the static rule blocking a Page video.
 - YouTube Shorts eligibility and account-specific upload limits are not inferred
 from generic encoding recommendations; unknown limits warn and do not block.
 
@@ -78,6 +84,7 @@ scope) surfaces as an `unavailable` note, never a blocker.
 | Instagram | Not supported | Submission-side dedup guard only |
 | TikTok | Not supported | Submission-side dedup guard only |
 | Twitter/X | Not supported | Submission-side dedup guard only |
+| Facebook | Not supported | Submission-side dedup guard only |
 
 YouTube's detection requires the `youtube.readonly` scope. The consent
 request asks for both `youtube.upload` and `youtube.readonly`; existing
@@ -101,7 +108,10 @@ platform before its probe is refused with
 is created. Instagram, TikTok, and X are permanently `Not available`: their
 current APIs expose no scheduled-publication parameter (verified 2026-09-27
 against the container/`media_publish` flow, direct-post `post_info`, and
-`POST /2/tweets`), so the local timer stays their only mode.
+`POST /2/tweets`), so the local timer stays their only mode. Facebook also
+ships `Not available` pending its own probe, but its Reels finish phase
+carries a `scheduled_publish_time` field, so it is a probe candidate rather
+than a permanent no.
 
 | Platform | Native publish scheduling | Adapter surface | Detection role |
 | --- | --- | --- | --- |
@@ -109,6 +119,7 @@ against the container/`media_publish` flow, direct-post `post_info`, and
 | instagram | Not available | none | n/a |
 | tiktok | Not available | none | n/a |
 | twitter | Not available | none | n/a |
+| facebook | Not available | none | n/a |
 
 YouTube accepts a scheduled publication only on a private video, so a
 scheduled insert forces `privacyStatus=private` regardless of the configured
