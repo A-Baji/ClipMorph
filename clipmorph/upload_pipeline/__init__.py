@@ -230,6 +230,9 @@ class UploadPipeline:
                 elif platform_name == 'TikTok' \
                         and getattr(pipeline, "access_token", None) is None:
                     pipeline._refresh_access_token()
+                elif platform_name == 'Twitter' \
+                        and not getattr(pipeline, "oauth_session", None):
+                    pipeline._authenticate()
             except Exception as error:
                 results[platform_name] = {
                     'platform': platform_name,
@@ -238,6 +241,10 @@ class UploadPipeline:
                     'error': str(error),
                 }
                 del self.enabled_platforms[platform_name]
+                # This failure never reaches the worker-thread reporting, so
+                # log it here or the user sees no reason for the skip.
+                logging.error(
+                    f"{platform_name} authentication failed: {error}")
 
     def run(self, video_path: str, title: str,
             **platform_kwargs) -> Dict[str, Dict]:

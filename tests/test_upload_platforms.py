@@ -48,6 +48,31 @@ class UploadPipelineTests(unittest.TestCase):
         tiktok._refresh_access_token.assert_called_once_with()
         self.assertEqual(results, {})
 
+    def test_twitter_is_prepared_before_parallel_uploads(self):
+        pipeline = UploadPipeline()
+        twitter = MagicMock()
+        twitter.oauth_session = None
+        pipeline.enabled_platforms = {"Twitter": twitter}
+        results = {}
+
+        pipeline._prepare_interactive_authentication(results)
+
+        twitter._authenticate.assert_called_once_with()
+        self.assertEqual(results, {})
+
+    def test_twitter_pre_auth_failure_removes_platform_from_run(self):
+        pipeline = UploadPipeline()
+        twitter = MagicMock()
+        twitter.oauth_session = None
+        twitter._authenticate.side_effect = ValueError("auth failed")
+        pipeline.enabled_platforms = {"Twitter": twitter}
+        results = {}
+
+        pipeline._prepare_interactive_authentication(results)
+
+        self.assertNotIn("Twitter", pipeline.enabled_platforms)
+        self.assertIn("auth failed", results["Twitter"]["error"])
+
     def test_platform_policy_blocks_known_incompatible_artifact(self):
         decision = validate_artifact("instagram", {
             "duration": 2,
