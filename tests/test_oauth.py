@@ -291,16 +291,21 @@ class OAuthTests(_IsolatedAuthFile, unittest.TestCase):
             tiktok_client_key="client",
             tiktok_client_secret="secret",
             tiktok_refresh_token="expired")
-        refreshed = {"access_token": "new-access", "refresh_token": "new-refresh"}
-        with patch.object(pipeline, "generate_refresh_token", return_value="new-refresh") as generate, \
-                patch.object(pipeline, "_retry_request") as retry_request:
-            accepted = MagicMock()
-            accepted.json.return_value = refreshed
-            retry_request.side_effect = [requests.exceptions.HTTPError("expired"), accepted]
+        with patch.object(pipeline, "generate_refresh_token",
+                          return_value={"access_token": "new-access",
+                                        "refresh_token": "new-refresh"}
+                          ) as generate, \
+                patch.object(pipeline, "_retry_request"
+                             ) as retry_request:
+            retry_request.side_effect = [requests.exceptions.HTTPError("expired")]
 
             self.assertEqual(pipeline._refresh_access_token(), "new-access")
 
         generate.assert_called_once_with()
+        # The interactive flow already returned tokens: no second token
+        # grant may consume the freshly issued refresh token.
+        self.assertEqual(pipeline.access_token, "new-access")
+        self.assertEqual(retry_request.call_count, 1)
 
     def test_tiktok_refresh_falls_back_on_json_token_error(self):
         pipeline = TikTokUploadPipeline(
@@ -312,10 +317,12 @@ class OAuthTests(_IsolatedAuthFile, unittest.TestCase):
             "error": "invalid_grant",
             "error_description": "Refresh token expired",
         }
-        accepted = MagicMock()
-        accepted.json.return_value = {"access_token": "new-access"}
-        with patch.object(pipeline, "generate_refresh_token", return_value="new-refresh") as generate, \
-                patch.object(pipeline, "_retry_request", side_effect=[rejected, accepted]):
+        with patch.object(pipeline, "generate_refresh_token",
+                          return_value={"access_token": "new-access",
+                                        "refresh_token": "new-refresh"}
+                          ) as generate, \
+                patch.object(pipeline, "_retry_request",
+                             side_effect=[rejected]):
             self.assertEqual(pipeline._refresh_access_token(), "new-access")
 
         generate.assert_called_once_with()
@@ -336,7 +343,9 @@ class OAuthTests(_IsolatedAuthFile, unittest.TestCase):
                     "http://127.0.0.1:80/callback/?code=code&state=state")), \
                     patch("secrets.token_urlsafe", return_value="state"), \
                     patch.object(pipeline, "_generate_code_challenge", return_value="challenge"):
-                self.assertEqual(pipeline.generate_refresh_token(), "refresh")
+                self.assertEqual(
+                    pipeline.generate_refresh_token()["refresh_token"],
+                    "refresh")
 
     def test_tiktok_upload_passes_file_stream_to_http_client(self):
         pipeline = TikTokUploadPipeline(
