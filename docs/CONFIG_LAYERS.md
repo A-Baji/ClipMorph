@@ -715,9 +715,9 @@ root-level clip is still processed. If no override source is provided, every
 job uses only `app.yml:job_defaults`.
 
 Single-job and multi-job creation use the same `job` service and merge
-`app.yml:job_defaults` with each record. `job list`, `job
-get`, `job update`, `job delete`, and `job resume` operate on the resulting
-job manifests.
+`app.yml:job_defaults` with each record. `job list`, `job get`, `job
+update`, and `job delete` operate on the resulting job manifests; `job run` is
+the only command that executes a manifest's pipeline.
 
 There is no separate `batch.yml`. Multi-job creation is a grouping context;
 batch-form edits are copied into each selected job's override object before the
@@ -883,10 +883,12 @@ An invalid transition returns a conflict and does not change the manifest.
 Transcript and conversion checkpoints stop for review after producing their
 candidate outputs. The upload checkpoint stops for review after conversion is
 accepted and before any remote upload. Accepting a review completes that
-checkpoint and makes the next required checkpoint actionable. `job resume`
-continues execution only; it does not accept or bypass a review. It returns a
-review-required result when the next checkpoint is awaiting review. Overall
-`completed` means every required checkpoint for the current effective
+checkpoint and makes the next required checkpoint actionable. `job run` is the
+only command that continues execution; it does accept a review — at a gate it
+shows the checkpoint content and prompts `[y] accept, [e] edit, [q] stop`,
+`--yes` accepts every gate, and non-terminal input requires a terminal or
+`--yes`. Overall `completed` means every required checkpoint for the current
+effective
 configuration is completed; skipped optional stages do not block completion.
 
 ### Transcript Session And Effective Configuration
