@@ -241,33 +241,87 @@ class FacebookProbeTests(unittest.TestCase):
         pipeline.access_token = FAKE_TOKEN
         return pipeline
 
-    def test_ok_reports_page_and_reels_capability(self):
+    @staticmethod
+    def _response(status_code, payload):
+        response = MagicMock(status_code=status_code)
+        response.json.return_value = payload
+        response.text = ""
+        return response
+
+    def _get(self, get, page_payload, exchange_payload=None,
+             exchange_status=200, exchange_text=""):
+        """Queue the two GETs the check issues: identity read, exchange."""
+        page = self._response(200, page_payload)
+        exchange = self._response(exchange_status, exchange_payload or {})
+        exchange.text = exchange_text
+        if exchange_payload is None and exchange_status == 200:
+            # Exchange never reached: the identity read fails or mismatches.
+            get.return_value = page
+            return
+        get.side_effect = [page, exchange]
+
+    def test_ok_reports_capability_and_page_token_derivation(self):
         with patch.dict(os.environ, ALL_CREDENTIALS, clear=True), \
                 patch("clipmorph.upload_pipeline.platforms.facebook."
                       "FacebookUploadPipeline") as pipeline_cls, \
                 patch("clipmorph.auth_probe.requests.get") as get:
             self._pipeline(pipeline_cls)
-            get.return_value.status_code = 200
-            get.return_value.json.return_value = {
-                "id": "123456789", "tasks": ["CREATE_CONTENT", "MANAGE"]}
+            self._get(get, {"id": "123456789",
+                            "tasks": ["CREATE_CONTENT", "MANAGE"]},
+                      exchange_payload={"access_token": "derived"})
             result = probe_credentials(["facebook"])
 
         self.assertEqual(result["facebook"]["probe"], "ok")
         self.assertIn("reels capability granted", result["facebook"]["detail"])
+        self.assertIn("can derive a Page token",
+                      result["facebook"]["detail"])
+        self.assertNotIn(FAKE_TOKEN, result["facebook"]["detail"])
 
-    def test_ok_without_publish_task_notes_unconfirmed_capability(self):
+    def test_ok_without_publish_task_reports_unconfirmed_capability(self):
         with patch.dict(os.environ, ALL_CREDENTIALS, clear=True), \
                 patch("clipmorph.upload_pipeline.platforms.facebook."
                       "FacebookUploadPipeline") as pipeline_cls, \
                 patch("clipmorph.auth_probe.requests.get") as get:
             self._pipeline(pipeline_cls)
-            get.return_value.status_code = 200
-            get.return_value.json.return_value = {
-                "id": "123456789", "tasks": ["ANALYZE"]}
+            self._get(get, {"id": "123456789", "tasks": ["ANALYZE"]},
+                      exchange_payload={"access_token": "derived"})
             result = probe_credentials(["facebook"])
 
         self.assertEqual(result["facebook"]["probe"], "ok")
         self.assertIn("reels capability not confirmed",
+                      result["facebook"]["detail"])
+        self.assertIn("can derive a Page token", result["facebook"]["detail"])
+
+    def test_a_failed_exchange_is_not_reported_ok(self):
+        with patch.dict(os.environ, ALL_CREDENTIALS, clear=True), \
+                patch("clipmorph.upload_pipeline.platforms.facebook."
+                      "FacebookUploadPipeline") as pipeline_cls, \
+                patch("clipmorph.auth_probe.requests.get") as get:
+            self._pipeline(pipeline_cls)
+            self._get(get, {"id": "123456789",
+                            "tasks": ["CREATE_CONTENT", "MANAGE"]},
+                      exchange_status=403,
+                      exchange_text=f"access_token={FAKE_TOKEN} rejected")
+            result = probe_credentials(["facebook"])
+
+        self.assertEqual(result["facebook"]["probe"], "failed")
+        self.assertIn("cannot derive a Page token",
+                      result["facebook"]["detail"])
+        self.assertNotIn(FAKE_TOKEN, result["facebook"]["detail"])
+        self.assertIn("[REDACTED]", result["facebook"]["detail"])
+
+    def test_an_exchange_without_access_token_is_not_reported_ok(self):
+        with patch.dict(os.environ, ALL_CREDENTIALS, clear=True), \
+                patch("clipmorph.upload_pipeline.platforms.facebook."
+                      "FacebookUploadPipeline") as pipeline_cls, \
+                patch("clipmorph.auth_probe.requests.get") as get:
+            self._pipeline(pipeline_cls)
+            self._get(get, {"id": "123456789", "tasks": ["CREATE_CONTENT"]},
+                      exchange_payload={"id": "123456789"})
+            result = probe_credentials(["facebook"])
+
+        self.assertEqual(result["facebook"]["probe"], "failed")
+        self.assertIn("cannot derive a Page token",
                       result["facebook"]["detail"])
 
     def test_graph_failure_is_masked(self):
