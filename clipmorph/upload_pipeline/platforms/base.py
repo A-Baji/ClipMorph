@@ -46,6 +46,7 @@ class BaseUploadPipeline(ABC):
         self._progress_seen = 0
         self._percent = 0
         self.progress_callback = None
+        self._suppress_cli_progress = False
 
     def _retry_request(self,
                        func: Callable,
@@ -231,14 +232,26 @@ class BaseUploadPipeline(ABC):
                           description: str = "Starting upload"):
         """
         Context manager for progress bar to ensure proper cleanup.
-        
+
+        When a progress callback is installed (UI mode) or the orchestrator has
+        suppressed CLI progress (multi-platform CLI), no tqdm bar is created;
+        step updates still fire the callback and track the normalized percent.
+
         Args:
             total_progress: Total progress value (usually 100)
             description: Initial description for the progress bar
-            
+
         Yields:
-            tqdm progress bar object
+            tqdm progress bar object or None when the bar is suppressed
         """
+        if self.progress_callback is not None or self._suppress_cli_progress:
+            self.progress_bar = None
+            try:
+                yield None
+            finally:
+                self.progress_bar = None
+            return
+
         progress_bar = tqdm(
             total=total_progress,
             desc=f"[{self.platform_name}] {description}",
