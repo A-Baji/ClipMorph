@@ -14,7 +14,27 @@ from clipmorph.upload_pipeline.platforms.tiktok import TikTokUploadPipeline
 from clipmorph.upload_pipeline.platforms.twitter import TwitterUploadPipeline
 
 
-class AuthPersistenceTests(unittest.TestCase):
+class _IsolatedAuthFile:
+    """Keep any real persist in a test flow inside a throwaway auth file.
+
+    ``persist_auth_credentials`` falls back to the DEFAULT data directory when
+    no data dir or active auth path is known; a test that exercises the real
+    persist path with mock token values must therefore claim the active auth
+    path itself, or the suite overwrites the developer's real credentials with
+    mock strings (observed: tiktok refresh_token became the literal mock).
+    """
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        auth_path = Path(temp.name) / "auth.yaml"
+        auth_path.write_text("auth_schema_version: 2\n", encoding="utf-8")
+        patcher = patch.object(auth_module, "_active_auth_path", auth_path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+
+class AuthPersistenceTests(_IsolatedAuthFile, unittest.TestCase):
     def test_job_service_loads_workspace_auth_and_persists_to_it(self):
         """CLI-built services load auth.yaml once and stays bound to it.
 
@@ -64,7 +84,115 @@ class AuthPersistenceTests(unittest.TestCase):
                 finally:
                     service.close()
 
-class OAuthTests(unittest.TestCase):
+    def test_twitter_auth_uses_active_auth_path_when_data_dir_is_none(self):
+        """Twitter OAuth flows must persist tokens to the loaded workspace.
+
+        When JobService loads auth.yaml from a custom data dir, the active
+        auth path points there. Calling authorize_twitter/refresh_twitter
+        without an explicit data_dir must write back to that same file instead
+        of falling back to the default data directory (#226 follow-up).
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            auth_path = data_dir / "auth.yaml"
+            auth_path.write_text(
+                "auth_schema_version: 2\n"
+                "twitter:\n"
+                "    client_id: client\n"
+                "    client_secret: secret\n"
+                "    oauth2_access_token: \"\"\n"
+                "    oauth2_refresh_token: \"\"\n"
+                "    oauth2_expires_at: \"\"\n",
+                encoding="utf-8")
+
+            from clipmorph.twitter_auth import authorize_twitter
+
+            auth_module.load_auth_config(data_dir)
+
+            mock_server = MagicMock()
+            mock_server.callback = {
+                "state": ["state"],
+                "code": ["code"],
+            }
+            mock_server.server_close = MagicMock()
+
+            with patch.dict(os.environ), \
+                    patch("clipmorph.twitter_auth.load_auth_config") as load, \
+                    patch("clipmorph.twitter_auth.persist_auth_credentials",
+                          return_value=auth_path) as persist, \
+                    patch("clipmorph.twitter_auth.HTTPServer",
+                          return_value=mock_server) as server, \
+                    patch("clipmorph.twitter_auth.webbrowser.open"), \
+                    patch("clipmorph.twitter_auth.secrets.token_urlsafe",
+                          return_value="state"), \
+                    patch("clipmorph.twitter_auth.requests.post") as post:
+                load.return_value = {
+                    "twitter": {
+                        "client_id": "client",
+                        "client_secret": "secret",
+                    }
+                }
+                post.return_value = SimpleNamespace(
+                    ok=True,
+                    json=lambda: {
+                        "access_token": "access",
+                        "refresh_token": "rotated",
+                        "expires_in": 7200,
+                    },
+                    raise_for_status=lambda: None)
+
+                authorize_twitter(None)
+
+                server.assert_called_once()
+                load.assert_called_once_with(data_dir)
+                persist.assert_called_once()
+                self.assertEqual(persist.call_args.args[2], data_dir)
+
+    def test_twitter_refresh_uses_active_auth_path_when_data_dir_is_none(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            auth_path = data_dir / "auth.yaml"
+            auth_path.write_text(
+                "auth_schema_version: 2\n"
+                "twitter:\n"
+                "    client_id: client\n"
+                "    client_secret: secret\n"
+                "    oauth2_refresh_token: refresh\n",
+                encoding="utf-8")
+
+            from clipmorph.twitter_auth import refresh_twitter_access_token
+
+            auth_module.load_auth_config(data_dir)
+
+            with patch.dict(os.environ), \
+                    patch("clipmorph.twitter_auth.load_auth_config") as load, \
+                    patch("clipmorph.twitter_auth.persist_auth_credentials",
+                          return_value=auth_path) as persist, \
+                    patch("clipmorph.twitter_auth.requests.post") as post:
+                load.return_value = {
+                    "twitter": {
+                        "client_id": "client",
+                        "client_secret": "secret",
+                        "oauth2_refresh_token": "refresh",
+                    }
+                }
+                post.return_value = SimpleNamespace(
+                    ok=True,
+                    json=lambda: {
+                        "access_token": "access",
+                        "refresh_token": "rotated",
+                        "expires_in": 7200,
+                    },
+                    raise_for_status=lambda: None)
+
+                refresh_twitter_access_token(None)
+
+                load.assert_called_with(data_dir)
+                persist.assert_called_once()
+                self.assertEqual(persist.call_args.args[2], data_dir)
+
+
+class OAuthTests(_IsolatedAuthFile, unittest.TestCase):
     def test_tiktok_video_init_includes_brand_content_toggle(self):
         pipeline = TikTokUploadPipeline(
             tiktok_client_key="client",

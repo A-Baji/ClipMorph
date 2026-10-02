@@ -512,8 +512,9 @@ Fields: `client_id`, `client_secret`, `oauth2_access_token`,
 
 These are **OAuth 2.0** credentials only, consumed by
 `clipmorph/twitter_auth.py` and
-`clipmorph/upload_pipeline/platforms/twitter.py`. X API v1.1 key/secret/bearer
-fields are not part of the schema and are not read anywhere in the codebase.
+`clipmorph/upload_pipeline/platforms/twitter.py`. X API v1.1
+key/secret/bearer fields are not part of the auth.yaml schema and are not
+read anywhere.
 
 Requested scopes: `tweet.read`, `tweet.write`, `users.read`, `media.write`,
 `offline.access`
