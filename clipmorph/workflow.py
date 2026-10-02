@@ -287,6 +287,18 @@ def execute_job(manifest: JobManifest, token: CancellationToken,
         _transition(manifest, "upload", "awaiting_review", jobs_root)
         manifest.set_step("upload", "awaiting_review", jobs_root,
                           artifact_id=manifest.current_artifact_id)
+        if not _effective_no_confirm(configuration, "upload"):
+            return
+        # The gate is auto-accepted under no_confirmed: submit the attempts
+        # immediately through a borrowed service and wait for them to settle,
+        # so the job's landed status is truthful when this runner returns. A
+        # configured future `publish_at` still defers to its schedule instead
+        # of uploading now.
+        upload_service = JobService(data_dir, reconcile=False)
+        try:
+            upload_service.submit_upload(manifest.job_id)
+        finally:
+            upload_service.close()
         return
     if upload_checkpoint["status"] == "awaiting_review":
         return

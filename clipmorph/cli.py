@@ -21,7 +21,7 @@ import json
 from pathlib import Path
 import shutil
 import sys
-from typing import Annotated, Any, Literal, Optional
+from typing import Annotated, Any, Optional
 import uuid
 import webbrowser
 
@@ -53,7 +53,7 @@ if hasattr(typer_click.exceptions, "Exit"):
 if hasattr(typer_click.exceptions, "Abort"):
     _ABORT_ERRORS += (typer_click.exceptions.Abort,)
 
-from clipmorph.job import default_data_dir
+from clipmorph.job import JobManifest, default_data_dir
 from clipmorph.platforms import build_platform_default_config
 from clipmorph.platforms import SUPPORTED_PLATFORMS
 
@@ -353,21 +353,90 @@ def _layout_rows(layouts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     } for record in layouts]
 
 
-def _print_creation_result(result: dict[str, Any], json_output: bool) -> None:
-    """Render a fan-out result as one outcome row per source plus counts."""
+def _refresh_creation_outcomes(result: dict[str, Any],
+                               data_dir: str | Path
+                               ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    """Refresh each created row's status with the pipeline status reached.
+
+    The command closes its service before printing, and ``close()`` waits on
+    the queued runners, so every created job is at a checkpoint gate or a
+    terminal state by then; reporting only the creation outcome would hide a
+    synchronous failure behind "Job created". The summary counts keep
+    describing creation; these rows describe what the job reached. Returns the
+    enriched result plus each created job's manifest record for the table
+    renderer (kept out of the result so the ``--json`` payload is untouched).
+    """
+    jobs_dir = Path(data_dir) / "jobs"
+    records_by_job: dict[str, dict[str, Any]] = {}
+    for record in result.get("created") or []:
+        job_id = record.get("job_id")
+        if not job_id:
+            continue
+        try:
+            manifest = JobManifest.load(job_id, jobs_dir)
+        except (OSError, TypeError, ValueError):
+            continue
+        records_by_job[job_id] = asdict(manifest)
+        status = manifest.status
+        checkpoint = manifest.current_checkpoint
+        if status in {"created", "queued"}:
+            # Nothing ran for this job (a creation without `--yes`); the row
+            # keeps the creation outcome.
+            continue
+        if status == "failed":
+            checkpoint_error = (
+                manifest.checkpoints.get(checkpoint, {}).get("error")
+                if checkpoint else None)
+            message = (
+                (checkpoint_error or {}).get("message")
+                or next((error.get("message")
+                         for error in reversed(manifest.errors)
+                         if error.get("message")), "job failed"))
+        elif status == "awaiting_review":
+            message = f"awaiting review at {checkpoint}"
+        elif status == "completed":
+            message = "pipeline completed"
+        else:
+            message = f"pipeline {status}"
+        record["status"] = status
+        record["message"] = message
+    return result, records_by_job
+
+
+def _print_creation_result(result: dict[str, Any], json_output: bool,
+                           records_by_job: dict[str, dict[str, Any]] | None = None
+                           ) -> None:
+    """Render a fan-out result: created rows like `job list`, then details."""
     if json_output:
         _print_json(result)
         return
-    outcomes = [*(result.get("created") or []), *(result.get("skipped") or []),
-                *(result.get("failed") or [])]
-    _print_table("Sources", [{
-        "source": item.get("source"),
-        "status": _status(item.get("status")),
-        "code": item.get("code"),
-        "message": item.get("message"),
-        "job_id": item.get("job_id"),
-    } for item in outcomes], ["source", "status", "code", "message", "job_id"],
-        nowrap=("job_id",))
+    records_by_job = records_by_job or {}
+    created = [item for item in result.get("created") or []
+               if records_by_job.get(item.get("job_id", ""))]
+    if created:
+        _print_table("Sources",
+                     _job_rows([records_by_job[item["job_id"]]
+                                for item in created]),
+                     ["job_id", "source", "title", "status", "checkpoint"],
+                     nowrap=("job_id",))
+    # Dry-run validations have no manifest and keep their detail columns.
+    unrendered = [(item) for item in (result.get("created") or [])
+                  if not records_by_job.get(item.get("job_id", ""))]
+    if unrendered:
+        _print_table("Sources", [{
+            "source": item.get("source"),
+            "status": _status(item.get("status")),
+            "code": item.get("code"),
+            "message": item.get("message"),
+        } for item in unrendered], ["source", "status", "code", "message"])
+    outcomes = [*(result.get("skipped") or []), *(result.get("failed") or [])]
+    if outcomes:
+        _print_table("Skipped or failed", [{
+            "source": item.get("source"),
+            "status": _status(item.get("status")),
+            "code": item.get("code"),
+            "message": item.get("message"),
+        } for item in outcomes], ["source", "status", "code", "message"])
     summary = result.get("summary") or {}
     _print_summary([f"created: {summary.get('created', 0)}",
                     f"skipped: {summary.get('skipped', 0)}",
@@ -705,7 +774,9 @@ def job_create_command(
             "--dry-run", help="Validate sources and configuration without "
             "writing jobs or manifests.")] = False,
         yes: Annotated[bool, typer.Option(
-            "--yes", help="Accept confirmations; job creation never prompts.")] = False,
+            "--yes", help="Same as `general.no_confirm = true` on every "
+            "created job: run the pipeline and auto-accept each review gate "
+            "it reaches, reporting the final status.")] = False,
         json_output: JsonOption = False,
         data_dir: DataDirOption = None,
         app_config: AppConfigOption = None) -> None:
@@ -728,16 +799,23 @@ def job_create_command(
         else:
             source_names = [source.name]
         records = load_job_records(job_configs) if job_configs else []
+        # A plain creation only creates the resource. `--yes` is equivalent to
+        # `general.no_confirm = true` on every created job: the pipeline runs
+        # during the command and auto-accepts each review gate it reaches
+        # (uploads always stop at their own review gate).
         runner = None
-        if not dry_run:
+        if yes and not dry_run:
             from clipmorph.workflow import execute_job
             runner = lambda job, token: execute_job(
                 job, token, service.jobs_dir, service.app_config_path)
         result = service.create_jobs(
             source_names=source_names, job_configs=records,
-            config_dir=config_dir, runner=runner, dry_run=dry_run)
-    _print_creation_result(result, json_output)
-    if result["failed"]:
+            config_dir=config_dir, runner=runner, dry_run=dry_run,
+            confirmed=yes and not dry_run)
+    result, records_by_job = _refresh_creation_outcomes(result, selected_data_dir)
+    _print_creation_result(result, json_output, records_by_job)
+    if result["failed"] or any(record["status"] == "failed"
+                               for record in result["created"] or []):
         raise typer.Exit(1)
 
 
@@ -871,80 +949,167 @@ def job_cancel_command(
     _print_fields(f"Job {job_id}", _job_fields(record))
 
 
-@job_app.command("resume")
-def job_resume_command(
+# Prompt seams keep the interactive review testable without stdio plumbing.
+def _prompt_choice(text: str) -> str:
+    return typer.prompt(text).strip().lower()
+
+
+def _prompt_path(text: str) -> str:
+    return typer.prompt(text).strip()
+
+
+def _accept_gate(service, manifest: JobManifest, gate: str) -> None:
+    """Accept one review gate and continue the pipeline past it."""
+    from clipmorph.service import JobService
+
+    if gate == "upload":
+        # The gate decision submits the attempts; a borrowed service runs and
+        # waits for them so the run loop sees a settled checkpoint.
+        upload_service = JobService(service.data_dir, reconcile=False)
+        try:
+            upload_service.submit_upload(manifest.job_id)
+        finally:
+            upload_service.close()
+        return
+    checkpoint = manifest.checkpoints[gate]
+    service.accept_checkpoint(
+        manifest.job_id, gate, checkpoint["revision"])
+
+
+def _apply_edits(service, manifest: JobManifest, gate: str,
+                 edit_values: dict[str, Any]) -> None:
+    """Apply a structured edit object to one checkpoint's current revision."""
+    job_id = manifest.job_id
+    if gate == "transcript":
+        service.save_transcript_session(
+            job_id, edit_values,
+            (manifest.active_transcript or {}).get("revision", 0),
+            manifest.checkpoints["transcript"]["revision"], False)
+    elif gate == "upload":
+        service.update_upload_draft(
+            job_id, edit_values,
+            manifest.checkpoints["upload"]["revision"], False)
+    else:
+        service.update_job_configuration(
+            job_id, edit_values.get("patch", edit_values),
+            manifest.current_configuration_hash, False)
+
+
+def _print_gate_summary(manifest: JobManifest, gate: str,
+                        jobs_dir: Path) -> None:
+    """Show what the operator is about to accept."""
+    _print_fields(f"Job {manifest.job_id}", _job_fields(asdict(manifest)))
+    if gate == "transcript" and manifest.active_transcript:
+        from clipmorph.transcript import load_edit_session
+        session = load_edit_session(
+            Path(jobs_dir) / manifest.job_id / manifest.active_transcript["path"])
+        segments = [{
+            "start": segment.get("start"),
+            "end": segment.get("end"),
+            "text": segment.get("text"),
+        } for segment in session["segments"]]
+        _print_table("Transcript segments", segments,
+                     ["start", "end", "text"])
+    elif gate == "conversion":
+        groups = manifest.checkpoints["conversion"].get("groups") or {}
+        rows = [{
+            "id": group_id,
+            "platforms": " ".join(group.get("platforms") or []),
+            "status": group.get("status"),
+            "artifact": group.get("current_artifact_id") or "-",
+        } for group_id, group in groups.items()]
+        _print_table("Rendered groups", rows,
+                     ["id", "platforms", "status", "artifact"])
+    else:
+        content = manifest.configuration.get("upload", {}).get("content", {})
+        _print_fields("Upload draft", [
+            ("Title", content.get("title", "")),
+            ("Description", content.get("description", "")),
+            ("Tags", ", ".join(content.get("tags") or []))])
+
+
+def _interactive_review(service, manifest: JobManifest, gate: str,
+                        jobs_dir: Path) -> bool:
+    """Show the gate and prompt a decision. True when the gate is accepted."""
+    while True:
+        _print_gate_summary(manifest, gate, jobs_dir)
+        choice = _prompt_choice(
+            f"Accept the {gate} gate? [y] accept, [e] edit, [q] stop")
+        if choice in {"y", "yes"}:
+            _accept_gate(service, manifest, gate)
+            return True
+        if choice in {"n", "no", "q", "quit"}:
+            return False
+        if choice in {"e", "edit"}:
+            edits = _prompt_path("Path to a YAML/JSON edit object")
+            if not edits:
+                continue
+            edit_values = _read_structured_file(Path(edits))
+            _apply_edits(service, manifest, gate, edit_values)
+            manifest = service.get_job(manifest.job_id)
+            continue
+
+
+@job_app.command("run")
+def job_run_command(
         ctx: typer.Context,
         job_id: Annotated[str, typer.Argument(help="Job ID.")],
+        yes: Annotated[bool, typer.Option(
+            "--yes", help="Accept every review gate without prompting; the "
+            "upload gate submits its attempts immediately.")] = False,
+        json_output: JsonOption = False,
         data_dir: DataDirOption = None,
         app_config: AppConfigOption = None) -> None:
-    """Resume the next executable checkpoint of a job."""
+    """Run the job, reviewing each acceptance gate interactively."""
     from clipmorph.service import JobService
     from clipmorph.workflow import execute_job
 
     selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    jobs_dir = Path(selected_data_dir) / "jobs"
     with closing(JobService(selected_data_dir,
-                           app_config_path=selected_config)) as service:
-        service.resume_job(job_id, lambda job, token: execute_job(
-            job, token, service.jobs_dir, service.app_config_path))
-
-
-@job_app.command("review")
-def job_review_command(
-        ctx: typer.Context,
-        job_id: Annotated[str, typer.Argument(help="Job ID.")],
-        checkpoint: Annotated[Literal["transcript", "conversion", "upload"],
-                              typer.Argument(help="Checkpoint to review.")],
-        edits: Annotated[Optional[Path], typer.Option(
-            "--edits", help="YAML/JSON edit object for the checkpoint.")] = None,
-        accept: Annotated[bool, typer.Option(
-            "--accept", help="Accept the current checkpoint revision.")] = False,
-        reopen: Annotated[bool, typer.Option(
-            "--reopen", help="Reopen the checkpoint for the changed inputs.")] = False,
-        group: Annotated[Optional[str], typer.Option(
-            "--group", help="Conversion group ID to accept; omit to accept all groups.")] = None,
-        json_output: JsonOption = False,
-        data_dir: DataDirOption = None,
-        app_config: AppConfigOption = None) -> None:
-    """Apply checkpoint edits and optionally accept the review gate."""
-    from clipmorph.service import JobService
-
-    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
-    with closing(JobService(selected_data_dir,
-                           app_config_path=selected_config)) as service:
-        manifest = service.get_job(job_id)
-        if edits:
-            edit_values = _read_structured_file(edits)
-            if checkpoint == "transcript":
-                active_revision = (manifest.active_transcript or {}).get("revision", 0)
-                service.save_transcript_session(
-                    job_id, edit_values, active_revision,
-                    manifest.checkpoints["transcript"]["revision"], reopen)
-            elif checkpoint == "upload":
-                service.update_upload_draft(
-                    job_id, edit_values,
-                    manifest.checkpoints["upload"]["revision"], reopen)
-            elif checkpoint == "conversion":
-                service.update_job_configuration(
-                    job_id, edit_values.get("patch", edit_values),
-                    manifest.current_configuration_hash, reopen)
+                            app_config_path=selected_config)) as service:
+        runner = lambda job, token: execute_job(
+            job, token, service.jobs_dir, service.app_config_path)
+        fingerprint = None
+        while True:
             manifest = service.get_job(job_id)
-        if accept:
-            checkpoint_record = manifest.checkpoints[checkpoint]
-            if group is not None:
-                groups = checkpoint_record.get("groups", {})
-                if group not in groups:
-                    raise ValueError(
-                        f"unknown {checkpoint} checkpoint group: {group}")
-                revision = groups[group]["revision"]
-            else:
-                revision = checkpoint_record["revision"]
-            manifest = service.accept_checkpoint(
-                job_id, checkpoint, revision, group_id=group)
-    record = asdict(manifest)
+            landed = (
+                manifest.status,
+                tuple((stage, record["status"], record["revision"])
+                      for stage, record in manifest.checkpoints.items()),
+            )
+            if landed == fingerprint:
+                # A full round made no progress; stop instead of spinning.
+                break
+            fingerprint = landed
+            if manifest.status == "awaiting_review":
+                gate = next(
+                    (stage for stage in ("transcript", "conversion", "upload")
+                     if manifest.checkpoints[stage]["status"] == "awaiting_review"),
+                    None)
+                if gate is None:
+                    break
+                if yes:
+                    _accept_gate(service, manifest, gate)
+                    continue
+                if not sys.stdin.isatty():
+                    raise ValueError("the review gate needs a terminal or --yes")
+                if not _interactive_review(service, manifest, gate, jobs_dir):
+                    break
+                continue
+            if manifest.status in {"created", "queued", "running"}:
+                service.resume_job(job_id, runner)
+                service.wait_for_job(job_id)
+                continue
+            break
+    manifest = JobManifest.load(job_id, jobs_dir)
     if json_output:
-        _print_json(record)
+        _print_json(asdict(manifest))
         return
-    _print_fields(f"Job {job_id}", _job_fields(record))
+    _print_fields(f"Job {job_id}", _job_fields(asdict(manifest)))
+    if manifest.status == "failed":
+        raise typer.Exit(1)
+
 
 
 @job_app.command("render")

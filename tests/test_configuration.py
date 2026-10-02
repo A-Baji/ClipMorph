@@ -898,6 +898,35 @@ class JobServiceConfigurationTests(unittest.TestCase):
             finally:
                 service.close()
 
+    def test_created_job_without_a_runner_is_resumable(self):
+        """A plain creation (no `--yes`) must remain actionable.
+
+        The job stays `created`; `job resume` accepts that status and runs the
+        pipeline from the first checkpoint.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            (data_dir / "sources").mkdir()
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"video")
+            service = JobService(data_dir)
+
+            def pause_for_review(job, _token):
+                job.transition_checkpoint("transcript", "running", 0,
+                                          service.jobs_dir)
+                job.transition_checkpoint("transcript", "awaiting_review", 1,
+                                          service.jobs_dir)
+
+            try:
+                created = service.create_job(source.name, {})
+                self.assertEqual(created.status, "created")
+                resumed = service.resume_job(created.job_id, pause_for_review)
+                service._futures[resumed.job_id].result(timeout=2)
+                saved = service.get_job(created.job_id)
+                self.assertEqual(saved.status, "awaiting_review")
+            finally:
+                service.close()
+
     def test_transcript_stage_survives_its_own_session_service(self):
         """A live job must survive the service construction its worker makes.
 
@@ -952,6 +981,7 @@ class JobServiceConfigurationTests(unittest.TestCase):
                 self.assertEqual(saved.active_transcript["revision"], 1)
             finally:
                 service.close()
+
     def test_runner_failures_are_structured_safe_and_checkpointed(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
@@ -1546,6 +1576,34 @@ class JobServiceRevisionTests(unittest.TestCase):
                 self.assertEqual(len(result["created"]), 2)
                 self.assertEqual(len(result["skipped"]), 1)
                 self.assertEqual(result["skipped"][0]["code"], "duplicate_content")
+            finally:
+                service.close()
+
+    def test_creation_overrides_beat_sidecars_and_job_records(self):
+        """`--yes` (`general.no_confirm = true`) is an explicit CLI override.
+
+        It must inject the flag into every created job's effective
+        configuration and win over a sidecar and a job record that both set
+        `no_confirm: false`.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            source_dir = data_dir / "sources"
+            source_dir.mkdir()
+            (source_dir / "one.mp4").write_bytes(b"one")
+            service = JobService(data_dir)
+            sidecar = source_dir / "one.yml"
+            sidecar.write_text(yaml.safe_dump({
+                "general": {"source": "one.mp4", "no_confirm": False},
+            }), encoding="utf-8")
+            try:
+                result = service.create_jobs(
+                    job_configs=[{"general": {"source": "one.mp4",
+                                              "no_confirm": False}}],
+                    confirmed=True)
+
+                manifest = service.get_job(result["created"][0]["job_id"])
+                self.assertTrue(manifest.configuration["general"]["no_confirm"])
             finally:
                 service.close()
 

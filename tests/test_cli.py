@@ -53,6 +53,46 @@ def _normalize_box(text):
     return "".join(_BOX_TO_ASCII.get(char, char) for char in text)
 
 
+def _seed_review_at_upload(data_dir: Path) -> tuple[JobManifest, Path]:
+    """Seed a job whose real pipeline position is the upload review gate.
+
+    Earlier stages reach `completed` through their legal transitions and the
+    source artifact is registered, matching what a real pipeline lands with.
+    """
+    source = data_dir / "sources" / "clip.mp4"
+    manifest = seed_job(data_dir)
+    service = JobService(data_dir)
+    try:
+        record = service.get_job(manifest.job_id)
+        record.record_artifact("source", source, service.jobs_dir)
+        record = service.get_job(manifest.job_id)
+        for stage in ("transcript", "conversion"):
+            checkpoint = record.checkpoints[stage]
+            if checkpoint["status"] == "skipped":
+                record.transition_checkpoint(
+                    stage, "pending", checkpoint["revision"], service.jobs_dir)
+                record = service.get_job(manifest.job_id)
+            for status in ("running", "completed"):
+                revision = record.checkpoints[stage]["revision"]
+                record.transition_checkpoint(
+                    stage, status, revision, service.jobs_dir)
+                record = service.get_job(manifest.job_id)
+        revision = record.checkpoints["upload"]["revision"]
+        record.transition_checkpoint(
+            "upload", "awaiting_review", revision, service.jobs_dir)
+    finally:
+        service.close()
+    return JobManifest.load(manifest.job_id, data_dir / "jobs"), source
+
+
+def _run_success(platforms_arg, _artifact_path, _title, *_args, **_kwargs):
+    """A mocked upload execution returning success for every platform."""
+    stamp = "2026-10-01T00:00:00+00:00"
+    return {platform: {"success": True, "result": f"{platform} ok",
+                       "started_at": stamp, "completed_at": stamp}
+            for platform in platforms_arg}
+
+
 def seed_job(data_dir, source_name="clip.mp4", configuration=None):
     """Create one job directly through the service, without the workflow."""
     source_dir = data_dir / "sources"
@@ -158,16 +198,6 @@ class CliExitCodeTests(unittest.TestCase):
             (data_dir / "sources").mkdir(parents=True)
 
             result, _ = invoke(["--data-dir", str(data_dir), "job", "list", "--nope"])
-
-            self.assertEqual(result, 2)
-
-    def test_invalid_checkpoint_choice_is_a_usage_error(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            data_dir = Path(temp_dir)
-            manifest = seed_job(data_dir)
-
-            result, _ = invoke(["--data-dir", str(data_dir), "job", "review",
-                                manifest.job_id, "nope"])
 
             self.assertEqual(result, 2)
 
@@ -544,15 +574,14 @@ class JobCommandPersistenceTests(unittest.TestCase):
             source = source_dir / "input.mp4"
             source.write_bytes(b"video")
 
-            with patch("clipmorph.workflow.execute_job"):
-                result, _ = invoke(["--data-dir", str(data_dir), "job", "create",
-                                    str(source)])
+            result, _ = invoke(["--data-dir", str(data_dir), "job", "create",
+                                str(source)])
 
             self.assertEqual(result, 0)
             manifests = list((data_dir / "jobs").glob("*/manifest.json"))
             self.assertEqual(len(manifests), 1)
             loaded = JobManifest.load(manifests[0].parent.name, str(data_dir / "jobs"))
-            self.assertEqual(loaded.status, "queued")
+            self.assertEqual(loaded.status, "created")
             self.assertEqual(loaded.configuration["general"]["source"], "input.mp4")
 
 
@@ -584,10 +613,32 @@ class JobCommandTests(unittest.TestCase):
             code, result = invoke_json(["--data-dir", str(data_dir), "job",
                                         "create", str(source_dir)])
 
+            # A plain creation only creates the resource: no processing ran,
+            # so the rows carry the creation outcome.
             self.assertEqual(code, 0)
             self.assertEqual(result["summary"]["created"], 1)
             self.assertEqual(result["summary"]["skipped"], 1)
             self.assertEqual(result["skipped"][0]["code"], "unsupported_extension")
+            self.assertEqual(result["created"][0]["status"], "created")
+            self.assertEqual(result["created"][0]["message"], "Job created")
+
+    def test_job_create_yes_reports_the_reached_pipeline_status(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            source_dir = data_dir / "sources"
+            source_dir.mkdir(parents=True)
+            (source_dir / "clip.mp4").write_bytes(b"video")
+
+            # `--yes` processes the created job; the command waits for it and
+            # reports the final status the pipeline reached.
+            code, output = invoke(["--data-dir", str(data_dir), "job", "create",
+                                   str(source_dir), "--yes"])
+
+            self.assertEqual(code, 1)
+            self.assertNotIn("Job created", output)
+            self.assertTrue(
+                next(line for line in output.splitlines()
+                     if "clip.mp4" in line and "failed" in line))
 
     def test_job_create_fails_with_status_one_when_a_record_is_invalid(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -612,31 +663,36 @@ class JobCommandTests(unittest.TestCase):
             self.assertIn("invalid_record", output)
             self.assertIn("failed: 1", output)
 
-    def test_upload_review_edits_update_the_pending_draft(self):
+    def test_run_edit_prompt_updates_the_pending_draft(self):
+        """The interactive gate's edit path applies the upload draft."""
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
-            manifest = seed_job(data_dir)
-            service = JobService(data_dir)
-            try:
-                revision = manifest.checkpoints["upload"]["revision"]
-                manifest.transition_checkpoint("upload", "awaiting_review",
-                                               revision, service.jobs_dir)
-            finally:
-                service.close()
+            manifest, _source = _seed_review_at_upload(data_dir)
             edit_path = Path(temp_dir) / "upload.yml"
             edit_path.write_text(
                 "content:\n  title: Reviewed title\n", encoding="utf-8")
 
-            result, _ = invoke(["--data-dir", str(data_dir), "job", "review",
-                                manifest.job_id, "upload", "--edits", str(edit_path)])
+            # Edit at the first prompt, accept at the second; the gate's
+            # acceptance submits the attempts.
+            with patch("clipmorph.cli.sys.stdin.isatty", return_value=True), \
+                    patch("clipmorph.cli._prompt_choice",
+                          side_effect=["e", "y"]), \
+                    patch("clipmorph.cli._prompt_path",
+                          return_value=str(edit_path)), \
+                    patch("clipmorph.upload_attempts.execute_upload_pipeline",
+                          side_effect=_run_success):
+                result, _ = invoke(["--data-dir", str(data_dir), "job", "run",
+                                    manifest.job_id])
 
             self.assertEqual(result, 0)
             saved = JobManifest.load(manifest.job_id, data_dir / "jobs")
             self.assertEqual(
                 saved.configuration["upload"]["content"]["title"],
                 "Reviewed title")
+            self.assertEqual(saved.status, "completed")
 
-    def test_job_review_group_flag_is_accepted(self):
+    def test_run_accepts_every_conversion_group(self):
+        """Gate acceptance by omission addresses all awaiting groups."""
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
             # Two conversion groups: YouTube renders, the rest skip, so
@@ -644,31 +700,59 @@ class JobCommandTests(unittest.TestCase):
             manifest = seed_job(data_dir, configuration={
                 "conversion": {"skip": True},
                 "platforms": {"youtube": {"conversion": {"skip": False}}}})
+            source = data_dir / "sources" / "clip.mp4"
             service = JobService(data_dir)
             try:
+                service_manifest = service.get_job(manifest.job_id)
+                service_manifest.record_artifact(
+                    "source", source, service.jobs_dir)
+                # Bring the transcript to `completed` through its legal
+                # transitions so the seeded state matches a real pipeline
+                # (an earlier stage cannot sit born-pending behind a later
+                # one awaiting review). `conversion.skip` born-skips the
+                # transcript, so re-arm it first.
+                revision = service_manifest.checkpoints["transcript"]["revision"]
+                if service_manifest.checkpoints["transcript"]["status"] == "skipped":
+                    service_manifest.transition_checkpoint(
+                        "transcript", "pending", revision, service.jobs_dir)
+                    service_manifest = service.get_job(manifest.job_id)
+                    revision = service_manifest.checkpoints[
+                        "transcript"]["revision"]
+                service_manifest.transition_checkpoint(
+                    "transcript", "running", revision, service.jobs_dir)
+                service_manifest = service.get_job(manifest.job_id)
+                revision = service_manifest.checkpoints["transcript"]["revision"]
+                service_manifest.transition_checkpoint(
+                    "transcript", "completed", revision, service.jobs_dir)
                 group_id, group = next(
                     (gid, record) for gid, record
                     in service.get_job(
                         manifest.job_id).checkpoints[
                             "conversion"]["groups"].items()
                     if record["status"] == "pending")
-                manifest = service.get_job(manifest.job_id)
-                manifest.transition_checkpoint(
+                service_manifest = service.get_job(manifest.job_id)
+                service_manifest.transition_checkpoint(
                     "conversion", "running", group["revision"],
                     service.jobs_dir, group_id=group_id)
-                manifest = service.get_job(manifest.job_id)
-                group = manifest.checkpoints["conversion"]["groups"][group_id]
-                manifest.transition_checkpoint(
+                service_manifest = service.get_job(manifest.job_id)
+                group = service_manifest.checkpoints[
+                    "conversion"]["groups"][group_id]
+                service_manifest.transition_checkpoint(
                     "conversion", "awaiting_review", group["revision"],
                     service.jobs_dir, group_id=group_id)
             finally:
                 service.close()
             manifest = JobManifest.load(manifest.job_id, data_dir / "jobs")
 
-            result, _ = invoke([
-                "--data-dir", str(data_dir), "job", "review",
-                manifest.job_id, "conversion", "--accept",
-                "--group", group_id])
+            # Accepting the conversion gate completes the aggregate and moves
+            # the upload gate to awaiting_review; the run prompts and submits.
+            with patch("clipmorph.cli.sys.stdin.isatty", return_value=True), \
+                    patch("clipmorph.cli._prompt_choice", return_value="y"), \
+                    patch("clipmorph.upload_attempts.execute_upload_pipeline",
+                          side_effect=_run_success):
+                result, _ = invoke([
+                    "--data-dir", str(data_dir), "job", "run",
+                    manifest.job_id])
 
             self.assertEqual(result, 0)
             saved = JobManifest.load(manifest.job_id, data_dir / "jobs")

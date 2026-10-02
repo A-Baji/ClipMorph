@@ -268,10 +268,19 @@ class JobManifest:
         return atomic_write_text(path, json.dumps(asdict(self), indent=2))
 
     def _next_checkpoint(self) -> str | None:
-        for stage in ("transcript", "conversion", "upload"):
-            if self.checkpoints.get(stage, {}).get("status") in {
-                    "pending", "running", "awaiting_review", "failed",
-                    "cancelled", "stale", "partial_failure"}:
+        stages = ("transcript", "conversion", "upload")
+        for index, stage in enumerate(stages):
+            status = self.checkpoints.get(stage, {}).get("status")
+            if status == "pending" and any(
+                    self.checkpoints.get(later, {}).get("status") != "pending"
+                    for later in stages[index + 1:]):
+                # A later stage already advanced past its birth; this
+                # born-``pending`` stage is a phantom, not actionable work —
+                # the pipeline position never rewinds behind an advanced
+                # stage.
+                continue
+            if status in {"pending", "running", "awaiting_review", "failed",
+                          "cancelled", "stale", "partial_failure"}:
                 return stage
         return None
 

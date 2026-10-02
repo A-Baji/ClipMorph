@@ -36,8 +36,8 @@ be an immediate file under `source_dir`.
 - `clipmorph auth status|set PLATFORM|twitter` — credential status, prompt-based updates, and the X OAuth flow.
 - `clipmorph layout list|create CONFIG|get ID|delete ID` — manage the global layout registry.
 - `clipmorph job create SOURCE [--job-configs FILE] [--config-dir DIR] [--dry-run]` — create jobs from one source file or fan out over `source_dir`; per-source records are JSONL/YAML job objects.
-- `clipmorph job list|get ID|update ID --patch FILE [--reopen]|delete ID --yes|resume ID|cancel ID --yes` — inspect and manage the job lifecycle.
-- `clipmorph job review ID {transcript|conversion|upload} [--edits FILE] [--accept]` — checkpoint review gates.
+- `clipmorph job list|get ID|update ID --patch FILE [--reopen]|delete ID --yes|cancel ID --yes` — inspect and manage the job lifecycle.
+- `clipmorph job run ID [--yes] [--json]` — the only pipeline-running command: processes checkpoints, and at each review gate shows the checkpoint content and prompts an accept/edit/stop decision interactively (an edit object is a YAML/JSON file path for the checkpoint; a conversion gate accept addresses every awaiting group). `--yes` accepts every gate without prompting and submits the upload attempts immediately; a future `schedule.publish_at` still defers to its timer. Exits `1` when the run failed.
 - `clipmorph job render ID` — create a new immutable artifact revision from the accepted composition.
 - `clipmorph job upload ID [--platform NAME]`, `clipmorph job upload retry ID PLATFORM [--attempt-id ID]` — submit the accepted draft or retry a failed attempt. A draft carrying `upload.schedule.publish_at` in the future defers every selected platform to that time; a retry always uploads immediately.
 - `clipmorph job artifacts list|preview|download|rename|delete|prune ...` — manage registered artifact revisions; `prune` applies the `app.yml:retention` policy.
@@ -45,7 +45,7 @@ be an immediate file under `source_dir`.
 A directory `job create` scans the root of `app.yml:source_dir` only; unsupported or missing sources are skipped and reported per source, while valid jobs still proceed (no group manifest is persisted). The web API exposes the same lifecycle at `/api/v1/`; see `docs/CLI_WEB_PARITY.md` for the contract.
 
 Commands that report records — `auth status`, `job create`, `job list`, `job get`,
-`job update`, `job cancel`, `job review`, `job upload`, `job artifacts list`,
+`job run`, `job update`, `job cancel`, `job upload`, `job artifacts list`,
 `job artifacts prune`, and `layout list|create|get` — render a formatted table
 for humans and print the machine-readable JSON payload when `--json` is passed.
 Colour is dropped automatically when output is redirected. `--data-dir` and
