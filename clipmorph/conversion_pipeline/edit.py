@@ -37,6 +37,19 @@ class EditingPipeline:
             value = value.replace(character, f"\\{character}")
         return value.replace("\n", "\\n")
 
+    def _textfile_option(self, text: str) -> str:
+        """Pass caption text to drawtext through a temp file, not inline.
+
+        Drawing text inline inside `text='...'` cannot carry an apostrophe: a
+        quote inside the quoted section terminates the value no matter how it
+        is escaped, and any caption text can contain one ("I'm gonna get in").
+        drawtext reads the text raw from the file; expansion=none keeps every
+        character literal (no %{...} expansions, no backslash processing).
+        """
+        path = self.ffmpeg_runner.create_temp_file(".txt")
+        Path(path).write_text(str(text), encoding="utf-8")
+        return f"expansion=none:textfile='{self._escape_text(path)}'"
+
     @staticmethod
     def _range_enable(item: dict[str, Any]) -> str:
         timing = item.get("range")
@@ -214,7 +227,6 @@ class EditingPipeline:
                 font_option += self._font_style_option(typography)
             outline = typography.get("outline_color", "black")
             style = f":fontsize={font_size}:fontcolor={color}{font_option}:borderw=3:bordercolor={outline}"
-            text = self._escape_text(item.get("text", ""))
             label = f"caption_{index}"
             text_width = measure_caption_dimensions(
                 item.get("text", ""), typography, padding_x=0, padding_y=0)["width"]
@@ -223,7 +235,8 @@ class EditingPipeline:
                 color, f"{center_x}-{text_width}/2",
                 f"{center_y}+{font_size}*0.4", self._range_enable(item))
             filters.append(
-                f"[{current}]drawtext=text='{text}':x={center_x}-text_w/2:"
+                f"[{current}]drawtext={self._textfile_option(item.get('text', ''))}"
+                f":x={center_x}-text_w/2:"
                 f"y={center_y}-text_h/2{style}{self._range_enable(item)}[{label}]")
             current = label
             index += 1
@@ -257,7 +270,6 @@ class EditingPipeline:
             if not font_file:
                 font_option += self._font_style_option(typography)
             outline = typography.get("outline_color", "black")
-            text = self._escape_text(item.get("text", ""))
             text_width = measure_caption_dimensions(
                 item.get("text", ""), typography, padding_x=0, padding_y=0)["width"]
             current = self._underline_filter(
@@ -265,7 +277,8 @@ class EditingPipeline:
                 typography, color, f"(iw-{text_width})/2",
                 f"{center_y}-{height}/2+{padding_y}+{font_size}*1.2", enable)
             filters.append(
-                f"[{current}]drawtext=text='{text}':x=(w-text_w)/2:"
+                f"[{current}]drawtext={self._textfile_option(item.get('text', ''))}"
+                f":x=(w-text_w)/2:"
                 f"y={center_y}-{height}/2+{padding_y}{enable}:fontsize={font_size}:"
                 f"fontcolor={color}{font_option}:borderw=3:bordercolor={outline}"
                 f"[{text_label}]")
