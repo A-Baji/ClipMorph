@@ -1,4 +1,6 @@
 import os
+import re
+import hashlib
 import requests
 import tempfile
 import unittest
@@ -229,14 +231,33 @@ class OAuthTests(_IsolatedAuthFile, unittest.TestCase):
         self.assertIn("scope_not_authorized", response.reason)
         self.assertIn("log-123", response.reason)
 
-    def test_tiktok_pkce_uses_base64url_s256(self):
+    def test_tiktok_pkce_uses_hex_sha256_per_tiktok_desktop_doc(self):
         pipeline = TikTokUploadPipeline(
             tiktok_client_key="client",
             tiktok_client_secret="secret")
         verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
         self.assertEqual(
             pipeline._generate_code_challenge(verifier),
-            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
+            "13d31e961a1ad8ec2f16b10c4c982e0876a878ad6df144566ee1894acb70f9c3")
+
+    def test_tiktok_pkce_pair_verifier_is_alnum_and_challenge_is_hex(self):
+        """The verifier avoids punctuation and the challenge is hex SHA256.
+
+        TikTok's desktop doc: verifier charset excludes punctuation that
+        TikTok rejects (RFC 7636 would allow it), and the challenge is the
+        hex encoding of SHA256 (64 lowercase hex characters), not the RFC
+        base64url spelling other providers accept.
+        """
+        pipeline = TikTokUploadPipeline(
+            tiktok_client_key="client",
+            tiktok_client_secret="secret")
+        for _ in range(50):
+            verifier, challenge = pipeline._generate_pkce_pair()
+            self.assertTrue(re.fullmatch(r"[A-Za-z0-9]{64}", verifier))
+            self.assertTrue(re.fullmatch(r"[0-9a-f]{64}", challenge))
+            self.assertEqual(
+                hashlib.sha256(verifier.encode("utf-8")).hexdigest(),
+                challenge)
 
     def test_tiktok_auth_url_carries_generated_state(self):
         pipeline = TikTokUploadPipeline(

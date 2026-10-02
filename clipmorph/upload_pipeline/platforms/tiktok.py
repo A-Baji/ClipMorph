@@ -1,4 +1,3 @@
-import base64
 import hashlib
 import os
 import secrets
@@ -124,14 +123,38 @@ class TikTokUploadPipeline(BaseUploadPipeline):
             pass
 
     def _generate_code_verifier(self, length=64):
-        """Generate a PKCE code verifier."""
-        chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~'
+        """Generate a PKCE code verifier.
+
+        TikTok's token endpoint rejects the conventional punctuation-bearing
+        verifier alphabet with "code verifier or code challenge is invalid",
+        so the verifier uses alphanumeric characters only (RFC 7636 permits
+        the full unreserved set; this subset is interoperable).
+        """
+        chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
         return ''.join(secrets.choice(chars) for _ in range(length))
 
     def _generate_code_challenge(self, code_verifier):
-        """Generate a PKCE code challenge from code verifier."""
-        sha256 = hashlib.sha256(code_verifier.encode('utf-8')).digest()
-        return base64.urlsafe_b64encode(sha256).rstrip(b'=').decode('ascii')
+        """Generate a PKCE code challenge from code verifier.
+
+        TikTok's desktop Login Kit doc requires the HEX encoding of SHA256
+        ("must use hex encoding of SHA256 to generate the code challenge"),
+        which differs from the RFC 7636 base64url spelling that every other
+        provider accepts; base64url challenges get rejected with "Code
+        verifier or code challenge is invalid".
+        """
+        sha256 = hashlib.sha256(code_verifier.encode('utf-8'))
+        return sha256.hexdigest()
+
+    def _generate_pkce_pair(self) -> tuple[str, str]:
+        """Return a compatible ``(verifier, challenge)`` pair for TikTok.
+
+        ``_generate_code_verifier`` yields alphanumeric characters only
+        (TikTok rejects the verifier alphabet containing punctuation, even
+        though RFC 7636 permits it) and the challenge is hex SHA256, which
+        matches TikTok's desktop doc.
+        """
+        code_verifier = self._generate_code_verifier()
+        return code_verifier, self._generate_code_challenge(code_verifier)
 
     def _generate_auth_url(self, code_challenge, state):
         """Generate TikTok OAuth authorization URL."""
@@ -343,8 +366,7 @@ class TikTokUploadPipeline(BaseUploadPipeline):
                 "Client Key and Client Secret are required for token generation"
             )
 
-        code_verifier = self._generate_code_verifier()
-        code_challenge = self._generate_code_challenge(code_verifier)
+        code_verifier, code_challenge = self._generate_pkce_pair()
         self.oauth_state = secrets.token_urlsafe(32)
         auth_url = self._generate_auth_url(code_challenge, self.oauth_state)
         print("Open this URL in your browser and authorize the app:")

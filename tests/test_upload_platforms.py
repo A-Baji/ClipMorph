@@ -1,3 +1,4 @@
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +12,20 @@ from clipmorph.upload_pipeline.platforms.youtube import YouTubeUploadPipeline
 
 
 class UploadPipelineTests(unittest.TestCase):
+    def test_tiktok_code_verifier_is_alphanumeric_only(self):
+        """TikTok rejects the punctuation-bearing PKCE verifier alphabet.
+
+        Its token endpoint answered "Code verifier or code challenge is
+        invalid" for a verifier drawn from the full unreserved set, which is
+        why the TikTok attempt never progressed to an upload call; the
+        alphanumeric subset is interoperable.
+        """
+        from clipmorph.upload_pipeline.platforms.tiktok import (
+            TikTokUploadPipeline,
+        )
+        verifier = TikTokUploadPipeline._generate_code_verifier(MagicMock())
+        self.assertTrue(re.fullmatch(r"[A-Za-z0-9]{64}", verifier))
+
     def test_initialization_failure_remains_in_results(self):
         with patch("clipmorph.upload_pipeline.YouTubeUploadPipeline",
                    side_effect=ValueError("missing credentials")):
