@@ -779,6 +779,42 @@ class AuthStatusProbeTests(unittest.TestCase):
             "+--------------+------------+",
         ])
 
+    def test_auth_status_reads_file_credentials_without_a_probe(self):
+        """Bare `auth status` reflects the file a service run would load."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            (data_dir / "auth.yaml").write_text(
+                "auth_schema_version: 2\n"
+                "meta:\n"
+                "  app_id: meta-id\n"
+                "  page_id: page-id\n"
+                "tiktok:\n"
+                "  client_key: tiktok-key\n",
+                encoding="utf-8")
+
+            with patch.dict(os.environ, {**WIDE_TERMINAL}, clear=False), \
+                    patch.dict(os.environ, {key: "" for key in (
+                        "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET",
+                        "GOOGLE_REFRESH_TOKEN", "FACEBOOK_APP_ID",
+                        "FACEBOOK_APP_SECRET", "FACEBOOK_PAGE_ID",
+                        "FACEBOOK_ACCESS_TOKEN", "GCS_BUCKET_NAME",
+                        "GCP_PRIVATE_KEY_ID", "GCP_PRIVATE_KEY",
+                        "GCP_CLIENT_EMAIL", "GCP_CLIENT_ID", "GCP_PROJECT_ID",
+                        "TIKTOK_CLIENT_KEY", "TIKTOK_CLIENT_SECRET",
+                        "TIKTOK_REFRESH_TOKEN", "TWITTER_CLIENT_ID",
+                        "TWITTER_CLIENT_SECRET", "TWITTER_OAUTH2_ACCESS_TOKEN",
+                        "TWITTER_OAUTH2_REFRESH_TOKEN",
+                        "TWITTER_OAUTH2_EXPIRES_AT",
+                        "HUGGING_FACE_ACCESS_TOKEN")}, clear=False):
+                code, output = invoke(["--data-dir", str(data_dir),
+                                       "auth", "status"])
+
+        self.assertEqual(code, 0)
+        actual = _normalize_box(output)
+        self.assertIn("| facebook     | yes        |", actual)
+        self.assertIn("| tiktok       | yes        |", actual)
+        self.assertIn("| youtube      | no         |", actual)
+
     def test_auth_status_with_probe_runs_the_probe_module(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)

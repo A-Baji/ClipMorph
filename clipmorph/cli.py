@@ -542,6 +542,10 @@ def auth_status_command(
     from clipmorph.auth import credential_status, load_auth_config
 
     selected_data_dir, _ = _resolve_paths(ctx, data_dir, app_config)
+    # The auth file is what a service run would load, so the bare status
+    # reads it too: file-configured credentials are `yes` without a probe or
+    # a service construction.
+    load_auth_config(selected_data_dir)
     if not probe:
         status = credential_status()
         if json_output:
@@ -552,7 +556,6 @@ def auth_status_command(
                       for platform, value in status.items()],
                      ["platform", "configured"])
         return
-    load_auth_config(selected_data_dir)
     from clipmorph.auth_probe import probe_credentials
     selected = (list(platforms) if platforms
                 else [*SUPPORTED_PLATFORMS, "hugging_face"])

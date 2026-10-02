@@ -42,6 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Fixed an empty-string environment entry shadowing a configured `auth.yaml` value: the shared credential export treats an empty environment entry as unset, so a pre-set blank no longer hides a real file value (a non-empty environment value keeps precedence; rotated refresh tokens still replace a stale environment value).
+- Fixed `clipmorph auth status` (without `--probe`) and `clipmorph doctor`'s credentials check reporting only pre-set environment values: the persisted `auth.yaml` was never loaded, so file-configured credentials reported `no`/`warning` and the dashboards understated the workspace's real configuration. Both surfaces now load the workspace auth file first.
 - Fixed audit-grade wheel builds, upload pipeline, job manifest, and FFmpeg helper type findings surfaced by mypy (83 flagged issues resolved across cli, service, web, and platform adapters); web routes validate that `configuration` and `patch` payloads are objects before applying them.
 - Repaired duplicated and interleaved corrupted passages in `docs/CONFIG_LAYERS.md`.
 - Reimplemented the empty-platform-include regression against the current `submit_upload` contract (upload fan-out boundary), replacing the stale expected-failure harness pinned to the pre-0.5.0 API; `quality/test_functional.py` follows the current CLI surface.

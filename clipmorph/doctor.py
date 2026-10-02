@@ -127,9 +127,12 @@ def _check_fonts() -> dict[str, str]:
     return _record("fonts", "failed", f"bundled font missing: {font_path}")
 
 
-def _check_credentials() -> dict[str, str]:
-    from clipmorph.auth import credential_status
+def _check_credentials(data_dir: str | Path) -> dict[str, str]:
+    from clipmorph.auth import credential_status, load_auth_config
 
+    # The auth file is the credential source for CLI-run jobs; check the
+    # workspace's real configuration, not just pre-set environment values.
+    load_auth_config(data_dir)
     status = credential_status()
     unconfigured = sorted(platform for platform, configured in status.items()
                           if not configured)
@@ -237,7 +240,7 @@ def run_checks(data_dir: str | Path, app_config_path: str | Path,
         checks.append(_check_output_dir(configuration, data_dir))
         checks.append(_check_layouts(configuration))
     checks.append(_check_fonts())
-    checks.append(_check_credentials())
+    checks.append(_check_credentials(data_dir))
     checks.append(_check_device())
     if configuration is not None:
         checks.append(_check_artifacts_storage(configuration, data_dir))
