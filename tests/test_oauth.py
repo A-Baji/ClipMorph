@@ -27,6 +27,7 @@ class AuthPersistenceTests(unittest.TestCase):
             data_dir = Path(temp_dir)
             auth_path = data_dir / "auth.yaml"
             auth_path.write_text(
+                "auth_schema_version: 2\n"
                 "youtube:\n"
                 "    client_id: id\n"
                 "    client_secret: secret\n"

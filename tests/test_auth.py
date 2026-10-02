@@ -5,6 +5,8 @@ import unittest
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
+import yaml
+
 from clipmorph.auth import AUTH_ENVIRONMENT_KEYS
 from clipmorph.auth import auth_file_path, create_auth_template, load_auth_config
 from clipmorph.auth import persist_auth_credential
@@ -27,6 +29,7 @@ class AuthConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
             (data_dir / "auth.yaml").write_text(
+                "auth_schema_version: 2\n"
                 "twitter:\n  client_id: client\n  client_secret: secret\n",
                 encoding="utf-8")
             with patch("clipmorph.twitter_auth._pkce_pair",
@@ -106,6 +109,7 @@ class AuthConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
             (data_dir / "auth.yaml").write_text(
+                "auth_schema_version: 2\n"
                 "youtube:\n"
                 "  client_id: youtube-id\n"
                 "  client_secret: youtube-secret\n"
@@ -128,13 +132,15 @@ class AuthConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
             (data_dir / "auth.yaml").write_text(
-                "instagram:\n"
-                "  gcs_bucket_name: bucket\n"
-                "  gcp_private_key_id: key-id\n"
-                "  gcp_private_key: private-key\n"
-                "  gcp_client_email: client@example.com\n"
-                "  gcp_client_id: client-id\n"
-                "  gcp_project_id: project-id\n",
+                "auth_schema_version: 2\n"
+                "meta:\n"
+                "  instagram:\n"
+                "    gcs_bucket_name: bucket\n"
+                "    gcp_private_key_id: key-id\n"
+                "    gcp_private_key: private-key\n"
+                "    gcp_client_email: client@example.com\n"
+                "    gcp_client_id: client-id\n"
+                "    gcp_project_id: project-id\n",
                 encoding="utf-8")
 
             with patch.dict(os.environ, {}, clear=True):
@@ -152,6 +158,7 @@ class AuthConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
             (data_dir / "auth.yaml").write_text(
+                "auth_schema_version: 2\n"
                 "tiktok:\n"
                 "  refresh_token: tiktok-refresh\n"
                 "twitter:\n"
@@ -213,19 +220,19 @@ class AuthConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
             (data_dir / "auth.yaml").write_text(
-                "youtube:\n  client_id: file-value\n", encoding="utf-8")
+                "auth_schema_version: 2\nyoutube:\n  client_id: file-value\n",
+                encoding="utf-8")
 
             with patch.dict(os.environ, {"GOOGLE_CLIENT_ID": "env-value"},
                             clear=True):
                 load_auth_config(data_dir)
 
                 self.assertEqual(os.environ["GOOGLE_CLIENT_ID"], "env-value")
-
     def test_auth_file_refresh_token_replaces_stale_environment_value(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
             (data_dir / "auth.yaml").write_text(
-                "youtube:\n  refresh_token: file-token\n",
+                "auth_schema_version: 2\nyoutube:\n  refresh_token: file-token\n",
                 encoding="utf-8")
 
             with patch.dict(os.environ, {"GOOGLE_REFRESH_TOKEN": "stale-token"},
@@ -238,7 +245,7 @@ class AuthConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
             (data_dir / "auth.yaml").write_text(
-                "youtube:\n  refresh_token: old-token\n",
+                "auth_schema_version: 2\nyoutube:\n  refresh_token: old-token\n",
                 encoding="utf-8")
 
             load_auth_config(data_dir)
@@ -250,6 +257,80 @@ class AuthConfigTests(unittest.TestCase):
             self.assertIn(
                 "refresh_token: old-token",
                 (data_dir / "auth.yaml.backup").read_text(encoding="utf-8"))
+
+    def test_meta_section_serves_both_meta_adapters(self):
+        """The Meta app and user access token are stored once for both adapters."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            (data_dir / "auth.yaml").write_text(
+                "auth_schema_version: 2\n"
+                "meta:\n"
+                "  app_id: meta-id\n"
+                "  app_secret: meta-secret\n"
+                "  page_id: page-id\n"
+                "  access_token: page-token\n"
+                "  instagram:\n"
+                "    gcs_bucket_name: bucket\n",
+                encoding="utf-8")
+
+            with patch.dict(os.environ, {}, clear=True):
+                load_auth_config(data_dir)
+
+                self.assertEqual(os.environ["FACEBOOK_APP_ID"], "meta-id")
+                self.assertEqual(os.environ["FACEBOOK_APP_SECRET"],
+                                 "meta-secret")
+                self.assertEqual(os.environ["FACEBOOK_PAGE_ID"], "page-id")
+                self.assertEqual(os.environ["FACEBOOK_ACCESS_TOKEN"],
+                                 "page-token")
+                self.assertEqual(os.environ["GCS_BUCKET_NAME"], "bucket")
+
+    def test_persisted_meta_credential_lands_in_the_meta_section(self):
+        """A Facebook or Instagram token write goes to the shared `meta:`."""
+        from clipmorph.auth import persist_auth_credentials
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            (data_dir / "auth.yaml").write_text(
+                "auth_schema_version: 2\n", encoding="utf-8")
+
+            persist_auth_credentials("facebook", {"access_token": "token-1"},
+                                     data_dir)
+            persist_auth_credentials("instagram", {"access_token": "token-2"},
+                                     data_dir)
+            persist_auth_credentials(
+                "instagram", {"gcs_bucket_name": "bucket"}, data_dir)
+
+            persisted = yaml.safe_load(
+                (data_dir / "auth.yaml").read_text(encoding="utf-8"))
+            self.assertEqual(persisted["meta"]["access_token"], "token-2")
+            self.assertEqual(
+                persisted["meta"]["instagram"]["gcs_bucket_name"], "bucket")
+            self.assertNotIn("facebook", persisted)
+            self.assertNotIn("instagram", persisted)
+
+    def test_unversioned_auth_file_fails_with_the_actionable_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            (data_dir / "auth.yaml").write_text(
+                "youtube:\n  client_id: id\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "auth_schema_version"):
+                load_auth_config(data_dir)
+
+    def test_legacy_meta_sections_are_refused(self):
+        """Root `facebook:`/`instagram:` sections are schema 1 drift."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            (data_dir / "auth.yaml").write_text(
+                "auth_schema_version: 2\n"
+                "meta:\n"
+                "  app_id: id\n"
+                "instagram:\n"
+                "  gcs_bucket_name: legacy\n",
+                encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "`instagram:`"):
+                load_auth_config(data_dir)
 
 
 if __name__ == "__main__":

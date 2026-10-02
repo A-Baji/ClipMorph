@@ -18,7 +18,7 @@ field reappears.
 
 - [Where credentials live](#where-credentials-live)
 - [YouTube](#youtube-google_)
-- [Instagram](#instagram-facebook_-gcs_-gcp_)
+- [Meta (shared `FACEBOOK_*`)](#meta-meta--the-shared-facebook_-app-and-user-token)
   - [GCS hosting for Instagram](#gcs-hosting-for-instagram)
 - [TikTok](#tiktok-tiktok_)
 - [Twitter / X](#twitter--x-twitter_)
@@ -50,7 +50,7 @@ clipmorph auth set youtube
 clipmorph auth set instagram
 clipmorph auth set tiktok
 clipmorph auth set twitter
-clipmorph auth set facebook   # same shared Meta fields as instagram
+clipmorph auth set facebook   # the four shared Meta fields, stored under meta:
 clipmorph auth set hugging_face
 ```
 
@@ -147,26 +147,34 @@ screen → Data Access** shows the scopes that were granted, and
 - The token is bound to the Google account that approved it, so switching
   accounts in the consent page changes which channel receives the upload.
 
-## Instagram (`FACEBOOK_*`, `GCS_*`, `GCP_*`)
+## Meta (`meta:` — the shared `FACEBOOK_*` app and user token)
 
-Fields: `app_id`, `app_secret`, `page_id`, `access_token`,
-`gcs_bucket_name`, `gcp_private_key_id`, `gcp_private_key`,
-`gcp_client_email`, `gcp_client_id`, `gcp_project_id`
-(env: `FACEBOOK_APP_ID`, `FACEBOOK_APP_SECRET`, `FACEBOOK_PAGE_ID`,
-`FACEBOOK_ACCESS_TOKEN`, `GCS_BUCKET_NAME`, `GCP_PRIVATE_KEY_ID`,
-`GCP_PRIVATE_KEY`, `GCP_CLIENT_EMAIL`, `GCP_CLIENT_ID`, `GCP_PROJECT_ID`).
+Fields, stored once:
 
-These authorize `clipmorph/upload_pipeline/platforms/instagram.py` to publish
-reels to one Instagram professional account. The Facebook half talks to Graph
-API `v23.0`; the Google half only hosts the video bytes for the signed-URL
-hand-off that the container-publishing flow requires.
+```yaml
+meta:
+    app_id: ""        # env: FACEBOOK_APP_ID
+    app_secret: ""    # env: FACEBOOK_APP_SECRET
+    page_id: ""       # env: FACEBOOK_PAGE_ID
+    access_token: ""  # env: FACEBOOK_ACCESS_TOKEN
+```
 
-This is also the shared Meta-app/page block for Facebook uploads: the same app
-and Page token authorize `clipmorph/upload_pipeline/platforms/facebook.py` to
-publish Page Reels and Page videos. There is no separate Facebook credential
-section — configure this block once, and both adapters read the `FACEBOOK_*`
-values. `clipmorph auth set facebook` prompts for the same four Meta fields and
-writes the same environment keys.
+The Meta app and access token are stored ONCE under `meta:` because the same
+Meta app and token authorize both adapters:
+
+- `clipmorph/upload_pipeline/platforms/instagram.py` publishes reels to one
+  Instagram professional account.
+- `clipmorph/upload_pipeline/platforms/facebook.py` publishes Page Reels and
+  Page videos.
+
+`clipmorph auth set facebook` prompts for the Meta fields (an empty prompt is
+skipped, so non-FL4B apps simply leave `config_id` unset), and
+`clipmorph auth set instagram` prompts for the Meta fields plus Instagram's
+`GCS_*`/`GCP_*` hosting block nested at `meta.instagram:`
+(below); both write the shared `meta:` section
+(schema version 2). A root `facebook:` or `instagram:` section
+is refused with an actionable error instead of migrated — move the values
+into `meta:` (and `meta.instagram:` for the hosting block).
 
 The scopes the adapter requests are `instagram_basic`, `pages_show_list`,
 `pages_read_engagement`, `pages_manage_posts`, and
@@ -335,15 +343,15 @@ back to real newlines when it builds the credentials object, so a multi-line
 block scalar will not work:
 
 ```yaml
-instagram:
-    gcs_bucket_name: "clipmorph-instagram-uploads"
-    gcp_project_id: "my-project-1234"
-    gcp_client_email: "clipmorph-uploader@my-project-1234.iam.gserviceaccount.com"
-    gcp_client_id: "109876543210987654321"
-    gcp_private_key_id: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
-    gcp_private_key: "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC...\n...\n-----END PRIVATE KEY-----\n"
+meta:
+    instagram:
+        gcs_bucket_name: "clipmorph-instagram-uploads"
+        gcp_project_id: "my-project-1234"
+        gcp_client_email: "clipmorph-uploader@my-project-1234.iam.gserviceaccount.com"
+        gcp_client_id: "109876543210987654321"
+        gcp_private_key_id: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+        gcp_private_key: "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC...\n...\n-----END PRIVATE KEY-----\n"
 ```
-
 When the key is supplied through an environment variable instead, use the same
 escaped form. On PowerShell:
 

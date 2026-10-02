@@ -252,8 +252,8 @@ _COLLECTORS = {
 def _get_env_token(platform: str) -> str | None:
     """Return the access token for a platform from the environment."""
     import os
-    from clipmorph.auth import AUTH_ENVIRONMENT_KEYS
-    fields = AUTH_ENVIRONMENT_KEYS.get(platform, {})
+    from clipmorph.auth import credential_fields
+    fields = credential_fields(platform)
     for env_key in fields.values():
         value = os.getenv(env_key)
         if value:
