@@ -898,6 +898,73 @@ class JobServiceConfigurationTests(unittest.TestCase):
             finally:
                 service.close()
 
+    def test_conversion_run_after_a_transcript_session_save_renders(self):
+        """A session save changes the conversion digest; the run must render.
+
+        Groups are keyed by their conversion digest, and saving the transcript
+        session materializes captions into `conversion.layout`, so the stored
+        group set always differs from the derived one on the first conversion
+        run. The group sync must persist before the run reloads, or every
+        resume is a silent no-op stalled at "conversion stale".
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            (data_dir / "sources").mkdir()
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"video")
+            service = JobService(data_dir)
+            self.addCleanup(service.close)
+            manifest = service.create_job(source.name, {
+                "general": {"no_confirm": True}})
+
+            session = create_edit_session(manifest.source_sha256, [{
+                "id": "segment-1", "start": 0, "end": 1, "text": "Hello",
+            }], 2)
+            service.save_transcript_session(
+                manifest.job_id, session, expected_revision=0)
+            persisted = JobManifest.load(manifest.job_id, service.jobs_dir)
+            persisted = service.accept_checkpoint(
+                persisted.job_id, "transcript",
+                persisted.checkpoints["transcript"]["revision"])
+            self.assertEqual(persisted.checkpoints["conversion"]["status"],
+                             "stale")
+
+            rendered = data_dir / "render.mp4"
+            rendered.write_bytes(b"vertical")
+            pipeline = type("FakePipeline", (), {
+                "__init__": lambda self, **kwargs: None,
+                "run": lambda self: str(rendered),
+            })()
+            fake_runner = type("FakeRunner", (), {
+                "get_video_info": lambda _self, _path: {
+                    "format": {"duration": "3"},
+                    "streams": [{"codec_type": "video", "width": 1920,
+                                 "height": 1080}],
+                },
+            })()
+
+            def upload_results(_artifact_path, _title, *_args, **_kwargs):
+                stamp = "2026-10-01T00:00:00+00:00"
+                return {platform: {"success": True, "result": f"{platform} ok",
+                                   "started_at": stamp, "completed_at": stamp}
+                        for platform in enabled}
+
+            enabled = ["youtube", "instagram", "tiktok", "twitter", "facebook"]
+            with patch("clipmorph.workflow.configure_ffmpeg"), \
+                    patch("clipmorph.workflow.FFmpegRunner",
+                          return_value=fake_runner), \
+                    patch("clipmorph.workflow.PreflightValidator"), \
+                    patch("clipmorph.conversion_pipeline.ConversionPipeline",
+                          return_value=pipeline), \
+                    patch("clipmorph.upload_attempts.execute_upload_pipeline",
+                          side_effect=upload_results):
+                execute_job(persisted, CancellationToken(), service.jobs_dir)
+
+            saved = service.get_job(manifest.job_id)
+            self.assertEqual(saved.status, "completed")
+            self.assertEqual(saved.checkpoints["conversion"]["status"],
+                             "completed")
+
     def test_created_job_without_a_runner_is_resumable(self):
         """A plain creation (no `--yes`) must remain actionable.
 

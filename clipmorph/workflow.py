@@ -157,8 +157,12 @@ def execute_job(manifest: JobManifest, token: CancellationToken,
         # Reconcile the stored group set with what the current configuration
         # derives, so a group created or dropped by a configuration edit (or by
         # a layout registry change) is rendered or forgotten instead of
-        # silently skipped.
+        # silently skipped. The sync must be persisted before the reload below:
+        # including the transcript's materialized captions, a session save
+        # changes the conversion digest, so the stored group set can always
+        # differ from the derived one on the first conversion run.
         manifest.sync_conversion_groups(groups)
+        manifest.save(jobs_root)
         manifest = JobManifest.load(manifest.job_id, jobs_root)
         conversion_checkpoint = manifest.checkpoints["conversion"]
         for group in groups:
@@ -172,7 +176,11 @@ def execute_job(manifest: JobManifest, token: CancellationToken,
                 continue
             if group_record["status"] == "completed":
                 continue
-            if group_record["status"] in {"stale", "failed", "cancelled"}:
+            if group_record["status"] in {
+                    "running", "stale", "failed", "cancelled"}:
+                # A `running` group is stranded by definition here: this
+                # process has not executed it yet, so a failed render that
+                # closed only the aggregate must re-arm for the retry.
                 manifest.transition_checkpoint(
                     "conversion", "pending", group_record["revision"],
                     jobs_root, group_id=group_id)

@@ -31,10 +31,16 @@ _SECRET_ASSIGNMENT = re.compile(
 
 def safe_error_message(message: Any) -> str:
     return _SECRET_ASSIGNMENT.sub(r"\1\2[REDACTED]", str(message))[:1000]
+
+# A `pending` transition from `running` re-arms a stranded attempt: only a
+# retry process can legitimately walk a `running` checkpoint, so abandoning an
+# unreported attempt is the honest retry action (the revision check guards any
+# concurrent writer, so the transition cannot race).
 CHECKPOINT_TRANSITIONS = {
     "transcript": {
         "pending": {"running", "awaiting_review", "skipped", "failed", "cancelled"},
-        "running": {"awaiting_review", "completed", "failed", "cancelled"},
+        "running": {"awaiting_review", "completed", "failed", "cancelled",
+                    "pending"},
         "awaiting_review": {"awaiting_review", "completed", "pending", "cancelled"},
         "completed": {"stale"}, "partial_failure": {"pending", "stale"},
         "skipped": {"pending"}, "failed": {"pending"}, "cancelled": {"pending"},
@@ -42,7 +48,8 @@ CHECKPOINT_TRANSITIONS = {
     },
     "conversion": {
         "pending": {"running", "awaiting_review", "skipped", "failed", "cancelled"},
-        "running": {"awaiting_review", "completed", "failed", "cancelled"},
+        "running": {"awaiting_review", "completed", "failed", "cancelled",
+                    "pending"},
         "awaiting_review": {"awaiting_review", "completed", "pending", "cancelled"},
         "completed": {"stale"}, "partial_failure": {"pending", "stale"},
         "skipped": {"pending"}, "failed": {"pending"}, "cancelled": {"pending"},
@@ -51,7 +58,8 @@ CHECKPOINT_TRANSITIONS = {
     "upload": {
         "pending": {"awaiting_review", "running", "skipped", "failed", "cancelled"},
         "awaiting_review": {"awaiting_review", "running", "pending", "cancelled"},
-        "running": {"completed", "partial_failure", "failed", "cancelled"},
+        "running": {"completed", "partial_failure", "failed", "cancelled",
+                    "pending"},
         "completed": {"stale"}, "partial_failure": {"running", "stale", "pending"},
         "skipped": {"pending"}, "failed": {"pending"}, "cancelled": {"pending"},
         "stale": {"pending", "awaiting_review", "running", "skipped"},
