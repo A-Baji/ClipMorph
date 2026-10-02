@@ -266,7 +266,8 @@ class JobService:
     """Persist job lifecycle state while executing bounded background work."""
 
     def __init__(self, data_dir: str | Path, max_workers: int = 1,
-                 app_config_path: str | Path | None = None):
+                 app_config_path: str | Path | None = None,
+                 reconcile: bool = True):
         self.data_dir = Path(data_dir)
         self.jobs_dir = self.data_dir / "jobs"
         self.app_config_path = Path(app_config_path) if app_config_path else self.data_dir / "app.yml"
@@ -296,8 +297,13 @@ class JobService:
         self._live_progress: dict[str, dict[str, int]] = {}
         # Order matters: reconciliation must settle stalled checkpoints first so
         # that only genuinely scheduled uploads survive into the re-arm scan.
-        self._reconcile_interrupted_jobs()
-        self._rearm_scheduled_attempts()
+        # Both scans exist for work orphaned by a process restart; a service
+        # constructed inside a live process (e.g. the workflow's transcript
+        # session save) must not fail the jobs that process is still running,
+        # which is why in-process constructions pass ``reconcile=False``.
+        if reconcile:
+            self._reconcile_interrupted_jobs()
+            self._rearm_scheduled_attempts()
 
     @property
     def storage(self) -> ArtifactStorage:

@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
 import yaml
 
 from clipmorph.configuration import APP_CONFIG_VERSION
@@ -897,6 +898,60 @@ class JobServiceConfigurationTests(unittest.TestCase):
             finally:
                 service.close()
 
+    def test_transcript_stage_survives_its_own_session_service(self):
+        """A live job must survive the service construction its worker makes.
+
+        ``execute_job`` saves the transcript session through a nested
+        ``JobService``; before the nested service skipped the restart-boundary
+        scans, that construction reconciled the caller's own running job as
+        "interrupted by restart", so the save hit "stale checkpoint revision"
+        and the job failed right after a clean transcription.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            (data_dir / "sources").mkdir()
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"video")
+            service = JobService(data_dir)
+            fake_runner = type("FakeRunner", (), {
+                "extract_audio": lambda _self, _path: "audio.wav",
+                "get_video_info": lambda _self, _path: {
+                    "format": {"duration": "3"},
+                    "streams": [{"codec_type": "video", "width": 1920,
+                                 "height": 1080}],
+                },
+            })()
+            # WhisperX emits numpy timestamps; the session save must coerce
+            # them before the manifest's YAML dump sees one.
+            fake_pipeline = type("FakePipeline", (), {
+                "run": lambda self: [{"start": np.float64(0), "end": np.float64(1),
+                                      "text": "Hello there"}],
+            })()
+
+            try:
+                with patch("clipmorph.workflow.configure_ffmpeg"), \
+                        patch("clipmorph.workflow.FFmpegRunner",
+                              return_value=fake_runner), \
+                        patch("clipmorph.conversion_pipeline.transcribe"
+                              ".TranscriptionPipeline",
+                              return_value=fake_pipeline):
+                    manifest = service.create_job(
+                        source.name, {},
+                        lambda job, token: execute_job(
+                            job, token, service.jobs_dir,
+                            service.app_config_path))
+                    service._futures[manifest.job_id].result(timeout=30)
+
+                saved = service.get_job(manifest.job_id)
+                self.assertEqual(saved.status, "awaiting_review")
+                self.assertEqual(saved.current_checkpoint, "transcript")
+                self.assertEqual(
+                    saved.checkpoints["transcript"]["status"], "awaiting_review")
+                self.assertIsNone(
+                    saved.checkpoints["transcript"]["error"])
+                self.assertEqual(saved.active_transcript["revision"], 1)
+            finally:
+                service.close()
     def test_runner_failures_are_structured_safe_and_checkpointed(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)

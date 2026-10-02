@@ -115,6 +115,28 @@ class StartupReconciliationTests(unittest.TestCase):
             self.assertTrue(healed.checkpoints["transcript"]["error"]["retryable"])
             self.assertEqual(healed.status, "failed")
 
+    def test_reconcile_false_leaves_running_checkpoints_untouched(self):
+        """An in-process construction must not fail live work.
+
+        The startup scans exist for work orphaned by a process restart, so a
+        service built inside a live process (`reconcile=False`) must leave the
+        checkpoint a still-running thread owns untouched.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest, jobs_dir = _create_manifest(data_dir, conversion_skip=False)
+            _start_stage(manifest, jobs_dir, "transcript")
+            service = JobService(data_dir, reconcile=False)
+            try:
+                untouched = service.get_job(manifest.job_id)
+            finally:
+                service.close()
+
+            self.assertEqual(untouched.checkpoints["transcript"]["status"],
+                             "running")
+            self.assertIsNone(untouched.checkpoints["transcript"]["error"])
+            self.assertEqual(untouched.status, "running")
+
     def test_running_conversion_checkpoint_fails_with_the_interrupted_reason(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)

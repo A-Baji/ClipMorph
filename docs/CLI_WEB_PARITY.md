@@ -148,10 +148,12 @@ registry has not blessed, and it ships disabled for every platform until the
 maintainer's probe has run, so in a default build `mode: platform` reports the
 registry's strict error.
 
-Every service construction reconciles manifests left `running` by a process
-that never returned, so both surfaces heal phantom queue entries on first
-touch: the in-flight checkpoint becomes `failed` with
-`{"code":"interrupted_by_restart","retryable":true}`. A `running` upload
+Every service construction at a process boundary reconciles manifests left
+`running` by a process that never returned, so both surfaces heal phantom queue
+entries on first touch: the in-flight checkpoint becomes `failed` with
+`{"code":"interrupted_by_restart","retryable":true}`. Constructions inside the
+live process (the workflow's transcript-session save) skip the scans so a job
+cannot be failed by the thread running it. A `running` upload
 checkpoint whose every `scheduled` attempt waits on a future `publish_at`
 is left alone, and reconciliation runs before the re-arm scan restores those
 timers. A past-due `scheduled` attempt is healed as an interrupted failure,

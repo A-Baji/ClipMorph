@@ -108,7 +108,10 @@ def execute_job(manifest: JobManifest, token: CancellationToken,
             video_info = ffmpeg_runner.get_video_info(manifest.source_path)
             duration = float(video_info.get("format", {}).get("duration", 0) or 0)
             session = create_edit_session(manifest.source_sha256, segments, duration)
-            session_service = JobService(data_dir)
+            # The session save needs the service's manifest helpers only; the
+            # restart-boundary scans are skipped so this in-process service
+            # cannot fail the job that this same thread is still running.
+            session_service = JobService(data_dir, reconcile=False)
             try:
                 session_service.save_transcript_session(
                     manifest.job_id, session,

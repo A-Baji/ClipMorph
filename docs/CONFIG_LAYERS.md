@@ -1032,6 +1032,13 @@ completed. A `queued` manifest is left alone — all-pending checkpoints are not
 evidence of a crash — and a `running` job whose checkpoints have all gone
 terminal has only its drifted status re-derived.
 
+The scans guard against work orphaned by a restart, so every construction at a
+process boundary performs them. Service constructions made inside a live
+process — the workflow's transcript-session save is the one today — construct
+with the scans disabled, because a job whose checkpoint is `running` inside the
+running process is live work, not a crash: healing it would fail the caller's
+own job mid-step.
+
 A `running` upload checkpoint whose every `scheduled` attempt waits on a
 future `publish_at` is deliberately left alone — that is a deferral waiting on a
 timer, not a stall, and reconciliation would otherwise cancel a schedule the
