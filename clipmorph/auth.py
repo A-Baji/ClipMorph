@@ -24,11 +24,14 @@ _active_auth_path: Path | None = None
 AUTH_SCHEMA_VERSION = 2
 
 # The shared Meta app and access-token fields, mapped to the env keys the Meta
+# adapters read (`FACEBOOK_CONFIG_ID` is the optional Facebook Login for
+# Business Configuration ID; only the Instagram login URL sends it).
 META_ENVIRONMENT_KEYS = {
     "app_id": "FACEBOOK_APP_ID",
     "app_secret": "FACEBOOK_APP_SECRET",
     "page_id": "FACEBOOK_PAGE_ID",
     "access_token": "FACEBOOK_ACCESS_TOKEN",
+    "config_id": "FACEBOOK_CONFIG_ID",
 }
 
 # The Instagram hosting block (nested at `meta.instagram:`), mapped to the
@@ -84,6 +87,7 @@ meta:
     app_secret: ""
     page_id: ""
     access_token: ""
+    config_id: ""
     instagram:
         gcs_bucket_name: ""
         gcp_private_key_id: ""

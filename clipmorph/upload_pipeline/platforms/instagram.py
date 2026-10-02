@@ -38,6 +38,7 @@ class InstagramUploadPipeline(BaseUploadPipeline):
                  facebook_app_secret=os.getenv("FACEBOOK_APP_SECRET"),
                  facebook_page_id=os.getenv("FACEBOOK_PAGE_ID"),
                  facebook_access_token=os.getenv("FACEBOOK_ACCESS_TOKEN"),
+                 facebook_config_id=os.getenv("FACEBOOK_CONFIG_ID"),
                  gcp_project_id=os.getenv("GCP_PROJECT_ID"),
                  gcp_private_key_id=os.getenv("GCP_PRIVATE_KEY_ID"),
                  gcp_private_key=os.getenv("GCP_PRIVATE_KEY"),
@@ -64,6 +65,10 @@ class InstagramUploadPipeline(BaseUploadPipeline):
                 Defaults to FACEBOOK_PAGE_ID environment variable.
             facebook_access_token (str, optional): Facebook Access Token for API calls.
                 Defaults to FACEBOOK_ACCESS_TOKEN environment variable.
+            facebook_config_id (str, optional): Facebook Login for Business
+                Configuration ID. Defaults to FACEBOOK_CONFIG_ID environment
+                variable. When set it replaces the scope list in the login
+                dialog URL (docs/AUTHENTICATION.md, Meta FL4B).
             gcp_project_id (str, optional): Google Cloud Project ID.
                 Defaults to GCP_PROJECT_ID environment variable.
             gcp_private_key_id (str, optional): Google Cloud Private Key ID.
@@ -90,6 +95,7 @@ class InstagramUploadPipeline(BaseUploadPipeline):
         self.app_secret = facebook_app_secret
         self.page_id = facebook_page_id
         self.access_token = facebook_access_token
+        self.config_id = facebook_config_id
 
         # Google Cloud credentials
         self.gcp_project_id = gcp_project_id
@@ -200,11 +206,18 @@ class InstagramUploadPipeline(BaseUploadPipeline):
         """
         Guides user through browser-based OAuth to obtain a user access token.
         """
+        if self.config_id:
+            # Facebook Login for Business: the Configuration (token type,
+            # assets, permissions) grants the access, so the dialog is invoked
+            # with config_id and scope is omitted entirely.
+            login_params = f"config_id={self.config_id}"
+        else:
+            login_params = f"scope={','.join(self.auth_scopes)}"
         oauth_url = (
             f"{self.FACEBOOK_AUTH_BASE_URL}/{self.api_version}/dialog/oauth"
             f"?client_id={self.app_id}"
             f"&redirect_uri={self.redirect_uri}"
-            f"&scope={','.join(self.auth_scopes)}"
+            f"&{login_params}"
             f"&response_type=code")
         print("Open this URL in your browser and authorize the app:")
         print(oauth_url)

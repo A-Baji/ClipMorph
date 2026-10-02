@@ -252,6 +252,7 @@ class OAuthTests(unittest.TestCase):
         authorize.assert_called_once_with(None)
         self.assertIsNotNone(pipeline.oauth_session)
 
+
     def test_twitter_media_upload_uses_v2_chunked_oauth2_flow(self):
         pipeline = TwitterUploadPipeline(
             twitter_client_id="client-id",
@@ -315,6 +316,66 @@ class OAuthTests(unittest.TestCase):
         self.assertEqual(pipeline.oauth_session.get.call_count, 3)
         status_url = pipeline.oauth_session.get.call_args_list[0].args[0]
         self.assertIn("api.x.com/2/media/upload?command=STATUS", status_url)
+
+
+class InstagramLoginDialogTests(unittest.TestCase):
+    """The Meta login dialog URL branches on the FL4B Configuration.
+
+    A Facebook Login for Business app authorizes through a Configuration
+    (`config_id` has replaced `scope`), so the dialog URL must carry the
+    stored Configuration ID and no scope list at all.
+    """
+
+    @staticmethod
+    def _pipeline(config_id):
+        from clipmorph.upload_pipeline.platforms.instagram import (
+            InstagramUploadPipeline,
+        )
+        return InstagramUploadPipeline(
+            facebook_app_id="app-id",
+            facebook_app_secret="app-secret",
+            facebook_page_id="page-id",
+            facebook_access_token="page-token",
+            facebook_config_id=config_id,
+            gcp_project_id="project",
+            gcp_private_key_id="key-id",
+            gcp_private_key="private-key",
+            gcp_client_email="uploader@example.iam.gserviceaccount.com",
+            gcp_client_id="gcp-client-id",
+            gcs_bucket_name="bucket")
+
+    def _login_dialog_url(self, pipeline):
+        """Drive the interactive flow with the network mocked out."""
+        with patch("clipmorph.upload_pipeline.platforms.instagram."
+                   "webbrowser.open") as open_browser, \
+                patch("builtins.input", return_value="redirect-code"), \
+                patch("clipmorph.upload_pipeline.platforms.instagram."
+                      "requests.get",
+                      return_value=SimpleNamespace(
+                          ok=True,
+                          json=lambda: {"access_token": "issued-token"})):
+            pipeline.get_user_access_token()
+        return open_browser.call_args.args[0]
+
+    def test_fl4b_config_id_replaces_the_scope_parameter(self):
+        pipeline = self._pipeline("config-123")
+        url = self._login_dialog_url(pipeline)
+
+        self.assertIn("dialog/oauth?client_id=app-id", url)
+        self.assertIn("redirect_uri=https://localhost/", url)
+        self.assertIn("config_id=config-123", url)
+        self.assertIn("response_type=code", url)
+        self.assertNotIn("scope=", url)
+
+    def test_without_a_config_id_the_scope_url_is_unchanged(self):
+        pipeline = self._pipeline(None)
+        url = self._login_dialog_url(pipeline)
+
+        self.assertIn(
+            "&scope=instagram_basic,pages_show_list,pages_read_engagement,"
+            "pages_manage_posts,instagram_content_publish"
+            "&response_type=code", url)
+        self.assertNotIn("config_id=", url)
 
 
 if __name__ == "__main__":

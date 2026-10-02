@@ -65,6 +65,10 @@ class AuthConfigTests(unittest.TestCase):
             self.assertIn("client_id:", content)
             self.assertIn("hugging_face:", content)
             self.assertIn("twitter:", content)
+            # The optional Facebook Login for Business field sits in the
+            # shared meta block.
+            self.assertIn("config_id:",
+                          content.split("meta:")[1].split("instagram:")[0])
             # Only consumed TikTok fields are offered.
             self.assertNotIn("open_id", content)
             self.assertNotIn("access_token", content.split("tiktok:")[1]
@@ -307,6 +311,50 @@ class AuthConfigTests(unittest.TestCase):
                 persisted["meta"]["instagram"]["gcs_bucket_name"], "bucket")
             self.assertNotIn("facebook", persisted)
             self.assertNotIn("instagram", persisted)
+
+    def test_persisted_meta_config_id_lands_in_the_meta_section(self):
+        """The optional FL4B Configuration ID is a shared meta field."""
+        from clipmorph.auth import persist_auth_credentials
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            (data_dir / "auth.yaml").write_text(
+                "auth_schema_version: 2\n", encoding="utf-8")
+
+            persist_auth_credentials("facebook", {"config_id": "config-123"},
+                                     data_dir)
+            # A permission name is not a credential; it stays refused.
+            with self.assertRaisesRegex(ValueError,
+                                        "Unsupported auth credential"):
+                persist_auth_credentials(
+                    "facebook", {"pages_manage_posts": "true"}, data_dir)
+
+            persisted = yaml.safe_load(
+                (data_dir / "auth.yaml").read_text(encoding="utf-8"))
+            self.assertEqual(persisted["meta"]["config_id"], "config-123")
+
+    def test_meta_config_id_exports_and_counts_toward_credential_status(self):
+        """`meta.config_id` exports FACEBOOK_CONFIG_ID for the login URL."""
+        from clipmorph.auth import credential_status
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            (data_dir / "auth.yaml").write_text(
+                "auth_schema_version: 2\n"
+                "meta:\n"
+                "  config_id: config-123\n",
+                encoding="utf-8")
+
+            with patch.dict(os.environ, {}, clear=True):
+                load_auth_config(data_dir)
+
+                self.assertEqual(os.environ["FACEBOOK_CONFIG_ID"],
+                                 "config-123")
+                status = credential_status()
+                # Facebook aliases the shared meta fields, so the
+                # Configuration ID alone configures it.
+                self.assertTrue(status["facebook"])
+                self.assertFalse(status["youtube"])
 
     def test_unversioned_auth_file_fails_with_the_actionable_error(self):
         with tempfile.TemporaryDirectory() as temp_dir:

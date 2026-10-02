@@ -573,11 +573,10 @@ def auth_set_command(
         data_dir: DataDirOption = None,
         app_config: AppConfigOption = None) -> None:
     """Prompt for platform credentials and store them in auth.yaml."""
-    from clipmorph.auth import AUTH_ENVIRONMENT_KEYS
-    from clipmorph.auth import persist_auth_credentials
+    from clipmorph.auth import credential_fields, persist_auth_credentials
 
     selected_data_dir, _ = _resolve_paths(ctx, data_dir, app_config)
-    fields = AUTH_ENVIRONMENT_KEYS.get(platform)
+    fields = credential_fields(platform)
     if fields is None:
         raise ValueError(f"Unsupported auth platform: {platform}")
     values = {field: value for field in fields

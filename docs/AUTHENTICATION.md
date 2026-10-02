@@ -157,6 +157,7 @@ meta:
     app_secret: ""    # env: FACEBOOK_APP_SECRET
     page_id: ""       # env: FACEBOOK_PAGE_ID
     access_token: ""  # env: FACEBOOK_ACCESS_TOKEN
+    config_id: ""     # env: FACEBOOK_CONFIG_ID (optional, see below)
 ```
 
 The Meta app and access token are stored ONCE under `meta:` because the same
@@ -180,6 +181,18 @@ The scopes the adapter requests are `instagram_basic`, `pages_show_list`,
 `pages_read_engagement`, `pages_manage_posts`, and
 `instagram_content_publish`
 ([content publishing](https://developers.facebook.com/docs/instagram-platform/instagram-api-with-instagram-login/content-publishing/)).
+
+For an app using Facebook Login for Business, the permissions instead come
+from a **Configuration**: in the Meta App Dashboard, create a Configuration
+whose assets include the Page and whose permissions include the scopes
+above, then store the shown Configuration ID in `config_id`. When
+`config_id` is set, ClipMorph invokes the login dialog with `config_id` and
+sends no `scope` parameter, because `config_id` has replaced `scope` and
+Meta grants no permissions when the requested set is not the configured one
+([Facebook Login for Business](https://developers.facebook.com/docs/facebook-login/facebook-login-for-business/)).
+The Configuration also selects the token type and the designated assets, so
+FL4B access covers exactly what the login delegates; a non-FL4B app leaves
+`config_id` empty and keeps the scope flow.
 
 To pull engagement metrics (`clipmorph job metrics ID --pull`), the token also
 needs `instagram_manage_insights`. This is a re-consent step: add the scope in
@@ -224,6 +237,9 @@ metrics adapter returns an `unavailable` snapshot with reason
 - `access_token` — see the OAuth walk-through. Verify it with
   `GET /me/accounts?fields=id,name,access_token` in the explorer; the Page you
   intend to publish to must appear with a usable `access_token`.
+- `config_id` — optional; only for apps using Facebook Login for Business.
+  The Configuration ID shown in the Meta App Dashboard under **Facebook Login
+  for Business → Configurations**. Verify it against that page.
 
 ### OAuth setup walk-through
 
@@ -233,9 +249,13 @@ listener, and it registers `https://localhost/` as the redirect URI:
 1. Add `https://localhost/` to **Facebook Login → Settings → Valid OAuth
    Redirect URIs**
    ([manual flow](https://developers.facebook.com/docs/facebook-login/guides/advanced/manual-flow/)).
-2. Request an authorization code for the scopes above, redirecting to
-   `https://localhost/`, and paste the returned `code` back into the CLI when
-   prompted.
+2. Trigger the flow from an upload with no stored token. The dialog depends
+   on the app kind: a non-FL4B app requests the scopes above; a Facebook
+   Login for Business app is invoked with the stored `config_id` and no
+   `scope` parameter (the Configuration carries the token type, assets, and
+   permissions, and both Configuration token types work with the same
+   authorization-code exchange below). Redirecting to `https://localhost/`,
+   paste the returned `code` back into the CLI when prompted.
 3. Exchange the code with `app_id`, `app_secret`, and the **identical**
    `redirect_uri` for a short-lived user access token.
 4. Exchange the short-lived user token for a long-lived one
@@ -258,6 +278,11 @@ listener, and it registers `https://localhost/` as the redirect URI:
 - An app in development mode only works for roles that have app access; add
   yourself as an administrator or switch the app to Live
   ([app modes](https://developers.facebook.com/docs/development/release/)).
+- With Facebook Login for Business the dialog grants only the
+  Configuration's permissions and designated assets: a Configuration that
+  omits one of the scopes above, or the Page asset, yields a token that
+  authenticates but cannot publish
+  ([Facebook Login for Business](https://developers.facebook.com/docs/facebook-login/facebook-login-for-business/)).
 
 ## GCS hosting for Instagram
 
@@ -643,6 +668,7 @@ reports `unavailable` there.
   [Graph API](https://developers.facebook.com/documentation/facebook-api),
   [Graph API Explorer](https://developers.facebook.com/tools/explorer/),
   [manual OAuth flow](https://developers.facebook.com/docs/facebook-login/guides/advanced/manual-flow/),
+  [Facebook Login for Business](https://developers.facebook.com/docs/facebook-login/facebook-login-for-business/),
   [access tokens](https://developers.facebook.com/docs/facebook-login/guides/access-tokens/),
   [permissions](https://developers.facebook.com/docs/permissions/),
   [Instagram platform overview](https://developers.facebook.com/docs/instagram-platform/overview),
