@@ -252,6 +252,71 @@ class OAuthTests(unittest.TestCase):
         authorize.assert_called_once_with(None)
         self.assertIsNotNone(pipeline.oauth_session)
 
+    def test_twitter_refreshes_at_upload_time_when_the_stored_expiry_is_empty(self):
+        """An unreadable `oauth2_expires_at` must not send a stale token.
+
+        An auth.yaml written before expiry tracking stored `''`, so the
+        freshness guard was skipped and the upload answered 401 while a valid
+        refresh token was persisted.
+        """
+        with patch.dict(os.environ, {
+                "TWITTER_OAUTH2_ACCESS_TOKEN": "",
+                "TWITTER_OAUTH2_EXPIRES_AT": "",
+                "TWITTER_OAUTH2_REFRESH_TOKEN": "refresh-token",
+        }, clear=False), \
+                patch("clipmorph.upload_pipeline.platforms.twitter."
+                      "refresh_twitter_access_token",
+                      return_value={"oauth2_access_token": "fresh-access",
+                                    "oauth2_expires_at": "4102444800"}) as refresh:
+            pipeline = TwitterUploadPipeline(
+                twitter_client_id="client-id",
+                twitter_client_secret="client-secret",
+                twitter_oauth2_access_token="stale-access")
+            pipeline._authenticate()
+
+        refresh.assert_called_once()
+        self.assertEqual(pipeline.access_token, "fresh-access")
+        self.assertEqual(pipeline.expires_at, 4102444800)
+        self.assertIsNotNone(pipeline.oauth_session)
+
+    def test_twitter_refresh_is_attempted_when_the_access_token_is_absent(self):
+        """A stored refresh token without an access token refreshes, not raises."""
+        with patch.dict(os.environ, {
+                "TWITTER_OAUTH2_ACCESS_TOKEN": "",
+                "TWITTER_OAUTH2_REFRESH_TOKEN": "",
+                "TWITTER_OAUTH2_EXPIRES_AT": "",
+        }, clear=False), \
+                patch("clipmorph.upload_pipeline.platforms.twitter."
+                      "refresh_twitter_access_token",
+                      return_value={"oauth2_access_token": "fresh-access",
+                                    "oauth2_expires_at": "4102444800"}) as refresh:
+            pipeline = TwitterUploadPipeline(
+                twitter_client_id="client-id",
+                twitter_client_secret="client-secret",
+                twitter_oauth2_refresh_token="refresh-token")
+            pipeline._authenticate()
+
+        refresh.assert_called_once()
+        self.assertEqual(pipeline.access_token, "fresh-access")
+
+    def test_twitter_create_tweet_stays_on_v2_without_fallback(self):
+        pipeline = TwitterUploadPipeline(
+            twitter_client_id="client-id",
+            twitter_client_secret="client-secret",
+            twitter_oauth2_access_token="access-token",
+            twitter_oauth2_refresh_token="refresh-token")
+        pipeline.oauth_session = MagicMock()
+        pipeline.oauth_session.post.return_value = SimpleNamespace(
+            status_code=200,
+            ok=True,
+            reason="OK",
+            json=lambda: {"data": {"id": "tweet-1"}},
+            raise_for_status=lambda: None)
+
+        self.assertEqual(pipeline._create_tweet("text", "media-1"), "tweet-1")
+        self.assertEqual(
+            pipeline.oauth_session.post.call_args.kwargs["json"],
+            {"text": "text", "media": {"media_ids": ["media-1"]}})
 
     def test_twitter_media_upload_uses_v2_chunked_oauth2_flow(self):
         pipeline = TwitterUploadPipeline(
