@@ -116,7 +116,7 @@ class TwitterUploadPipeline(BaseUploadPipeline):
             pass
 
     def _authenticate(self):
-        """Authenticate the X API v2 session with an OAuth2 user token."""
+        """Authenticate the X API v2 session with a fresh-enough user token."""
         if not self.access_token and not self.refresh_token:
             if self.progress_bar:
                 self.progress_bar.write(
@@ -128,7 +128,13 @@ class TwitterUploadPipeline(BaseUploadPipeline):
             expiry = os.getenv("TWITTER_OAUTH2_EXPIRES_AT")
             self.expires_at = int(expiry) if expiry and expiry.isdigit() else 0
 
-        if self.expires_at and self.expires_at <= int(time.time()) + 60:
+        # An unreadable stored expiry (`oauth2_expires_at: ''`) must refresh
+        # too: otherwise the static access token is sent whatever its age and
+        # fails 401 at upload time even though a valid refresh token waits.
+        if self.refresh_token and (
+                not self.access_token
+                or not self.expires_at
+                or self.expires_at <= int(time.time()) + 60):
             try:
                 values = refresh_twitter_access_token(self.data_dir)
             except requests.exceptions.HTTPError:
@@ -142,9 +148,10 @@ class TwitterUploadPipeline(BaseUploadPipeline):
                     "oauth2_refresh_token": os.getenv("TWITTER_OAUTH2_REFRESH_TOKEN"),
                     "oauth2_expires_at": os.getenv("TWITTER_OAUTH2_EXPIRES_AT"),
                 }
-            self.access_token = values["oauth2_access_token"]
-            self.refresh_token = values.get("oauth2_refresh_token", self.refresh_token)
-            self.expires_at = int(values["oauth2_expires_at"])
+            self.access_token = values.get("oauth2_access_token") or self.access_token
+            self.refresh_token = (values.get("oauth2_refresh_token")
+                                  or self.refresh_token)
+            self.expires_at = int(values.get("oauth2_expires_at") or 0)
         if not self.access_token:
             raise ValueError("X OAuth2 user access token is unavailable")
 
@@ -192,7 +199,7 @@ class TwitterUploadPipeline(BaseUploadPipeline):
         media_type = mimetypes.guess_type(video_path)[0] or "video/mp4"
 
         def initialize_upload():
-                return self.oauth_session.post(
+            return self.oauth_session.post(
                 f"{self.TWITTER_UPLOAD_BASE_URL}/initialize",
                 json={
                     "media_type": media_type,

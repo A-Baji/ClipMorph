@@ -167,10 +167,13 @@ class FacebookRunTests(unittest.TestCase):
                               return_value=("v1", "url")) as init, \
                     patch.object(pipeline, "_upload_reel") as upload, \
                     patch.object(pipeline, "_finish_reel",
-                                 return_value="v1") as finish:
+                                 return_value="v1") as finish, \
+                    patch.object(pipeline, "_resolve_page_token",
+                                 side_effect=lambda _page, token: token) as resolve:
                 result = pipeline.run(str(video), "caption")
 
         self.assertEqual(result, "v1")
+        resolve.assert_called_once_with("page-1", "page-token")
         init.assert_called_once_with("page-1", "page-token")
         upload.assert_called_once()
         finish.assert_called_once()
@@ -183,11 +186,14 @@ class FacebookRunTests(unittest.TestCase):
                               return_value=("s1", "v1", 0, 5)) as init, \
                     patch.object(pipeline, "_upload_chunks") as chunks, \
                     patch.object(pipeline, "_finish_video",
-                                 return_value="published-9") as finish:
+                                 return_value="published-9") as finish, \
+                    patch.object(pipeline, "_resolve_page_token",
+                                 side_effect=lambda _page, token: token) as resolve:
                 result = pipeline.run(str(video), "caption",
                                       content_kind="video")
 
         self.assertEqual(result, "published-9")
+        resolve.assert_called_once_with("page-1", "page-token")
         init.assert_called_once_with("page-1", "page-token", 5)
         chunks.assert_called_once()
         finish.assert_called_once()
@@ -197,6 +203,132 @@ class FacebookRunTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,
                                     "Invalid Facebook content kind"):
             pipeline.run("video.mp4", "caption", content_kind="story")
+
+
+class FacebookPageTokenTests(unittest.TestCase):
+    """The publish-time Page-token derivation and its use across phases.
+
+    The network seam is the module's ``requests`` binding, so all Graph
+    traffic — the ``fields=access_token`` exchange and both ``video_reels``
+    phases — is patched; the ``rupload`` transfer is reached through
+    ``_upload_reel``, which posts to the URL the start phase returns.
+    """
+
+    GET = "clipmorph.upload_pipeline.platforms.facebook.requests.get"
+
+    def _video(self, temp_dir):
+        path = Path(temp_dir) / "clip.mp4"
+        path.write_bytes(b"video")
+        return path
+
+    def _get_response(self, payload):
+        return SimpleNamespace(status_code=200, ok=True, reason="OK",
+                               text="", json=lambda: payload)
+
+    def test_resolve_page_token_derives_the_page_token(self):
+        pipeline = _pipeline()
+        with patch(self.GET, return_value=self._get_response(
+                {"access_token": "derived-page-token"})) as get:
+            result = pipeline._resolve_page_token("page-1", "user-token")
+
+        self.assertEqual(result, "derived-page-token")
+        self.assertEqual(
+            get.call_args.args[0],
+            "https://graph.facebook.com/v23.0/page-1"
+            "?fields=access_token&access_token=user-token")
+
+    def test_resolve_page_token_falls_back_without_access_token(self):
+        pipeline = _pipeline()
+        with patch(self.GET, return_value=self._get_response({"id": "page-1"})):
+            result = pipeline._resolve_page_token("page-1", "page-token")
+
+        self.assertEqual(result, "page-token")
+
+    def test_derived_token_is_used_on_every_phase(self):
+        pipeline = _pipeline()
+        graph_posts = [
+            _response({"video_id": "v1",
+                       "upload_url": "https://rupload.example/v1"}),
+            _response({"success": True}),  # rupload binary transfer
+            _response({"success": True}),  # finish
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video = self._video(temp_dir)
+            with patch(self.GET, return_value=self._get_response(
+                    {"access_token": "derived-page-token"})) as get, \
+                    patch(POST, side_effect=graph_posts) as post:
+                result = pipeline.run(str(video), "caption")
+
+        self.assertEqual(result, "v1")
+        self.assertEqual(post.call_count, 3)
+        start, binary, finish = post.call_args_list
+        self.assertEqual(
+            start.kwargs["data"],
+            {"upload_phase": "start",
+             "access_token": "derived-page-token"})
+        self.assertEqual(binary.kwargs["headers"]["Authorization"],
+                         "OAuth derived-page-token")
+        self.assertEqual(finish.kwargs["data"]["access_token"],
+                         "derived-page-token")
+        get.assert_called_once()
+
+    def test_derived_token_reaches_rupload_authorization_header(self):
+        pipeline = _pipeline()
+        posts = [
+            _response({"video_id": "v1",
+                       "upload_url": "https://rupload.example/v1"}),
+            _response({"success": True}),  # rupload binary transfer
+            _response({"success": True}),  # finish
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video = self._video(temp_dir)
+            with patch(self.GET, return_value=self._get_response(
+                    {"access_token": "derived-page-token"})), \
+                    patch(POST, side_effect=posts) as post:
+                pipeline.run(str(video), "caption")
+
+        binary_call = post.call_args_list[1]
+        self.assertEqual(binary_call.args[0], "https://rupload.example/v1")
+        self.assertEqual(binary_call.kwargs["headers"]["Authorization"],
+                         "OAuth derived-page-token")
+
+    def test_configured_token_is_used_when_the_exchange_has_no_access_token(
+            self):
+        pipeline = _pipeline()
+        posts = [
+            _response({"video_id": "v1",
+                       "upload_url": "https://rupload.example/v1"}),
+            _response({"success": True}),  # rupload binary transfer
+            _response({"success": True}),  # finish
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video = self._video(temp_dir)
+            with patch(self.GET, return_value=self._get_response(
+                    {"id": "page-1"})), \
+                    patch(POST, side_effect=posts) as post:
+                pipeline.run(str(video), "caption")
+
+        start, binary, finish = post.call_args_list
+        self.assertEqual(start.kwargs["data"]["access_token"], "page-token")
+        self.assertEqual(binary.kwargs["headers"]["Authorization"],
+                         "OAuth page-token")
+        self.assertEqual(finish.kwargs["data"]["access_token"],
+                         "page-token")
+
+    def test_exchange_is_issued_exactly_once_per_run(self):
+        pipeline = _pipeline()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video = self._video(temp_dir)
+            with patch.object(pipeline, "_resolve_page_token",
+                              return_value="derived") as resolve, \
+                    patch.object(pipeline, "_initialize_video",
+                                 return_value=("s1", "v1", 0, 5)), \
+                    patch.object(pipeline, "_upload_chunks"), \
+                    patch.object(pipeline, "_finish_video",
+                                 return_value="published-9"):
+                pipeline.run(str(video), "caption", content_kind="video")
+
+        self.assertEqual(resolve.call_count, 1)
 
 
 class FacebookErrorTests(unittest.TestCase):

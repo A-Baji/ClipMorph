@@ -1,4 +1,6 @@
 import os
+import re
+import hashlib
 import requests
 import tempfile
 import unittest
@@ -14,7 +16,27 @@ from clipmorph.upload_pipeline.platforms.tiktok import TikTokUploadPipeline
 from clipmorph.upload_pipeline.platforms.twitter import TwitterUploadPipeline
 
 
-class AuthPersistenceTests(unittest.TestCase):
+class _IsolatedAuthFile:
+    """Keep any real persist in a test flow inside a throwaway auth file.
+
+    ``persist_auth_credentials`` falls back to the DEFAULT data directory when
+    no data dir or active auth path is known; a test that exercises the real
+    persist path with mock token values must therefore claim the active auth
+    path itself, or the suite overwrites the developer's real credentials with
+    mock strings (observed: tiktok refresh_token became the literal mock).
+    """
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        auth_path = Path(temp.name) / "auth.yaml"
+        auth_path.write_text("auth_schema_version: 2\n", encoding="utf-8")
+        patcher = patch.object(auth_module, "_active_auth_path", auth_path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+
+class AuthPersistenceTests(_IsolatedAuthFile, unittest.TestCase):
     def test_job_service_loads_workspace_auth_and_persists_to_it(self):
         """CLI-built services load auth.yaml once and stays bound to it.
 
@@ -27,6 +49,7 @@ class AuthPersistenceTests(unittest.TestCase):
             data_dir = Path(temp_dir)
             auth_path = data_dir / "auth.yaml"
             auth_path.write_text(
+                "auth_schema_version: 2\n"
                 "youtube:\n"
                 "    client_id: id\n"
                 "    client_secret: secret\n"
@@ -63,7 +86,115 @@ class AuthPersistenceTests(unittest.TestCase):
                 finally:
                     service.close()
 
-class OAuthTests(unittest.TestCase):
+    def test_twitter_auth_uses_active_auth_path_when_data_dir_is_none(self):
+        """Twitter OAuth flows must persist tokens to the loaded workspace.
+
+        When JobService loads auth.yaml from a custom data dir, the active
+        auth path points there. Calling authorize_twitter/refresh_twitter
+        without an explicit data_dir must write back to that same file instead
+        of falling back to the default data directory (#226 follow-up).
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            auth_path = data_dir / "auth.yaml"
+            auth_path.write_text(
+                "auth_schema_version: 2\n"
+                "twitter:\n"
+                "    client_id: client\n"
+                "    client_secret: secret\n"
+                "    oauth2_access_token: \"\"\n"
+                "    oauth2_refresh_token: \"\"\n"
+                "    oauth2_expires_at: \"\"\n",
+                encoding="utf-8")
+
+            from clipmorph.twitter_auth import authorize_twitter
+
+            auth_module.load_auth_config(data_dir)
+
+            mock_server = MagicMock()
+            mock_server.callback = {
+                "state": ["state"],
+                "code": ["code"],
+            }
+            mock_server.server_close = MagicMock()
+
+            with patch.dict(os.environ), \
+                    patch("clipmorph.twitter_auth.load_auth_config") as load, \
+                    patch("clipmorph.twitter_auth.persist_auth_credentials",
+                          return_value=auth_path) as persist, \
+                    patch("clipmorph.twitter_auth.HTTPServer",
+                          return_value=mock_server) as server, \
+                    patch("clipmorph.twitter_auth.webbrowser.open"), \
+                    patch("clipmorph.twitter_auth.secrets.token_urlsafe",
+                          return_value="state"), \
+                    patch("clipmorph.twitter_auth.requests.post") as post:
+                load.return_value = {
+                    "twitter": {
+                        "client_id": "client",
+                        "client_secret": "secret",
+                    }
+                }
+                post.return_value = SimpleNamespace(
+                    ok=True,
+                    json=lambda: {
+                        "access_token": "access",
+                        "refresh_token": "rotated",
+                        "expires_in": 7200,
+                    },
+                    raise_for_status=lambda: None)
+
+                authorize_twitter(None)
+
+                server.assert_called_once()
+                load.assert_called_once_with(data_dir)
+                persist.assert_called_once()
+                self.assertEqual(persist.call_args.args[2], data_dir)
+
+    def test_twitter_refresh_uses_active_auth_path_when_data_dir_is_none(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            auth_path = data_dir / "auth.yaml"
+            auth_path.write_text(
+                "auth_schema_version: 2\n"
+                "twitter:\n"
+                "    client_id: client\n"
+                "    client_secret: secret\n"
+                "    oauth2_refresh_token: refresh\n",
+                encoding="utf-8")
+
+            from clipmorph.twitter_auth import refresh_twitter_access_token
+
+            auth_module.load_auth_config(data_dir)
+
+            with patch.dict(os.environ), \
+                    patch("clipmorph.twitter_auth.load_auth_config") as load, \
+                    patch("clipmorph.twitter_auth.persist_auth_credentials",
+                          return_value=auth_path) as persist, \
+                    patch("clipmorph.twitter_auth.requests.post") as post:
+                load.return_value = {
+                    "twitter": {
+                        "client_id": "client",
+                        "client_secret": "secret",
+                        "oauth2_refresh_token": "refresh",
+                    }
+                }
+                post.return_value = SimpleNamespace(
+                    ok=True,
+                    json=lambda: {
+                        "access_token": "access",
+                        "refresh_token": "rotated",
+                        "expires_in": 7200,
+                    },
+                    raise_for_status=lambda: None)
+
+                refresh_twitter_access_token(None)
+
+                load.assert_called_with(data_dir)
+                persist.assert_called_once()
+                self.assertEqual(persist.call_args.args[2], data_dir)
+
+
+class OAuthTests(_IsolatedAuthFile, unittest.TestCase):
     def test_tiktok_video_init_includes_brand_content_toggle(self):
         pipeline = TikTokUploadPipeline(
             tiktok_client_key="client",
@@ -100,14 +231,33 @@ class OAuthTests(unittest.TestCase):
         self.assertIn("scope_not_authorized", response.reason)
         self.assertIn("log-123", response.reason)
 
-    def test_tiktok_pkce_uses_base64url_s256(self):
+    def test_tiktok_pkce_uses_hex_sha256_per_tiktok_desktop_doc(self):
         pipeline = TikTokUploadPipeline(
             tiktok_client_key="client",
             tiktok_client_secret="secret")
         verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
         self.assertEqual(
             pipeline._generate_code_challenge(verifier),
-            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
+            "13d31e961a1ad8ec2f16b10c4c982e0876a878ad6df144566ee1894acb70f9c3")
+
+    def test_tiktok_pkce_pair_verifier_is_alnum_and_challenge_is_hex(self):
+        """The verifier avoids punctuation and the challenge is hex SHA256.
+
+        TikTok's desktop doc: verifier charset excludes punctuation that
+        TikTok rejects (RFC 7636 would allow it), and the challenge is the
+        hex encoding of SHA256 (64 lowercase hex characters), not the RFC
+        base64url spelling other providers accept.
+        """
+        pipeline = TikTokUploadPipeline(
+            tiktok_client_key="client",
+            tiktok_client_secret="secret")
+        for _ in range(50):
+            verifier, challenge = pipeline._generate_pkce_pair()
+            self.assertTrue(re.fullmatch(r"[A-Za-z0-9]{64}", verifier))
+            self.assertTrue(re.fullmatch(r"[0-9a-f]{64}", challenge))
+            self.assertEqual(
+                hashlib.sha256(verifier.encode("utf-8")).hexdigest(),
+                challenge)
 
     def test_tiktok_auth_url_carries_generated_state(self):
         pipeline = TikTokUploadPipeline(
@@ -162,16 +312,21 @@ class OAuthTests(unittest.TestCase):
             tiktok_client_key="client",
             tiktok_client_secret="secret",
             tiktok_refresh_token="expired")
-        refreshed = {"access_token": "new-access", "refresh_token": "new-refresh"}
-        with patch.object(pipeline, "generate_refresh_token", return_value="new-refresh") as generate, \
-                patch.object(pipeline, "_retry_request") as retry_request:
-            accepted = MagicMock()
-            accepted.json.return_value = refreshed
-            retry_request.side_effect = [requests.exceptions.HTTPError("expired"), accepted]
+        with patch.object(pipeline, "generate_refresh_token",
+                          return_value={"access_token": "new-access",
+                                        "refresh_token": "new-refresh"}
+                          ) as generate, \
+                patch.object(pipeline, "_retry_request"
+                             ) as retry_request:
+            retry_request.side_effect = [requests.exceptions.HTTPError("expired")]
 
             self.assertEqual(pipeline._refresh_access_token(), "new-access")
 
         generate.assert_called_once_with()
+        # The interactive flow already returned tokens: no second token
+        # grant may consume the freshly issued refresh token.
+        self.assertEqual(pipeline.access_token, "new-access")
+        self.assertEqual(retry_request.call_count, 1)
 
     def test_tiktok_refresh_falls_back_on_json_token_error(self):
         pipeline = TikTokUploadPipeline(
@@ -183,10 +338,12 @@ class OAuthTests(unittest.TestCase):
             "error": "invalid_grant",
             "error_description": "Refresh token expired",
         }
-        accepted = MagicMock()
-        accepted.json.return_value = {"access_token": "new-access"}
-        with patch.object(pipeline, "generate_refresh_token", return_value="new-refresh") as generate, \
-                patch.object(pipeline, "_retry_request", side_effect=[rejected, accepted]):
+        with patch.object(pipeline, "generate_refresh_token",
+                          return_value={"access_token": "new-access",
+                                        "refresh_token": "new-refresh"}
+                          ) as generate, \
+                patch.object(pipeline, "_retry_request",
+                             side_effect=[rejected]):
             self.assertEqual(pipeline._refresh_access_token(), "new-access")
 
         generate.assert_called_once_with()
@@ -207,7 +364,9 @@ class OAuthTests(unittest.TestCase):
                     "http://127.0.0.1:80/callback/?code=code&state=state")), \
                     patch("secrets.token_urlsafe", return_value="state"), \
                     patch.object(pipeline, "_generate_code_challenge", return_value="challenge"):
-                self.assertEqual(pipeline.generate_refresh_token(), "refresh")
+                self.assertEqual(
+                    pipeline.generate_refresh_token()["refresh_token"],
+                    "refresh")
 
     def test_tiktok_upload_passes_file_stream_to_http_client(self):
         pipeline = TikTokUploadPipeline(
@@ -250,6 +409,72 @@ class OAuthTests(unittest.TestCase):
 
         authorize.assert_called_once_with(None)
         self.assertIsNotNone(pipeline.oauth_session)
+
+    def test_twitter_refreshes_at_upload_time_when_the_stored_expiry_is_empty(self):
+        """An unreadable `oauth2_expires_at` must not send a stale token.
+
+        An auth.yaml written before expiry tracking stored `''`, so the
+        freshness guard was skipped and the upload answered 401 while a valid
+        refresh token was persisted.
+        """
+        with patch.dict(os.environ, {
+                "TWITTER_OAUTH2_ACCESS_TOKEN": "",
+                "TWITTER_OAUTH2_EXPIRES_AT": "",
+                "TWITTER_OAUTH2_REFRESH_TOKEN": "refresh-token",
+        }, clear=False), \
+                patch("clipmorph.upload_pipeline.platforms.twitter."
+                      "refresh_twitter_access_token",
+                      return_value={"oauth2_access_token": "fresh-access",
+                                    "oauth2_expires_at": "4102444800"}) as refresh:
+            pipeline = TwitterUploadPipeline(
+                twitter_client_id="client-id",
+                twitter_client_secret="client-secret",
+                twitter_oauth2_access_token="stale-access")
+            pipeline._authenticate()
+
+        refresh.assert_called_once()
+        self.assertEqual(pipeline.access_token, "fresh-access")
+        self.assertEqual(pipeline.expires_at, 4102444800)
+        self.assertIsNotNone(pipeline.oauth_session)
+
+    def test_twitter_refresh_is_attempted_when_the_access_token_is_absent(self):
+        """A stored refresh token without an access token refreshes, not raises."""
+        with patch.dict(os.environ, {
+                "TWITTER_OAUTH2_ACCESS_TOKEN": "",
+                "TWITTER_OAUTH2_REFRESH_TOKEN": "",
+                "TWITTER_OAUTH2_EXPIRES_AT": "",
+        }, clear=False), \
+                patch("clipmorph.upload_pipeline.platforms.twitter."
+                      "refresh_twitter_access_token",
+                      return_value={"oauth2_access_token": "fresh-access",
+                                    "oauth2_expires_at": "4102444800"}) as refresh:
+            pipeline = TwitterUploadPipeline(
+                twitter_client_id="client-id",
+                twitter_client_secret="client-secret",
+                twitter_oauth2_refresh_token="refresh-token")
+            pipeline._authenticate()
+
+        refresh.assert_called_once()
+        self.assertEqual(pipeline.access_token, "fresh-access")
+
+    def test_twitter_create_tweet_stays_on_v2_without_fallback(self):
+        pipeline = TwitterUploadPipeline(
+            twitter_client_id="client-id",
+            twitter_client_secret="client-secret",
+            twitter_oauth2_access_token="access-token",
+            twitter_oauth2_refresh_token="refresh-token")
+        pipeline.oauth_session = MagicMock()
+        pipeline.oauth_session.post.return_value = SimpleNamespace(
+            status_code=200,
+            ok=True,
+            reason="OK",
+            json=lambda: {"data": {"id": "tweet-1"}},
+            raise_for_status=lambda: None)
+
+        self.assertEqual(pipeline._create_tweet("text", "media-1"), "tweet-1")
+        self.assertEqual(
+            pipeline.oauth_session.post.call_args.kwargs["json"],
+            {"text": "text", "media": {"media_ids": ["media-1"]}})
 
     def test_twitter_media_upload_uses_v2_chunked_oauth2_flow(self):
         pipeline = TwitterUploadPipeline(
@@ -314,6 +539,66 @@ class OAuthTests(unittest.TestCase):
         self.assertEqual(pipeline.oauth_session.get.call_count, 3)
         status_url = pipeline.oauth_session.get.call_args_list[0].args[0]
         self.assertIn("api.x.com/2/media/upload?command=STATUS", status_url)
+
+
+class InstagramLoginDialogTests(unittest.TestCase):
+    """The Meta login dialog URL branches on the FL4B Configuration.
+
+    A Facebook Login for Business app authorizes through a Configuration
+    (`config_id` has replaced `scope`), so the dialog URL must carry the
+    stored Configuration ID and no scope list at all.
+    """
+
+    @staticmethod
+    def _pipeline(config_id):
+        from clipmorph.upload_pipeline.platforms.instagram import (
+            InstagramUploadPipeline,
+        )
+        return InstagramUploadPipeline(
+            facebook_app_id="app-id",
+            facebook_app_secret="app-secret",
+            facebook_page_id="page-id",
+            facebook_access_token="page-token",
+            facebook_config_id=config_id,
+            gcp_project_id="project",
+            gcp_private_key_id="key-id",
+            gcp_private_key="private-key",
+            gcp_client_email="uploader@example.iam.gserviceaccount.com",
+            gcp_client_id="gcp-client-id",
+            gcs_bucket_name="bucket")
+
+    def _login_dialog_url(self, pipeline):
+        """Drive the interactive flow with the network mocked out."""
+        with patch("clipmorph.upload_pipeline.platforms.instagram."
+                   "webbrowser.open") as open_browser, \
+                patch("builtins.input", return_value="redirect-code"), \
+                patch("clipmorph.upload_pipeline.platforms.instagram."
+                      "requests.get",
+                      return_value=SimpleNamespace(
+                          ok=True,
+                          json=lambda: {"access_token": "issued-token"})):
+            pipeline.get_user_access_token()
+        return open_browser.call_args.args[0]
+
+    def test_fl4b_config_id_replaces_the_scope_parameter(self):
+        pipeline = self._pipeline("config-123")
+        url = self._login_dialog_url(pipeline)
+
+        self.assertIn("dialog/oauth?client_id=app-id", url)
+        self.assertIn("redirect_uri=https://localhost/", url)
+        self.assertIn("config_id=config-123", url)
+        self.assertIn("response_type=code", url)
+        self.assertNotIn("scope=", url)
+
+    def test_without_a_config_id_the_scope_url_is_unchanged(self):
+        pipeline = self._pipeline(None)
+        url = self._login_dialog_url(pipeline)
+
+        self.assertIn(
+            "&scope=instagram_basic,pages_show_list,pages_read_engagement,"
+            "pages_manage_posts,instagram_content_publish"
+            "&response_type=code", url)
+        self.assertNotIn("config_id=", url)
 
 
 if __name__ == "__main__":

@@ -74,6 +74,31 @@ class TranscriptionConfigTests(unittest.TestCase):
             _ = pipeline._whisper_model
             load_model.assert_called_once_with("tiny", device="cpu")
 
+    def test_helper_models_follow_pipeline_device_not_import_time_cuda(self):
+        """Alignment and diarization load on the pipeline's resolved device.
+
+        A module-level device constant is evaluated once at import, so on a
+        CUDA machine it forced the helper models onto GPU even when the job
+        requested cpu, crashing align with a CPU-input/CUDA-weights mismatch.
+        """
+        pipeline = TranscriptionPipeline(
+            "sample.wav", model_name="tiny", device="cpu")
+        with patch(
+                "clipmorph.conversion_pipeline.transcribe.whisperx.load_align_model",
+        ) as load_align_model:
+            load_align_model.return_value = (MagicMock(), {})
+            _ = pipeline._align_model_data
+            load_align_model.assert_called_once_with(language_code="en",
+                                                     device="cpu")
+        with patch(
+                "clipmorph.conversion_pipeline.transcribe.whisperx_diarize"
+                ".DiarizationPipeline",
+        ) as diarization_pipeline, patch.dict(
+                "os.environ", {"HUGGING_FACE_ACCESS_TOKEN": "test-token"}):
+            _ = pipeline._diarization_model
+            diarization_pipeline.assert_called_once_with(token="test-token",
+                                                         device="cpu")
+
 
 class ReviewedTranscriptTests(unittest.TestCase):
     def test_word_annotations_replace_censored_text(self):

@@ -71,7 +71,18 @@ when these markers and the registry disagree, in either direction.
    by passing that keyword from `clipmorph/upload_attempts.py`. Lazy-import
    rules apply: heavy media and ML dependencies stay out of the `--help` and
    `init` paths.
+
+   Credential renewal also belongs to the adapter: a platform whose
+   credentials expire re-authenticates itself at attempt time — refresh a
+   stored token and, when that is rejected, fall back to that platform's
+   interactive authorization flow — so an attempt never fails with a stale
+   token that a fresh one would pass. A credential that the adapter
+   renews by derivation instead (Facebook's long-lived user token, from
+   which the Page token is derived per run) documents that in the
+   adapter.
    *Fails without it:*
+   `PlatformCoverageDriftTests.test_adapter_credentials_renew_at_attempt_time`
+   and
    `PlatformCoverageDriftTests.test_adapter_module_and_pipeline_keyword_exist_for_every_platform`.
 
 4. **Upload options and credentials surface — `clipmorph/platforms.py`,

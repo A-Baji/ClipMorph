@@ -1178,6 +1178,51 @@ class WorkflowStageSkipReconciliationTests(unittest.TestCase):
                     "current_artifact_id"])
 
 
+class WorkflowAutoUploadTests(unittest.TestCase):
+    def test_upload_gate_auto_accepts_and_submits_under_no_confirm(self):
+        """`general.no_confirm = true` skips the upload approval gate.
+
+        The workflow parks a pending upload checkpoint at `awaiting_review`
+        and then, because the gate is confirmed, submits the attempts through
+        a borrowed service and waits for them to settle before returning.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            source_dir = data_dir / "sources"
+            source_dir.mkdir(parents=True)
+            source = source_dir / "clip.mp4"
+            source.write_bytes(b"video")
+            service = JobService(data_dir)
+            self.addCleanup(service.close)
+            manifest = JobManifest.create(str(source), {
+                "general": {"no_confirm": True},
+                "conversion": {"skip": True, "subtitles": {"skip": True}},
+            }, service.jobs_dir)
+            manifest.record_artifact("source", source, service.jobs_dir)
+            fake_runner = type("FakeRunner", (), {
+                "get_video_info": lambda _self, _path: {
+                    "format": {"duration": "3"},
+                    "streams": [{"codec_type": "video", "width": 1920,
+                                 "height": 1080}],
+                },
+            })()
+
+            with patch("clipmorph.workflow.configure_ffmpeg"), \
+                    patch("clipmorph.workflow.FFmpegRunner",
+                          return_value=fake_runner), \
+                    patch("clipmorph.workflow.PreflightValidator"), \
+                    patch("clipmorph.upload_attempts.execute_upload_pipeline",
+                          side_effect=_upload_results(
+                              ["youtube", "instagram", "tiktok", "twitter",
+                               "facebook"])):
+                execute_job(manifest, CancellationToken(), service.jobs_dir)
+
+            saved = service.get_job(manifest.job_id)
+            self.assertEqual(saved.checkpoints["upload"]["status"], "completed")
+            self.assertEqual(saved.upload_attempts[0]["status"], "published")
+            self.assertEqual(saved.status, "completed")
+
+
 def _two_group_job(service: JobService, data_dir: Path) -> JobManifest:
     """Create a job with a rendered group and a source-bound group.
 

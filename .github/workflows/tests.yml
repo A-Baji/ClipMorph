@@ -93,22 +93,29 @@ jobs:
             --job-configs "$RUNNER_TEMP/job.yml" --dry-run
           JOB_RESULT=$(python -m clipmorph --data-dir "$DATA_DIR" job create \
             "$SAMPLE" --job-configs "$RUNNER_TEMP/job.yml" --json)
-          JOB_ID=$(python -c 'import json,sys; print(json.load(sys.stdin)["created"][0]["job_id"])' <<<"$JOB_RESULT")
-          python -m clipmorph --data-dir "$DATA_DIR" job get "$JOB_ID" --json > "$RUNNER_TEMP/job.json"
-          python -c 'import json,pathlib; job=json.loads(pathlib.Path("'$RUNNER_TEMP'/job.json").read_text()); assert job["checkpoints"]["upload"]["status"] == "awaiting_review"'
+          echo "$JOB_RESULT" | python -c 'import json,sys; result=json.load(sys.stdin); row=result["created"][0]; assert row["code"] == "created", row; print(row["job_id"])' > "$RUNNER_TEMP/job_id.txt"
+          JOB_ID=$(cat "$RUNNER_TEMP/job_id.txt")
 
-          if python -m clipmorph --data-dir "$DATA_DIR" job resume "$JOB_ID" \
-              > "$RUNNER_TEMP/resume.log" 2>&1; then
-            echo "job resume unexpectedly bypassed upload review" >&2
+          python -m clipmorph --data-dir "$DATA_DIR" job get "$JOB_ID" --json > "$RUNNER_TEMP/job.json"
+          python -c 'import json,pathlib; job=json.loads(pathlib.Path("'$RUNNER_TEMP'/job.json").read_text()); assert job["status"] == "created"; assert job["checkpoints"]["upload"]["status"] == "pending"'
+
+          # `job run` without --yes and without a terminal must stop at the
+          # upload review gate instead of accepting it.
+          if python -m clipmorph --data-dir "$DATA_DIR" job run "$JOB_ID" \
+              > "$RUNNER_TEMP/run.log" 2>&1; then
+            echo "job run without --yes unexpectedly accepted the upload review gate" >&2
             exit 1
-          else
-            RESUME_STATUS=$?
-            if [ "$RESUME_STATUS" -ne 2 ]; then
-              cat "$RUNNER_TEMP/resume.log" >&2
-              exit "$RESUME_STATUS"
-            fi
           fi
-          grep -F "job requires review before it can resume" "$RUNNER_TEMP/resume.log"
+          grep -F "the review gate needs a terminal or --yes" "$RUNNER_TEMP/run.log"
+
+          # --yes drives the pipeline to completion of the skipped stages and
+          # consumes the upload gate. Upload attempts fail without runner
+          # credentials, so the command may exit nonzero, but no checkpoint may
+          # remain awaiting review.
+          python -m clipmorph --data-dir "$DATA_DIR" job run "$JOB_ID" --yes \
+            > "$RUNNER_TEMP/run-yes.log" 2>&1 || true
+          python -m clipmorph --data-dir "$DATA_DIR" job get "$JOB_ID" --json > "$RUNNER_TEMP/job.json"
+          python -c 'import json,pathlib; job=json.loads(pathlib.Path("'$RUNNER_TEMP'/job.json").read_text()); assert job["status"] in {"completed", "failed"}; assert all(c["status"] != "awaiting_review" for c in job["checkpoints"].values()); assert job["checkpoints"]["transcript"]["status"] == "skipped"; assert job["checkpoints"]["conversion"]["status"] == "skipped"'
         shell: bash
 
       - name: Verify package install

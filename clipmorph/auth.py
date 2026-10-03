@@ -15,24 +15,45 @@ from clipmorph.job import default_data_dir
 AUTH_FILE_NAME = "auth.yaml"
 _active_auth_path: Path | None = None
 
+# Auth.yaml stores the whole Meta surface under ONE top-level `meta:` group,
+# because the facebook and instagram adapters publish through the same Meta
+# app and Page (`FACEBOOK_*` environment keys): the shared fields sit at
+# `meta:`'s root, and the Instagram hosting block nests at `meta.instagram:`.
+# Version 1 files stored these as root `facebook:`/`instagram:` sections;
+# version 2 refuses them with an actionable error instead of migrating.
+AUTH_SCHEMA_VERSION = 2
+
+# The shared Meta app and access-token fields, mapped to the env keys the Meta
+# adapters read (`FACEBOOK_CONFIG_ID` is the optional Facebook Login for
+# Business Configuration ID; only the Instagram login URL sends it).
+META_ENVIRONMENT_KEYS = {
+    "app_id": "FACEBOOK_APP_ID",
+    "app_secret": "FACEBOOK_APP_SECRET",
+    "page_id": "FACEBOOK_PAGE_ID",
+    "access_token": "FACEBOOK_ACCESS_TOKEN",
+    "config_id": "FACEBOOK_CONFIG_ID",
+}
+
+# The Instagram hosting block (nested at `meta.instagram:`), mapped to the
+# env keys only the Instagram adapter reads.
+INSTAGRAM_HOSTING_ENVIRONMENT_KEYS = {
+    "gcs_bucket_name": "GCS_BUCKET_NAME",
+    "gcp_private_key_id": "GCP_PRIVATE_KEY_ID",
+    "gcp_private_key": "GCP_PRIVATE_KEY",
+    "gcp_client_email": "GCP_CLIENT_EMAIL",
+    "gcp_client_id": "GCP_CLIENT_ID",
+    "gcp_project_id": "GCP_PROJECT_ID",
+}
+
 AUTH_ENVIRONMENT_KEYS = {
     "youtube": {
         "client_id": "GOOGLE_CLIENT_ID",
         "client_secret": "GOOGLE_CLIENT_SECRET",
         "refresh_token": "GOOGLE_REFRESH_TOKEN",
     },
-    "instagram": {
-        "app_id": "FACEBOOK_APP_ID",
-        "app_secret": "FACEBOOK_APP_SECRET",
-        "page_id": "FACEBOOK_PAGE_ID",
-        "access_token": "FACEBOOK_ACCESS_TOKEN",
-        "gcs_bucket_name": "GCS_BUCKET_NAME",
-        "gcp_private_key_id": "GCP_PRIVATE_KEY_ID",
-        "gcp_private_key": "GCP_PRIVATE_KEY",
-        "gcp_client_email": "GCP_CLIENT_EMAIL",
-        "gcp_client_id": "GCP_CLIENT_ID",
-        "gcp_project_id": "GCP_PROJECT_ID",
-    },
+    # Instagram's writable credential surface lives inside the `meta:` group;
+    # the env expansion lives in load_auth_config/persist_auth_credentials.
+    "instagram": dict(INSTAGRAM_HOSTING_ENVIRONMENT_KEYS),
     "tiktok": {
         "client_key": "TIKTOK_CLIENT_KEY",
         "client_secret": "TIKTOK_CLIENT_SECRET",
@@ -45,38 +66,35 @@ AUTH_ENVIRONMENT_KEYS = {
         "oauth2_refresh_token": "TWITTER_OAUTH2_REFRESH_TOKEN",
         "oauth2_expires_at": "TWITTER_OAUTH2_EXPIRES_AT",
     },
-    # Facebook publishes through the same Meta app and Page token as Instagram,
-    # so this schema aliases the shared FACEBOOK_* environment keys rather than
-    # introducing a second credential block. A user configures the Instagram
-    # section once and both adapters read it (see docs/AUTHENTICATION.md).
-    "facebook": {
-        "app_id": "FACEBOOK_APP_ID",
-        "app_secret": "FACEBOOK_APP_SECRET",
-        "page_id": "FACEBOOK_PAGE_ID",
-        "access_token": "FACEBOOK_ACCESS_TOKEN",
-    },
+    # Facebook reads the shared `meta:` fields (the same Meta app and user
+    # token Instagram publishes through), so this schema aliases them rather
+    # than a second credential block.
+    "facebook": dict(META_ENVIRONMENT_KEYS),
     "hugging_face": {
         "access_token": "HUGGING_FACE_ACCESS_TOKEN",
     },
 }
 
-AUTH_TEMPLATE = """# ClipMorph platform credentials
+AUTH_TEMPLATE = f"""# ClipMorph platform credentials
 # Keep this file private. Values in the environment take precedence.
+auth_schema_version: {AUTH_SCHEMA_VERSION}
 youtube:
     client_id: ""
     client_secret: ""
     refresh_token: ""
-instagram:
+meta:
     app_id: ""
     app_secret: ""
     page_id: ""
     access_token: ""
-    gcs_bucket_name: ""
-    gcp_private_key_id: ""
-    gcp_private_key: ""
-    gcp_client_email: ""
-    gcp_client_id: ""
-    gcp_project_id: ""
+    config_id: ""
+    instagram:
+        gcs_bucket_name: ""
+        gcp_private_key_id: ""
+        gcp_private_key: ""
+        gcp_client_email: ""
+        gcp_client_id: ""
+        gcp_project_id: ""
 tiktok:
     client_key: ""
     client_secret: ""
@@ -90,6 +108,36 @@ twitter:
 hugging_face:
     access_token: ""
 """
+
+
+def credential_fields(platform: str) -> dict[str, str]:
+    """Return a platform's known credential fields and their env keys.
+
+    Meta platforms share the Meta app and access-token fields, so their
+    writable and readable credential surface is the union;
+    ``persist_auth_credentials`` routes each field to its owning section.
+    """
+    fields = AUTH_ENVIRONMENT_KEYS.get(platform, {})
+    if platform in {"facebook", "instagram"}:
+        fields = {**META_ENVIRONMENT_KEYS, **fields}
+    return fields
+
+
+def _set_environments(fields: dict[str, str], values: dict[str, Any],
+                      stale_env_replacement: tuple[str, ...] = ()) -> None:
+    """Export credential values into the adapter environment keys.
+
+    A non-empty environment value keeps precedence. An EMPTY environment
+    entry is not an override, so it never shadows a configured file value —
+    and `stale_env_replacement` fields are always file-won (rotated tokens
+    persist into the file, so a stale process env must not outlive them).
+    """
+    for field, environment_key in fields.items():
+        value = values.get(field)
+        if value is None or value == "":
+            continue
+        if field in stale_env_replacement or not os.environ.get(environment_key):
+            os.environ[environment_key] = str(value)
 
 
 def auth_file_path(data_dir: str | Path | None = None) -> Path:
@@ -137,19 +185,39 @@ def load_auth_config(data_dir: str | Path | None = None) -> dict[str, Any]:
         return {}
     if not isinstance(loaded, dict):
         raise ValueError("Auth file root must be an object")
+    if loaded.get("auth_schema_version") != AUTH_SCHEMA_VERSION:
+        raise ValueError(
+            f"Auth file {path} must declare auth_schema_version: "
+            f"{AUTH_SCHEMA_VERSION} (the file stores the shared Meta app and "
+            "access token once, under `meta:`); create the current template "
+            "with `clipmorph init` (the old file is backed up) and re-enter "
+            "its credential values with `clipmorph auth set`.")
 
-    for platform, fields in loaded.items():
-        if platform not in AUTH_ENVIRONMENT_KEYS:
+    meta = loaded.get("meta") or {}
+    if not isinstance(meta, dict):
+        raise ValueError("The auth `meta` block must be an object")
+    _set_environments(META_ENVIRONMENT_KEYS, meta)
+    hosting = meta.get("instagram") or {}
+    if not isinstance(hosting, dict):
+        raise ValueError("The auth `meta.instagram` block must be an object")
+    _set_environments(INSTAGRAM_HOSTING_ENVIRONMENT_KEYS, hosting)
+    for platform in ("youtube", "tiktok", "twitter", "hugging_face"):
+        fields = loaded.get(platform)
+        if platform not in loaded or fields is None:
             continue
         if not isinstance(fields, dict):
             raise ValueError(f"Auth configuration for {platform} must be an object")
-        for field, environment_key in AUTH_ENVIRONMENT_KEYS[platform].items():
-            value = fields.get(field)
-            if value is not None and value != "":
-                if field == "refresh_token":
-                    os.environ[environment_key] = str(value)
-                else:
-                    os.environ.setdefault(environment_key, str(value))
+        _set_environments(AUTH_ENVIRONMENT_KEYS[platform], fields,
+                          stale_env_replacement=("refresh_token",))
+    # A legacy root `facebook:`/`instagram:` section is schema 1 drift: the
+    # actionable error names the new home instead of migrating.
+    for legacy in ("facebook", "instagram"):
+        if legacy in loaded:
+            raise ValueError(
+                f"Auth section `{legacy}:` is schema version 1; "
+                f"{AUTH_SCHEMA_VERSION} stores the Meta surface under "
+                f"`meta:` (its `meta.instagram:` block holds Instagram's "
+                f"hosting fields): {path}")
     return loaded
 
 
@@ -166,11 +234,32 @@ def persist_auth_credentials(platform: str, values: dict[str, str],
         raise ValueError(f"Unsupported auth platform: {platform}")
     if not values:
         raise ValueError("At least one auth credential is required")
-    unsupported = set(values) - set(AUTH_ENVIRONMENT_KEYS[platform])
+    # Meta platforms share the Meta app and access-token fields, so their known
+    # field list is the union; every other platform knows only its own fields.
+    if platform in {"facebook", "instagram"}:
+        allowed = {**AUTH_ENVIRONMENT_KEYS[platform], **META_ENVIRONMENT_KEYS}
+    else:
+        allowed = AUTH_ENVIRONMENT_KEYS[platform]
+    unsupported = set(values) - set(allowed)
     if unsupported:
         raise ValueError(f"Unsupported auth credential(s): {', '.join(sorted(unsupported))}")
     if any(not value for value in values.values()):
         raise ValueError("Auth credential values must not be empty")
+
+    # Credential storage follows the schema-2 file shape: shared Meta fields
+    # at `meta:` and Instagram hosting fields nested at `meta.instagram:`.
+    shared_fields = set(values) & set(META_ENVIRONMENT_KEYS)
+    hosting_fields = set(values) & set(INSTAGRAM_HOSTING_ENVIRONMENT_KEYS)
+    own_fields = set(values) - shared_fields - hosting_fields
+    routed: dict[str, dict[str, str]] = {}
+    if shared_fields:
+        routed["meta"] = {field: values[field] for field in shared_fields}
+    if hosting_fields:
+        routed["meta.instagram"] = {field: values[field]
+                                    for field in hosting_fields}
+    if own_fields:
+        routed[platform] = {field: values[field]
+                            for field in own_fields}
 
     path = Path(data_dir) / AUTH_FILE_NAME if data_dir else (_active_auth_path or auth_file_path())
     loaded = yaml.safe_load(path.read_text(encoding="utf-8")) if path.exists() else {}
@@ -178,18 +267,32 @@ def persist_auth_credentials(platform: str, values: dict[str, str],
         loaded = {}
     if not isinstance(loaded, dict):
         raise ValueError("Auth file root must be an object")
-    section = loaded.setdefault(platform, {})
-    if not isinstance(section, dict):
-        raise ValueError(f"Auth configuration for {platform} must be an object")
-    section.update(values)
+    for section, section_values in routed.items():
+        owner, _, nested = section.partition(".")
+        block = loaded.setdefault(owner, {})
+        if not isinstance(block, dict):
+            raise ValueError(f"Auth configuration for {owner} must be an object")
+        if not nested:
+            block.update(section_values)
+            continue
+        inner = block.setdefault(nested, {})
+        if not isinstance(inner, dict):
+            raise ValueError(
+                f"Auth configuration for {section} must be an object")
+        inner.update(section_values)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         _backup_existing_file(path)
     temporary_path = path.with_suffix(path.suffix + ".tmp")
     temporary_path.write_text(yaml.safe_dump(loaded, sort_keys=False), encoding="utf-8")
     os.replace(temporary_path, path)
-    for field, value in values.items():
-        os.environ[AUTH_ENVIRONMENT_KEYS[platform][field]] = value
+    for section, section_values in routed.items():
+        fields = (META_ENVIRONMENT_KEYS if section == "meta"
+                  else INSTAGRAM_HOSTING_ENVIRONMENT_KEYS
+                  if section == "meta.instagram"
+                  else AUTH_ENVIRONMENT_KEYS[section])
+        for field, value in section_values.items():
+            os.environ[fields[field]] = value
     return path
 
 

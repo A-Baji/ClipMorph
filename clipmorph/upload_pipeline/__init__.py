@@ -2,7 +2,11 @@ from concurrent.futures import as_completed
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import logging
+from threading import Lock
+from functools import partial
 from typing import Any, Dict
+
+from tqdm import tqdm
 
 from clipmorph.platforms import build_platform_default_config
 from clipmorph.policy import build_platform_metadata
@@ -111,6 +115,52 @@ class UploadPipeline:
         self.initialization_errors[platform_name] = message
         logging.warning(message)
 
+    def _build_combined_progress_bar(self):
+        """Create one thread-safe CLI bar fed by per-platform step percents.
+
+        Returns ``(bar, callback)``; adapters report through the callback as
+        ``(platform_name, percent)`` at each step, so the shared bar advances
+        by each platform's own delta and a postfix lists every percent. Bar
+        writes happen under one lock: tqdm is not thread-safe by itself. The
+        bar is created with ``disable=None``, so tqdm suppresses it when stderr
+        is not a terminal (server logs, redirected output) and the caller's
+        progress callback remains the only progress surface there.
+        """
+        bar = tqdm(
+            total=100 * len(self.enabled_platforms),
+            desc=(f"Uploading to {len(self.enabled_platforms)} platforms"),
+            unit="%",
+            bar_format="{l_bar}{bar}| {percentage:3.0f}% "
+                       "[{elapsed}<{remaining}] {postfix}",
+            ncols=100,
+            leave=True,
+            position=0,
+            disable=None)
+        percents = {name: 0 for name in self.enabled_platforms}
+        lock = Lock()
+
+        def report(platform_name, percent):
+            delta = max(0, percent - percents.get(platform_name, 0))
+            with lock:
+                percents[platform_name] = percent
+                bar.update(delta)
+                bar.set_postfix_str(
+                    " | ".join(f"{name} {percent_value}%"
+                               for name, percent_value in percents.items()))
+
+        return bar, report
+
+    def _report_to_bar_and_callback(self, bar_callback, platform_name: str,
+                                    external_callback, percent: int) -> None:
+        """Feed one adapter's percent into the combined bar and the caller.
+
+        ``bar_callback`` is the combined bar's ``(platform_name, percent)``
+        reporter; ``external_callback`` may be ``None``.
+        """
+        bar_callback(platform_name, percent)
+        if external_callback is not None:
+            external_callback(platform_name, percent)
+
     def _map_common_parameters(self, platform_name: str, title: str,
                                **kwargs) -> Dict:
         """
@@ -194,7 +244,10 @@ class UploadPipeline:
 
             # Wire the orchestrator's progress callback onto the adapter so
             # each step update during run forwards (platform_name, percent).
-            if self._progress_callback:
+            # A callback the orchestrator already installed (the combined
+            # multi-platform bar, which also forwards to the caller's
+            # callback) is left alone.
+            if self._progress_callback and pipeline.progress_callback is None:
                 pipeline.progress_callback = (
                     lambda percent, _name=platform_name:
                     self._progress_callback(_name, percent))
@@ -230,6 +283,9 @@ class UploadPipeline:
                 elif platform_name == 'TikTok' \
                         and getattr(pipeline, "access_token", None) is None:
                     pipeline._refresh_access_token()
+                elif platform_name == 'Twitter' \
+                        and not getattr(pipeline, "oauth_session", None):
+                    pipeline._authenticate()
             except Exception as error:
                 results[platform_name] = {
                     'platform': platform_name,
@@ -238,6 +294,10 @@ class UploadPipeline:
                     'error': str(error),
                 }
                 del self.enabled_platforms[platform_name]
+                # This failure never reaches the worker-thread reporting, so
+                # log it here or the user sees no reason for the skip.
+                logging.error(
+                    f"{platform_name} authentication failed: {error}")
 
     def run(self, video_path: str, title: str,
             **platform_kwargs) -> Dict[str, Dict]:
@@ -272,36 +332,60 @@ class UploadPipeline:
         if not self.enabled_platforms:
             return results
 
+        # Multiple parallel CLI progress bars overwrite each other, so every
+        # platform reports into ONE combined bar: total = 100% per platform,
+        # postfix shows each platform's percent. The caller's progress callback
+        # only records percents (live web progress); it does not draw, so it
+        # must not suppress the bar. Both are fed from one per-adapter hook.
+        external_callback = self._progress_callback
+        combined_bar = None
+        if len(self.enabled_platforms) > 1:
+            combined_bar, combined_callback = (
+                self._build_combined_progress_bar())
+            for platform_name, pipeline in self.enabled_platforms.items():
+                pipeline.progress_callback = partial(
+                    self._report_to_bar_and_callback,
+                    combined_callback, platform_name, external_callback)
+                pipeline._suppress_cli_progress = True
+
         # Use ThreadPoolExecutor for parallel uploads
-        with ThreadPoolExecutor(max_workers=min(
-                self.max_workers, len(self.enabled_platforms))) as executor:
-            # Submit all upload tasks
-            future_to_platform = {
-                executor.submit(self._upload_single_platform, platform_name, pipeline, video_path, title, **platform_kwargs):
-                platform_name
-                for platform_name, pipeline in self.enabled_platforms.items()
-            }
+        try:
+            with ThreadPoolExecutor(max_workers=min(
+                    self.max_workers, len(self.enabled_platforms))) as executor:
+                # Submit all upload tasks
+                future_to_platform = {
+                    executor.submit(self._upload_single_platform, platform_name, pipeline, video_path, title, **platform_kwargs):
+                    platform_name
+                    for platform_name, pipeline in self.enabled_platforms.items()
+                }
 
-            # Collect results as they complete
-            for future in as_completed(future_to_platform):
-                platform_name = future_to_platform[future]
-                try:
-                    result = future.result()
-                    results[platform_name] = result
+                # Collect results as they complete
+                for future in as_completed(future_to_platform):
+                    platform_name = future_to_platform[future]
+                    try:
+                        result = future.result()
+                        results[platform_name] = result
 
-                    if not result['success']:
+                        if result['success']:
+                            # A quiet console between errors looks hung during a
+                            # parallel run: say every platform's final outcome.
+                            logging.info(f"{platform_name} upload completed")
+                        else:
+                            logging.error(
+                                f"{platform_name} upload failed: {result['error']}"
+                            )
+
+                    except Exception as e:
+                        results[platform_name] = {
+                            'platform': platform_name,
+                            'success': False,
+                            'result': None,
+                            'error': f"Future execution failed: {str(e)}"
+                        }
                         logging.error(
-                            f"{platform_name} upload failed: {result['error']}"
-                        )
-
-                except Exception as e:
-                    results[platform_name] = {
-                        'platform': platform_name,
-                        'success': False,
-                        'result': None,
-                        'error': f"Future execution failed: {str(e)}"
-                    }
-                    logging.error(
-                        f"{platform_name} upload failed with exception: {e}")
+                            f"{platform_name} upload failed with exception: {e}")
+        finally:
+            if combined_bar is not None:
+                combined_bar.close()
 
         return results

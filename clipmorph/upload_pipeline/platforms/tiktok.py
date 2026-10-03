@@ -1,4 +1,3 @@
-import base64
 import hashlib
 import os
 import secrets
@@ -124,14 +123,38 @@ class TikTokUploadPipeline(BaseUploadPipeline):
             pass
 
     def _generate_code_verifier(self, length=64):
-        """Generate a PKCE code verifier."""
-        chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~'
+        """Generate a PKCE code verifier.
+
+        TikTok's token endpoint rejects the conventional punctuation-bearing
+        verifier alphabet with "code verifier or code challenge is invalid",
+        so the verifier uses alphanumeric characters only (RFC 7636 permits
+        the full unreserved set; this subset is interoperable).
+        """
+        chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
         return ''.join(secrets.choice(chars) for _ in range(length))
 
     def _generate_code_challenge(self, code_verifier):
-        """Generate a PKCE code challenge from code verifier."""
-        sha256 = hashlib.sha256(code_verifier.encode('utf-8')).digest()
-        return base64.urlsafe_b64encode(sha256).rstrip(b'=').decode('ascii')
+        """Generate a PKCE code challenge from code verifier.
+
+        TikTok's desktop Login Kit doc requires the HEX encoding of SHA256
+        ("must use hex encoding of SHA256 to generate the code challenge"),
+        which differs from the RFC 7636 base64url spelling that every other
+        provider accepts; base64url challenges get rejected with "Code
+        verifier or code challenge is invalid".
+        """
+        sha256 = hashlib.sha256(code_verifier.encode('utf-8'))
+        return sha256.hexdigest()
+
+    def _generate_pkce_pair(self) -> tuple[str, str]:
+        """Return a compatible ``(verifier, challenge)`` pair for TikTok.
+
+        ``_generate_code_verifier`` yields alphanumeric characters only
+        (TikTok rejects the verifier alphabet containing punctuation, even
+        though RFC 7636 permits it) and the challenge is hex SHA256, which
+        matches TikTok's desktop doc.
+        """
+        code_verifier = self._generate_code_verifier()
+        return code_verifier, self._generate_code_challenge(code_verifier)
 
     def _generate_auth_url(self, code_challenge, state):
         """Generate TikTok OAuth authorization URL."""
@@ -178,74 +201,63 @@ class TikTokUploadPipeline(BaseUploadPipeline):
         Refreshes the access token using the stored refresh token.
         Returns a valid access token.
         """
+        tokens = None
         if not self.refresh_token:
-            if self.progress_bar:
-                self.progress_bar.write(
-                    "[TikTok] No refresh token found. Starting OAuth flow...")
-            self.refresh_token = self.generate_refresh_token()
-            if self.progress_bar:
-                self.progress_bar.write(
-                    "\nTikTok refresh token generated. Store it securely in "
-                    "TIKTOK_REFRESH_TOKEN; it is not displayed by ClipMorph.\n")
+            tokens = self._authorize_interactively(
+                "[TikTok] No refresh token found. Starting OAuth flow...")
 
-        data = {
-            'client_key': self.client_key,
-            'client_secret': self.client_secret,
-            'grant_type': 'refresh_token',
-            'refresh_token': self.refresh_token
-        }
-        headers = {'Content-Type': 'application/x-www-form-urlencoded'}
-        reauthorized = False
-        try:
-            response = self._retry_request(requests.post,
-                                           self.TIKTOK_TOKEN_URL,
-                                           data=data,
-                                           headers=headers,
-                                           timeout=self.request_timeout)
-        except requests.exceptions.HTTPError as error:
-            if self.progress_bar:
-                self.progress_bar.write(
-                    f"[TikTok] Refresh token rejected ({error}). Starting OAuth flow..."
-                )
-            self.refresh_token = self.generate_refresh_token()
-            reauthorized = True
-            data['refresh_token'] = self.refresh_token
-            response = self._retry_request(requests.post,
-                                           self.TIKTOK_TOKEN_URL,
-                                           data=data,
-                                           headers=headers,
-                                           timeout=self.request_timeout)
+        if tokens is None:
+            headers = {'Content-Type': 'application/x-www-form-urlencoded'}
+            try:
+                response = self._retry_request(
+                    requests.post,
+                    self.TIKTOK_TOKEN_URL,
+                    data={'client_key': self.client_key,
+                          'client_secret': self.client_secret,
+                          'grant_type': 'refresh_token',
+                          'refresh_token': self.refresh_token},
+                    headers=headers,
+                    timeout=self.request_timeout)
+                resp_json = self._normalize_token_response(response.json())
+                if resp_json.get('access_token'):
+                    # The refresh response MAY contain a rotated refresh
+                    # token; it is adopted below.
+                    tokens = {key: resp_json[key] for key in
+                              ('access_token', 'refresh_token')
+                              if resp_json.get(key)}
+            except requests.exceptions.HTTPError as error:
+                if self.progress_bar:
+                    self.progress_bar.write(
+                        f"[TikTok] Refresh token rejected ({error}). "
+                        "Starting OAuth flow...")
 
-        resp_json = self._normalize_token_response(response.json())
-        if not resp_json.get('access_token') and not reauthorized:
-            if self.progress_bar:
-                self.progress_bar.write(
-                    "[TikTok] Refresh token was rejected. Starting OAuth flow..."
-                )
-            self.refresh_token = self.generate_refresh_token()
-            data['refresh_token'] = self.refresh_token
-            response = self._retry_request(requests.post,
-                                           self.TIKTOK_TOKEN_URL,
-                                           data=data,
-                                           headers=headers,
-                                           timeout=self.request_timeout)
-            resp_json = self._normalize_token_response(response.json())
-        self.access_token = resp_json.get('access_token')
+        if tokens is None:
+            tokens = self._authorize_interactively(
+                "[TikTok] Refresh token was rejected. Starting OAuth flow...")
 
+        self.access_token = tokens['access_token']
         if not self.access_token:
-            detail = resp_json.get('error_description') or resp_json.get('error')
-            message = "Failed to refresh access token"
-            if detail:
-                message += f": {detail}"
-            raise RuntimeError(message)
+            raise RuntimeError("Failed to refresh access token")
 
-        rotated_refresh_token = resp_json.get('refresh_token')
-        if rotated_refresh_token:
+        rotated_refresh_token = tokens.get('refresh_token')
+        if rotated_refresh_token and rotated_refresh_token != self.refresh_token:
             self.refresh_token = rotated_refresh_token
-            persist_auth_credential("tiktok", "refresh_token", rotated_refresh_token)
+            persist_auth_credential("tiktok", "refresh_token",
+                                    rotated_refresh_token)
 
         self._update_progress("authenticate", "Authenticated with TikTok")
         return self.access_token
+
+    def _authorize_interactively(self, message: str) -> dict[str, str]:
+        """Run the OAuth flow and return its token pair.
+
+        The authorization-code exchange already yields an access token, so
+        the refresh grant outside this method must never re-request tokens:
+        a second call can consume the freshly issued refresh token.
+        """
+        if self.progress_bar:
+            self.progress_bar.write(message)
+        return self.generate_refresh_token()
 
     def _validate_video_file(self, video_path: str):
         """
@@ -354,8 +366,7 @@ class TikTokUploadPipeline(BaseUploadPipeline):
                 "Client Key and Client Secret are required for token generation"
             )
 
-        code_verifier = self._generate_code_verifier()
-        code_challenge = self._generate_code_challenge(code_verifier)
+        code_verifier, code_challenge = self._generate_pkce_pair()
         self.oauth_state = secrets.token_urlsafe(32)
         auth_url = self._generate_auth_url(code_challenge, self.oauth_state)
         print("Open this URL in your browser and authorize the app:")
@@ -386,7 +397,10 @@ class TikTokUploadPipeline(BaseUploadPipeline):
             raise RuntimeError(message)
 
         persist_auth_credential("tiktok", "refresh_token", refresh_token)
-        return refresh_token
+        # Keep the pair: the caller must not re-request a token grant and
+        # consume the freshly issued refresh token.
+        return {"access_token": token_response.get("access_token"),
+                "refresh_token": refresh_token}
 
     def run(self,
             video_path: str,

@@ -266,7 +266,8 @@ class JobService:
     """Persist job lifecycle state while executing bounded background work."""
 
     def __init__(self, data_dir: str | Path, max_workers: int = 1,
-                 app_config_path: str | Path | None = None):
+                 app_config_path: str | Path | None = None,
+                 reconcile: bool = True):
         self.data_dir = Path(data_dir)
         self.jobs_dir = self.data_dir / "jobs"
         self.app_config_path = Path(app_config_path) if app_config_path else self.data_dir / "app.yml"
@@ -296,8 +297,13 @@ class JobService:
         self._live_progress: dict[str, dict[str, int]] = {}
         # Order matters: reconciliation must settle stalled checkpoints first so
         # that only genuinely scheduled uploads survive into the re-arm scan.
-        self._reconcile_interrupted_jobs()
-        self._rearm_scheduled_attempts()
+        # Both scans exist for work orphaned by a process restart; a service
+        # constructed inside a live process (e.g. the workflow's transcript
+        # session save) must not fail the jobs that process is still running,
+        # which is why in-process constructions pass ``reconcile=False``.
+        if reconcile:
+            self._reconcile_interrupted_jobs()
+            self._rearm_scheduled_attempts()
 
     @property
     def storage(self) -> ArtifactStorage:
@@ -721,9 +727,10 @@ class JobService:
         return unmarked
 
     def create_job(self, source_path: str, configuration: dict[str, Any],
-                   runner: Callable[[JobManifest, CancellationToken], None] | None = None
-                   ) -> JobManifest:
-        source, effective, global_defaults = self.resolve_job(source_path, configuration)
+                   runner: Callable[[JobManifest, CancellationToken], None] | None = None,
+                   confirmed: bool = False) -> JobManifest:
+        source, effective, global_defaults = self.resolve_job(
+            source_path, configuration, confirmed=confirmed)
         manifest = JobManifest.create(
             str(source), effective, self.jobs_dir,
             global_defaults=global_defaults)
@@ -738,9 +745,16 @@ class JobService:
         return manifest
 
     def resolve_job(self, source_path: str, configuration: dict[str, Any],
-                    config_dir: str | Path | None = None
+                    config_dir: str | Path | None = None,
+                    confirmed: bool = False
                     ) -> tuple[Path, dict[str, Any], dict[str, Any]]:
-        """Normalize a source and job override object without writing state."""
+        """Normalize a source and job override object without writing state.
+
+        ``confirmed`` is the CLI ``--yes`` tier: it applies
+        ``general.no_confirm = true`` above every merge tier, so the finalized
+        configuration (stored as the job's ``job.yml``) is confirmed regardless
+        of sidecars or job records.
+        """
         app_configuration = load_app_configuration(self.app_config_path)
         source_root = Path(app_configuration["source_dir"])
         if not source_root.is_absolute():
@@ -784,6 +798,9 @@ class JobService:
         effective = resolve_job_configuration(
             app_configuration["job_defaults"], overrides,
             app_configuration["layouts"])
+        if confirmed:
+            general = effective.setdefault("general", {})
+            general["no_confirm"] = True
         return source, effective, app_configuration["job_defaults"]
 
     def create_jobs(self, source_names: list[str] | None = None,
@@ -791,7 +808,8 @@ class JobService:
                     config_dir: str | Path | None = None,
                     overrides: dict[str, Any] | None = None,
                     runner: Callable[[JobManifest, CancellationToken], None] | None = None,
-                    dry_run: bool = False) -> dict[str, Any]:
+                    dry_run: bool = False,
+                    confirmed: bool = False) -> dict[str, Any]:
         """Fan out a source selection into independent jobs with partial results."""
         app_configuration = load_app_configuration(self.app_config_path)
         source_root = Path(app_configuration["source_dir"])
@@ -909,7 +927,8 @@ class JobService:
                         "Configuration is valid"))
                     seen_hashes.add(digest)
                     continue
-                manifest = self.create_job(safe_name, per_source, runner)
+                manifest = self.create_job(safe_name, per_source, runner,
+                                           confirmed=confirmed)
                 created.append(self._source_outcome(
                     safe_name, record_index, "created", "created",
                     "Job created", manifest.job_id,
@@ -2420,6 +2439,15 @@ class JobService:
                 pass
         manifest.set_status("cancelled", self.jobs_dir)
 
+    def wait_for_job(self, job_id: str, timeout: float | None = None
+                     ) -> JobManifest:
+        """Block until one queued run settles, then return the landed manifest."""
+        with self._lock:
+            future = self._futures.pop(job_id, None)
+        if future is not None:
+            future.result(timeout=timeout)
+        return self.get_job(job_id)
+
     def get_job(self, job_id: str) -> JobManifest:
         return JobManifest.load(job_id, self.jobs_dir)
 
@@ -2647,7 +2675,8 @@ class JobService:
             raise ValueError("job requires review before it can resume")
         if manifest.status == "completed":
             raise ValueError("completed job requires explicit reopen confirmation")
-        if manifest.status not in {"failed", "cancelled", "partial_failure", "queued"}:
+        if manifest.status not in {
+                "created", "failed", "cancelled", "partial_failure", "queued"}:
             raise ValueError("job is not resumable")
         token = CancellationToken()
         manifest.set_status("queued", self.jobs_dir)

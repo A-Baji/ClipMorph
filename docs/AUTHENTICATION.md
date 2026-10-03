@@ -18,7 +18,7 @@ field reappears.
 
 - [Where credentials live](#where-credentials-live)
 - [YouTube](#youtube-google_)
-- [Instagram](#instagram-facebook_-gcs_-gcp_)
+- [Meta (shared `FACEBOOK_*`)](#meta-meta--the-shared-facebook_-app-and-user-token)
   - [GCS hosting for Instagram](#gcs-hosting-for-instagram)
 - [TikTok](#tiktok-tiktok_)
 - [Twitter / X](#twitter--x-twitter_)
@@ -50,7 +50,7 @@ clipmorph auth set youtube
 clipmorph auth set instagram
 clipmorph auth set tiktok
 clipmorph auth set twitter
-clipmorph auth set facebook   # same shared Meta fields as instagram
+clipmorph auth set facebook   # the four shared Meta fields, stored under meta:
 clipmorph auth set hugging_face
 ```
 
@@ -147,36 +147,69 @@ screen → Data Access** shows the scopes that were granted, and
 - The token is bound to the Google account that approved it, so switching
   accounts in the consent page changes which channel receives the upload.
 
-## Instagram (`FACEBOOK_*`, `GCS_*`, `GCP_*`)
+## Meta (`meta:` — the shared `FACEBOOK_*` app and user token)
 
-Fields: `app_id`, `app_secret`, `page_id`, `access_token`,
-`gcs_bucket_name`, `gcp_private_key_id`, `gcp_private_key`,
-`gcp_client_email`, `gcp_client_id`, `gcp_project_id`
-(env: `FACEBOOK_APP_ID`, `FACEBOOK_APP_SECRET`, `FACEBOOK_PAGE_ID`,
-`FACEBOOK_ACCESS_TOKEN`, `GCS_BUCKET_NAME`, `GCP_PRIVATE_KEY_ID`,
-`GCP_PRIVATE_KEY`, `GCP_CLIENT_EMAIL`, `GCP_CLIENT_ID`, `GCP_PROJECT_ID`).
+Fields, stored once:
 
-These authorize `clipmorph/upload_pipeline/platforms/instagram.py` to publish
-reels to one Instagram professional account. The Facebook half talks to Graph
-API `v23.0`; the Google half only hosts the video bytes for the signed-URL
-hand-off that the container-publishing flow requires.
+```yaml
+meta:
+    app_id: ""        # env: FACEBOOK_APP_ID
+    app_secret: ""    # env: FACEBOOK_APP_SECRET
+    page_id: ""       # env: FACEBOOK_PAGE_ID
+    access_token: ""  # env: FACEBOOK_ACCESS_TOKEN
+    config_id: ""     # env: FACEBOOK_CONFIG_ID (optional, see below)
+```
 
-This is also the shared Meta-app/page block for Facebook uploads: the same app
-and Page token authorize `clipmorph/upload_pipeline/platforms/facebook.py` to
-publish Page Reels and Page videos. There is no separate Facebook credential
-section — configure this block once, and both adapters read the `FACEBOOK_*`
-values. `clipmorph auth set facebook` prompts for the same four Meta fields and
-writes the same environment keys.
+The Meta app and access token are stored ONCE under `meta:` because the same
+Meta app and token authorize both adapters:
+
+- `clipmorph/upload_pipeline/platforms/instagram.py` publishes reels to one
+  Instagram professional account.
+- `clipmorph/upload_pipeline/platforms/facebook.py` publishes Page Reels and
+  Page videos.
+
+`access_token` holds a long-lived **user** access token, not a Page token.
+Meta requires a Page access token on Page endpoints, so each adapter derives
+the Page token from the user token at publish time with
+`GET /v23.0/{page_id}?fields=access_token` — the call Meta's
+[Reels publishing guide](https://developers.facebook.com/docs/video-api/guides/reels-publishing/)
+prerequisite names, already proven by the Instagram adapter's upload flow.
+You never maintain a Page token: the derived one is used for the upload and
+not stored. The user token itself is finite-lived (roughly 60 days), so a
+revoked or expired token is fixed by rerunning the OAuth walk-through, not
+by hand-deriving a Page token.
+
+`clipmorph auth set facebook` prompts for the Meta fields (an empty prompt is
+skipped, so non-FL4B apps simply leave `config_id` unset), and
+`clipmorph auth set instagram` prompts for the Meta fields plus Instagram's
+`GCS_*`/`GCP_*` hosting block nested at `meta.instagram:`
+(below); both write the shared `meta:` section
+(schema version 2). A root `facebook:` or `instagram:` section
+is refused with an actionable error instead of migrated — move the values
+into `meta:` (and `meta.instagram:` for the hosting block).
 
 The scopes the adapter requests are `instagram_basic`, `pages_show_list`,
 `pages_read_engagement`, `pages_manage_posts`, and
 `instagram_content_publish`
 ([content publishing](https://developers.facebook.com/docs/instagram-platform/instagram-api-with-instagram-login/content-publishing/)).
 
+For an app using Facebook Login for Business, the permissions instead come
+from a **Configuration**: in the Meta App Dashboard, create a Configuration
+whose assets include the Page and whose permissions include the scopes
+above, then store the shown Configuration ID in `config_id`. When
+`config_id` is set, ClipMorph invokes the login dialog with `config_id` and
+sends no `scope` parameter, because `config_id` has replaced `scope` and
+Meta grants no permissions when the requested set is not the configured one
+([Facebook Login for Business](https://developers.facebook.com/docs/facebook-login/facebook-login-for-business/)).
+The Configuration also selects the token type and the designated assets, so
+FL4B access covers exactly what the login delegates; a non-FL4B app leaves
+`config_id` empty and keeps the scope flow.
+
 To pull engagement metrics (`clipmorph job metrics ID --pull`), the token also
 needs `instagram_manage_insights`. This is a re-consent step: add the scope in
 the Meta App Dashboard under **Instagram API with Instagram Login →
-Permissions and features**, then re-derive the Page token. Without it the
+Permissions and features**, then rerun the OAuth walk-through to mint a new
+user token — the Page token derives from it at publish time. Without it the
 metrics adapter returns an `unavailable` snapshot with reason
 `missing_scopes:instagram_manage_insights`.
 
@@ -198,7 +231,7 @@ metrics adapter returns an `unavailable` snapshot with reason
 5. Find the Facebook Page that owns the professional account (under
    **Page settings → Connected accounts**, or Business Suite). That Page's
    numeric id is `page_id`.
-6. Generate the long-lived Page access token (next section) and store it in
+6. Generate the long-lived user access token (next section) and store it in
    `access_token`.
 7. Configure GCS hosting as described below.
 
@@ -214,8 +247,16 @@ metrics adapter returns an `unavailable` snapshot with reason
   [Graph API Explorer](https://developers.facebook.com/tools/explorer/): a
   returned `id`/`name` pair proves both the id and the token's access to it.
 - `access_token` — see the OAuth walk-through. Verify it with
-  `GET /me/accounts?fields=id,name,access_token` in the explorer; the Page you
-  intend to publish to must appear with a usable `access_token`.
+  `GET /v23.0/{page_id}?fields=access_token&access_token={token}` in the
+  explorer: a returned `access_token` proves the token can derive the Page
+  token, which is the same call the adapters make at publish time.
+  (`GET /me/accounts` is not a reliable check — under Facebook Login for
+  Business it can return `{"data": []}` even when the token is scoped to
+  the Page.) The opt-in `clipmorph auth status --probe facebook` runs the
+  same two checks for you.
+- `config_id` — optional; only for apps using Facebook Login for Business.
+  The Configuration ID shown in the Meta App Dashboard under **Facebook Login
+  for Business → Configurations**. Verify it against that page.
 
 ### OAuth setup walk-through
 
@@ -225,16 +266,21 @@ listener, and it registers `https://localhost/` as the redirect URI:
 1. Add `https://localhost/` to **Facebook Login → Settings → Valid OAuth
    Redirect URIs**
    ([manual flow](https://developers.facebook.com/docs/facebook-login/guides/advanced/manual-flow/)).
-2. Request an authorization code for the scopes above, redirecting to
-   `https://localhost/`, and paste the returned `code` back into the CLI when
-   prompted.
+2. Trigger the flow from an upload with no stored token. The dialog depends
+   on the app kind: a non-FL4B app requests the scopes above; a Facebook
+   Login for Business app is invoked with the stored `config_id` and no
+   `scope` parameter (the Configuration carries the token type, assets, and
+   permissions, and both Configuration token types work with the same
+   authorization-code exchange below). Redirecting to `https://localhost/`,
+   paste the returned `code` back into the CLI when prompted.
 3. Exchange the code with `app_id`, `app_secret`, and the **identical**
    `redirect_uri` for a short-lived user access token.
 4. Exchange the short-lived user token for a long-lived one
-   (`/oauth/access_token?grant_type=fb_exchange_token&client_id=…&client_secret=…&fb_exchange_token=…`),
-   then derive the Page token from
-   `GET /me/accounts?fields=access_token`. That Page token is the value stored
-   in `access_token`
+   (`/oauth/access_token?grant_type=fb_exchange_token&client_id=…&client_secret=…&fb_exchange_token=…`).
+   That **user** token — finite-lived, roughly 60 days — is the value stored
+   in `access_token`. The Page token is never stored or hand-derived:
+   ClipMorph derives it at publish time with
+   `GET /v23.0/{page_id}?fields=access_token`
    ([access tokens](https://developers.facebook.com/docs/facebook-login/guides/access-tokens/)).
 5. Re-verify with the explorer as described above.
 
@@ -243,13 +289,23 @@ listener, and it registers `https://localhost/` as the redirect URI:
 - A short-lived token pasted straight into `access_token` works once and then
   fails with a "Session has expired" Graph error
   ([token types](https://developers.facebook.com/docs/facebook-login/guides/access-tokens/)).
-- A Page token cannot request new permissions: a token derived before
+- A Page token cannot request new permissions: a token minted before
   `instagram_content_publish` was approved authenticates but fails at publish
-  time, and only a re-derivation after approval fixes it
+  time, and only a token minted after approval fixes it — rerun the
+  walk-through; the fresh user token derives a Page token carrying the new
+  scopes
   ([app review](https://developers.facebook.com/docs/instagram-platform/app-review/)).
 - An app in development mode only works for roles that have app access; add
   yourself as an administrator or switch the app to Live
   ([app modes](https://developers.facebook.com/docs/development/release/)).
+- The stored user token expires after roughly 60 days even though the
+  exchange above called it "long-lived"; uploads fail with an expiry error
+  at the token exchange until the walk-through is rerun.
+- With Facebook Login for Business the dialog grants only the
+  Configuration's permissions and designated assets: a Configuration that
+  omits one of the scopes above, or the Page asset, yields a token that
+  authenticates but cannot publish
+  ([Facebook Login for Business](https://developers.facebook.com/docs/facebook-login/facebook-login-for-business/)).
 
 ## GCS hosting for Instagram
 
@@ -335,15 +391,15 @@ back to real newlines when it builds the credentials object, so a multi-line
 block scalar will not work:
 
 ```yaml
-instagram:
-    gcs_bucket_name: "clipmorph-instagram-uploads"
-    gcp_project_id: "my-project-1234"
-    gcp_client_email: "clipmorph-uploader@my-project-1234.iam.gserviceaccount.com"
-    gcp_client_id: "109876543210987654321"
-    gcp_private_key_id: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
-    gcp_private_key: "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC...\n...\n-----END PRIVATE KEY-----\n"
+meta:
+    instagram:
+        gcs_bucket_name: "clipmorph-instagram-uploads"
+        gcp_project_id: "my-project-1234"
+        gcp_client_email: "clipmorph-uploader@my-project-1234.iam.gserviceaccount.com"
+        gcp_client_id: "109876543210987654321"
+        gcp_private_key_id: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+        gcp_private_key: "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC...\n...\n-----END PRIVATE KEY-----\n"
 ```
-
 When the key is supplied through an environment variable instead, use the same
 escaped form. On PowerShell:
 
@@ -456,8 +512,9 @@ Fields: `client_id`, `client_secret`, `oauth2_access_token`,
 
 These are **OAuth 2.0** credentials only, consumed by
 `clipmorph/twitter_auth.py` and
-`clipmorph/upload_pipeline/platforms/twitter.py`. X API v1.1 key/secret/bearer
-fields are not part of the schema and are not read anywhere in the codebase.
+`clipmorph/upload_pipeline/platforms/twitter.py`. X API v1.1
+key/secret/bearer fields are not part of the auth.yaml schema and are not
+read anywhere.
 
 Requested scopes: `tweet.read`, `tweet.write`, `users.read`, `media.write`,
 `offline.access`
@@ -563,8 +620,10 @@ you have to echo. Replace placeholders with your own values.
 | Redirect URI mismatch (Meta) | The registered URI differs from `https://localhost/`. | Register `https://localhost/` on the app and send the identical value in the exchange. |
 | Redirect URI mismatch (X) | The registered callback differs from the adapter's URI in port, scheme, or trailing slash. | Register exactly `http://localhost:8765/callback`. |
 | `invalid_grant` on a YouTube refresh | Token issued for another scope, or a deleted/rotated client. | Re-run the installed-app flow with `youtube.upload`. |
-| "Session has expired" (Instagram) | A short-lived user or Page token was stored. | Re-derive a long-lived Page token from `GET /me/accounts?fields=access_token`. |
-| `403` on Instagram publish | The Page token predates an approved permission. | Re-approve `instagram_content_publish`, then re-derive the Page token. |
+| "Session has expired" (Instagram) | A short-lived user token was stored. | Rerun the OAuth walk-through to store a fresh long-lived user token; the Page token derives from it at publish time. |
+| `403 (#200)` on a Facebook Reels publish | A user token reached `video_reels` directly, or the stored token lacks `pages_manage_posts` scoped to the Page. | Confirm `GET /v23.0/{page_id}?fields=access_token` returns a token; if it does, publishing uses the derived Page token — rerun the OAuth walk-through if the scopes are missing. |
+| Empty `{"data": []}` from `GET /me/accounts` (Meta) | Facebook Login for Business delegates asset access via the Configuration instead of Page roles, so `/me/accounts` can be empty even with valid grants. | Do not gate on `/me/accounts`; verify with `GET /v23.0/{page_id}?fields=access_token` or `clipmorph auth status --probe facebook`. |
+| `403` on Instagram publish | The user token predates an approved permission. | Re-approve `instagram_content_publish`, then rerun the OAuth walk-through; the fresh user token derives a Page token with the new scopes. |
 | TikTok refresh rejected | Token bound to a previous client key, or the app is not in production. | Recreate the app authorization and confirm audit approval. |
 | X access token expired with no refresh | `offline.access` was not granted. | Re-run `clipmorph auth twitter` after adding the scope. |
 | X `403` on media upload | App permissions are read-only. | Set **User authentication settings** to **Read and write**, then re-authorize. |
@@ -598,9 +657,9 @@ Run these after filling in the file. None of them print a credential value.
 ## Verify credentials
 
 `clipmorph auth status` only reports whether a credential is *present*. To
-prove it *works* against the provider, run the opt-in probe. It makes one
-read-only call per platform, never prints a value, and exits `1` when any
-probe fails. Two surfaces expose it:
+prove it *works* against the provider, run the opt-in probe. It makes only
+read-only calls, never prints a value, and exits `1` when any probe
+fails. Two surfaces expose it:
 
 - **CLI:** `clipmorph auth status --probe [PLATFORM ...]` — probe the named
   platforms, or omit the names to probe every known provider. The verdict is
@@ -635,11 +694,13 @@ reports `unavailable` there.
   [Graph API](https://developers.facebook.com/documentation/facebook-api),
   [Graph API Explorer](https://developers.facebook.com/tools/explorer/),
   [manual OAuth flow](https://developers.facebook.com/docs/facebook-login/guides/advanced/manual-flow/),
+  [Facebook Login for Business](https://developers.facebook.com/docs/facebook-login/facebook-login-for-business/),
   [access tokens](https://developers.facebook.com/docs/facebook-login/guides/access-tokens/),
   [permissions](https://developers.facebook.com/docs/permissions/),
   [Instagram platform overview](https://developers.facebook.com/docs/instagram-platform/overview),
   [Instagram content publishing](https://developers.facebook.com/docs/instagram-platform/instagram-api-with-instagram-login/content-publishing/),
   [Instagram app review](https://developers.facebook.com/docs/instagram-platform/app-review/),
+  [Page Reels publishing](https://developers.facebook.com/docs/video-api/guides/reels-publishing/),
   [app modes](https://developers.facebook.com/docs/development/release/)
 - TikTok: [developer portal](https://developers.tiktok.com/),
   [create an app](https://developers.tiktok.com/doc/getting-started-create-an-app),

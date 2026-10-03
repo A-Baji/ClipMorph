@@ -377,6 +377,36 @@ class PlatformCoverageDriftTests(unittest.TestCase):
                     f"UploadPipeline must accept a '{platform}' keyword so a "
                     f"submission can enable '{platform}'")
 
+    def test_adapter_credentials_renew_at_attempt_time(self):
+        """Credentials that expire are re-derived or refreshed at attempt time.
+
+        A maintainer's rule: any platform whose credentials expire renews
+        them at attempt time with the platform's interactive authorization
+        fallback, so an attempt never fails with a stale token that a fresh
+        one would pass (a persisted `''` expiry answered 401 at upload time
+        even though a valid refresh token was stored). Facebook's stored
+        credential is a long-lived (finite, roughly 60 days) user token
+        from which the adapter derives the Page token per run, and it
+        documents that; the adapter's source naming its strategy is the
+        mechanical check.
+        """
+        for platform in SUPPORTED_PLATFORMS:
+            with self.subTest(platform=platform):
+                module_path = ADAPTER_DIRECTORY / f"{platform}.py"
+                text = module_path.read_text(encoding="utf-8").lower()
+                if not any(strategy in text
+                           for strategy in ("refresh", "long-lived")):
+                    self.fail_missing_renewal(platform, repo_relative(module_path))
+
+    def fail_missing_renewal(self, platform, location):
+        self.fail(
+            f"platform '{platform}' in '{location}' has no credential "
+            "renewal strategy; a platform whose credentials expire must "
+            "re-authenticate at attempt time (refresh a stored token, then "
+            "the platform's interactive authorization fallback), and a "
+            "non-expiring credential must document that; follow "
+            "docs/PLATFORM_EXTENSION_GUIDE.md")
+
     def test_guard_reports_a_platform_missing_from_a_touchpoint(self):
         # Driven with a copy of the registry, so the failure path is proved
         # without mutating a repository file.
