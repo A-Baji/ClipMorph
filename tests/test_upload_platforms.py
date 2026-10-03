@@ -283,14 +283,62 @@ class UploadProgressCallbackTests(unittest.TestCase):
         results = pipeline.run("video.mp4", "title")
         self.assertTrue(results["TikTok"]["success"])
 
-    def test_callback_suppresses_cli_progress_bar(self):
+    def test_callback_does_not_suppress_cli_progress_bar(self):
+        # A caller callback only records percents; it draws nothing, so a
+        # single-platform run still gets the adapter's own bar.
         with patch("clipmorph.upload_pipeline.platforms.base.tqdm") as tqdm:
+            updates = []
             pipeline = UploadPipeline(
-                progress_callback=lambda name, percent: None)
+                progress_callback=lambda name, percent: updates.append(
+                    (name, percent)))
             adapter = _FakeAdapter({"step_a": 50, "step_b": 50})
             pipeline.enabled_platforms = {"TikTok": adapter}
             pipeline.run("video.mp4", "title")
-        tqdm.assert_not_called()
+        tqdm.assert_called_once()
+        self.assertEqual(updates, [("TikTok", 50), ("TikTok", 100)])
+
+    def test_service_progress_callback_keeps_the_combined_cli_bar(self):
+        # The real wiring: JobService always installs a progress callback to
+        # record live percents, so a callback must not disable CLI progress.
+        with patch("clipmorph.upload_pipeline.tqdm") as orchestrator_tqdm, \
+                patch("clipmorph.upload_pipeline.platforms.base.tqdm"
+                      ) as adapter_tqdm:
+            updates = []
+            pipeline = UploadPipeline(
+                progress_callback=lambda name, percent: updates.append(
+                    (name, percent)))
+            tiktok = _FakeAdapter({"step_a": 25, "step_b": 50, "step_c": 25})
+            twitter = _FakeAdapter({"step_a": 25, "step_b": 50, "step_c": 25})
+            twitter.platform_name = "Twitter"
+            twitter.oauth_session = object()
+            pipeline.enabled_platforms = {"TikTok": tiktok, "Twitter": twitter}
+            pipeline.run("video.mp4", "title")
+
+        orchestrator_tqdm.assert_called_once()
+        adapter_tqdm.assert_not_called()
+        self.assertTrue(tiktok._suppress_cli_progress)
+        self.assertTrue(twitter._suppress_cli_progress)
+        # The caller's callback still receives every platform's percents.
+        self.assertIn(("TikTok", 100), updates)
+        self.assertIn(("Twitter", 100), updates)
+        # ...and the shared bar still advanced 100% per platform.
+        update_totals = sum(
+            sum(call.args) for call in
+            orchestrator_tqdm.return_value.update.call_args_list)
+        self.assertEqual(update_totals, 200)
+
+    def test_combined_bar_is_disabled_on_a_non_terminal(self):
+        # disable=None keeps the bar out of server logs and redirected
+        # output, where the caller's callback is the only progress surface.
+        with patch("clipmorph.upload_pipeline.tqdm") as orchestrator_tqdm:
+            pipeline = UploadPipeline()
+            tiktok = _FakeAdapter({"step_a": 50, "step_b": 50})
+            twitter = _FakeAdapter({"step_a": 50, "step_b": 50})
+            twitter.platform_name = "Twitter"
+            twitter.oauth_session = object()
+            pipeline.enabled_platforms = {"TikTok": tiktok, "Twitter": twitter}
+            pipeline.run("video.mp4", "title")
+        self.assertIs(orchestrator_tqdm.call_args.kwargs["disable"], None)
 
     def test_multi_platform_uses_one_combined_progress_bar(self):
         with patch("clipmorph.upload_pipeline.tqdm") as orchestrator_tqdm, \

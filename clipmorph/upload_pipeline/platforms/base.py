@@ -46,6 +46,10 @@ class BaseUploadPipeline(ABC):
         self._progress_seen = 0
         self._percent = 0
         self.progress_callback = None
+        # Set by the orchestrator when it takes over progress reporting with a
+        # combined bar, so this adapter draws no bar of its own. A
+        # progress_callback on its own does NOT suppress the bar: the callback
+        # only records percents (live web progress) and draws nothing.
         self._suppress_cli_progress = False
 
     def _retry_request(self,
@@ -233,9 +237,12 @@ class BaseUploadPipeline(ABC):
         """
         Context manager for progress bar to ensure proper cleanup.
 
-        When a progress callback is installed (UI mode) or the orchestrator has
-        suppressed CLI progress (multi-platform CLI), no tqdm bar is created;
-        step updates still fire the callback and track the normalized percent.
+        When the orchestrator has taken over progress reporting
+        (``_suppress_cli_progress``, multi-platform CLI), no tqdm bar is
+        created; step updates still fire the callback and track the normalized
+        percent. Otherwise the adapter draws its own bar, which tqdm disables
+        automatically when stderr is not a terminal (server logs, redirected
+        output).
 
         Args:
             total_progress: Total progress value (usually 100)
@@ -244,7 +251,7 @@ class BaseUploadPipeline(ABC):
         Yields:
             tqdm progress bar object or None when the bar is suppressed
         """
-        if self.progress_callback is not None or self._suppress_cli_progress:
+        if self._suppress_cli_progress:
             self.progress_bar = None
             try:
                 yield None
@@ -259,7 +266,8 @@ class BaseUploadPipeline(ABC):
             bar_format="{l_bar}{bar}| {percentage:3.0f}% [{elapsed}<{remaining}]",
             ncols=100,
             leave=True,
-            position=0)
+            position=0,
+            disable=None)
         self.progress_bar = progress_bar
         try:
             yield progress_bar

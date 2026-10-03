@@ -121,7 +121,10 @@ class UploadPipeline:
         Returns ``(bar, callback)``; adapters report through the callback as
         ``(platform_name, percent)`` at each step, so the shared bar advances
         by each platform's own delta and a postfix lists every percent. Bar
-        writes happen under one lock: tqdm is not thread-safe by itself.
+        writes happen under one lock: tqdm is not thread-safe by itself. The
+        bar is created with ``disable=None``, so tqdm suppresses it when stderr
+        is not a terminal (server logs, redirected output) and the caller's
+        progress callback remains the only progress surface there.
         """
         bar = tqdm(
             total=100 * len(self.enabled_platforms),
@@ -131,7 +134,8 @@ class UploadPipeline:
                        "[{elapsed}<{remaining}] {postfix}",
             ncols=100,
             leave=True,
-            position=0)
+            position=0,
+            disable=None)
         percents = {name: 0 for name in self.enabled_platforms}
         lock = Lock()
 
@@ -145,6 +149,17 @@ class UploadPipeline:
                                for name, percent_value in percents.items()))
 
         return bar, report
+
+    def _report_to_bar_and_callback(self, bar_callback, platform_name: str,
+                                    external_callback, percent: int) -> None:
+        """Feed one adapter's percent into the combined bar and the caller.
+
+        ``bar_callback`` is the combined bar's ``(platform_name, percent)``
+        reporter; ``external_callback`` may be ``None``.
+        """
+        bar_callback(platform_name, percent)
+        if external_callback is not None:
+            external_callback(platform_name, percent)
 
     def _map_common_parameters(self, platform_name: str, title: str,
                                **kwargs) -> Dict:
@@ -229,7 +244,10 @@ class UploadPipeline:
 
             # Wire the orchestrator's progress callback onto the adapter so
             # each step update during run forwards (platform_name, percent).
-            if self._progress_callback:
+            # A callback the orchestrator already installed (the combined
+            # multi-platform bar, which also forwards to the caller's
+            # callback) is left alone.
+            if self._progress_callback and pipeline.progress_callback is None:
                 pipeline.progress_callback = (
                     lambda percent, _name=platform_name:
                     self._progress_callback(_name, percent))
@@ -316,15 +334,19 @@ class UploadPipeline:
 
         # Multiple parallel CLI progress bars overwrite each other, so every
         # platform reports into ONE combined bar: total = 100% per platform,
-        # postfix shows each platform's percent.
+        # postfix shows each platform's percent. The caller's progress callback
+        # only records percents (live web progress); it does not draw, so it
+        # must not suppress the bar. Both are fed from one per-adapter hook.
         external_callback = self._progress_callback
         combined_bar = None
-        if external_callback is None and len(self.enabled_platforms) > 1:
+        if len(self.enabled_platforms) > 1:
             combined_bar, combined_callback = (
                 self._build_combined_progress_bar())
             for platform_name, pipeline in self.enabled_platforms.items():
                 pipeline.progress_callback = partial(
-                    combined_callback, platform_name)
+                    self._report_to_bar_and_callback,
+                    combined_callback, platform_name, external_callback)
+                pipeline._suppress_cli_progress = True
 
         # Use ThreadPoolExecutor for parallel uploads
         try:
