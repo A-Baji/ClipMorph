@@ -7,11 +7,13 @@ deliberate per-platform override silently gave the user a second, separate bar
 instead of one bar per submission. This bar is owned by the submission and
 shared by every binding's pipeline call.
 
-Platforms register themselves through :meth:`SubmissionProgress.include` instead
-of being listed up front, so the total only counts platforms that will actually
-upload: one whose adapter failed to initialize or whose authentication failed is
-never a slot, and a later binding's platforms grow the same bar rather than
-starting another one.
+The submission knows every platform it will upload before the first binding
+runs, so it declares them all when it creates the bar: the total and the
+description are then fixed for as long as the bar is on screen, and a platform
+whose binding runs later shows 0% rather than appearing halfway through a bar
+that had already reached 100%. A caller that cannot declare up front (a
+directly constructed ``UploadPipeline``) still registers as it goes, and an
+undeclared name gets a slot instead of pushing the bar past its total.
 """
 
 import logging
@@ -19,6 +21,17 @@ from threading import Lock
 from typing import Any, Iterable
 
 from tqdm import tqdm
+
+from clipmorph.platforms import PLATFORM_TITLE
+
+
+def _slot_key(platform_name: str) -> str:
+    """Fold every spelling of a platform name onto one slot key.
+
+    The submission declares platforms in lowercase while an adapter reports its
+    own spelling ("Twitter"), and both must land on the same slot.
+    """
+    return str(platform_name).strip().lower()
 
 
 class SubmissionProgress:
@@ -30,14 +43,21 @@ class SubmissionProgress:
     thread-safe by itself and the platforms upload in parallel threads.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, planned_platforms: Iterable[str] = ()) -> None:
+        """Create the bar's surface; ``planned_platforms`` fixes its total.
+
+        Declaring the whole submission up front is what keeps the total and the
+        description from moving under the user while the bar is on screen.
+        """
         self._bar: Any = None
         self._percents: dict[str, int] = {}
+        self._labels: dict[str, str] = {}
         self._described = 0
         self._lock = Lock()
+        self.include(planned_platforms)
 
     def include(self, platform_names: Iterable[str]) -> None:
-        """Register one pipeline call's platforms and size the bar for them."""
+        """Add slots for these platforms and size the bar for them."""
         with self._lock:
             added = self._add(platform_names)
             if self._bar is None:
@@ -60,18 +80,17 @@ class SubmissionProgress:
         """Advance one platform's slot to ``percent`` (0-100)."""
         target = max(0, min(100, int(percent)))
         with self._lock:
-            bar = self._bar
-            # A name the caller never included still gets a slot rather than
-            # pushing the bar past its total.
             self._add([platform_name])
+            bar = self._bar
             if bar is None:
                 # Nothing has registered a platform yet, so there is no bar to
                 # draw on; the first ``include`` sizes the bar for everyone.
                 return
-            previous = self._percents[platform_name]
+            key = _slot_key(platform_name)
+            previous = self._percents[key]
             if target <= previous:
                 return
-            self._percents[platform_name] = target
+            self._percents[key] = target
             bar.update(target - previous)
             self._render()
 
@@ -99,8 +118,12 @@ class SubmissionProgress:
         """Add slots for unseen platforms; return whether any were added."""
         added = False
         for name in platform_names:
-            if name not in self._percents:
-                self._percents[name] = 0
+            key = _slot_key(name)
+            if key not in self._percents:
+                self._percents[key] = 0
+                # One canonical label per platform, so a slot declared by the
+                # submission and reported by an adapter reads the same way.
+                self._labels[key] = PLATFORM_TITLE.get(key, str(name))
                 added = True
         if added and self._bar is not None:
             self._bar.total = 100 * len(self._percents)
@@ -116,4 +139,5 @@ class SubmissionProgress:
             self._bar.set_description(self._description())
             self._described = len(self._percents)
         self._bar.set_postfix_str(" | ".join(
-            f"{name} {value}%" for name, value in self._percents.items()))
+            f"{self._labels[key]} {value}%"
+            for key, value in self._percents.items()))

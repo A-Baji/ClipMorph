@@ -2000,7 +2000,13 @@ class JobService:
         # The progress bar belongs to the submission, not to one binding: the
         # binding split (per-platform upload option, separate conversion group)
         # is a transport detail the user should never see as a second bar.
-        progress = SubmissionProgress()
+        # Every platform this submission will upload is declared here, before
+        # the first binding runs, so the bar's total and description never move
+        # while it is on screen: a binding that runs later shows 0% instead of
+        # appearing under a bar that already read 100%.
+        progress = SubmissionProgress(
+            platform for binding in bindings
+            for platform in binding["platforms"])
         try:
             for binding in bindings:
                 merged.update(self._run_upload_binding(

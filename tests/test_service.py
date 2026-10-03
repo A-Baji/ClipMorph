@@ -1365,6 +1365,35 @@ class PerPlatformBindingTests(unittest.TestCase):
             bars = [call.kwargs["submission_progress"] for call in bar_calls]
             self.assertIs(bars[0], bars[1])
 
+    def test_the_submission_declares_every_platform_before_the_first_upload(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service = JobService(data_dir)
+            self.addCleanup(service.close)
+            manifest = _two_group_job(service, data_dir)
+
+            totals = []
+
+            def _record_run(*_args, **_kwargs):
+                # Snapshot the shared bar as each binding starts; the mocked
+                # pipeline never reports a percent, so the declared total is
+                # the only thing that ever sizes this bar.
+                bar = pipeline.call_args_list[-1].kwargs["submission_progress"]
+                totals.append((sorted(bar._percents), bar._bar.total))
+                return {
+                    "YouTube": {"success": True, "result": "ok"},
+                    "TikTok": {"success": True, "result": "ok"}}
+
+            with patch("clipmorph.upload_pipeline.UploadPipeline") as pipeline:
+                pipeline.return_value.run.side_effect = _record_run
+                service.submit_upload(manifest.job_id, ["youtube", "tiktok"])
+                service._futures[f"upload:{manifest.job_id}"].result(timeout=10)
+
+            # Two bindings, both already fully sized when each one started: the
+            # total and the description cannot move once the second one begins.
+            self.assertEqual(
+                totals, [(["tiktok", "youtube"], 200)] * 2)
+
     def test_upload_draft_summary_reports_each_platform_target(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"

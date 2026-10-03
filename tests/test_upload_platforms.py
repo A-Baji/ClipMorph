@@ -503,17 +503,41 @@ class SubmissionProgressBarTests(unittest.TestCase):
         created, bar_patch = self._bars()
         with bar_patch, patch("clipmorph.upload_pipeline.platforms.base.tqdm"
                               ) as adapter_tqdm:
-            progress = SubmissionProgress()
+            progress = SubmissionProgress(["YouTube", "TikTok"])
             self._run_binding("YouTube", {"a": 50, "b": 50}, progress)
             self._run_binding("TikTok", {"a": 25, "b": 75}, progress)
 
         # One bar for the submission, and neither binding drew one of its own.
         self.assertEqual(len(created), 1)
         adapter_tqdm.assert_not_called()
-        # The second binding's platform widened the first binding's bar instead
-        # of opening a new one, and both advanced it by their own 100.
+        # Both platforms were declared before the first binding ran, so the
+        # second binding's platform filled its own slot rather than opening a
+        # new one.
         self.assertEqual(created[0].total, 200)
         self.assertEqual(created[0].n, 200)
+
+    def test_a_later_binding_never_moves_the_total_or_the_description(self):
+        # A bar that widens mid-run reads as a bug: it reaches 100%, sits
+        # there, then a new platform appears and the same bar starts over.
+        created, bar_patch = self._bars()
+        with bar_patch:
+            progress = SubmissionProgress(["YouTube", "TikTok"])
+            self._run_binding("YouTube", {"a": 50, "b": 50}, progress)
+
+            self.assertEqual(created[0].total, 200)
+            self.assertEqual(created[0].descriptions, ["Uploading 2 platforms"])
+            # The platform whose binding runs later is already visible as
+            # queued rather than appearing once the bar reached 100%.
+            self.assertEqual(created[0].postfixes[-1],
+                             "YouTube 100% | TikTok 0%")
+
+            self._run_binding("TikTok", {"a": 25, "b": 75}, progress)
+
+        self.assertEqual(created[0].total, 200)
+        self.assertEqual(created[0].n, 200)
+        self.assertEqual(created[0].descriptions, ["Uploading 2 platforms"])
+        self.assertEqual(created[0].postfixes[-1],
+                         "YouTube 100% | TikTok 100%")
 
     def test_a_single_platform_call_still_reports_into_the_shared_bar(self):
         created, bar_patch = self._bars()
@@ -528,14 +552,18 @@ class SubmissionProgressBarTests(unittest.TestCase):
         self.assertEqual(created[0].n, 100)
 
     def test_the_postfix_lists_every_platform(self):
+        # The submission declares lowercase names while an adapter reports its
+        # own spelling, so both must land on one slot under one label.
         created, bar_patch = self._bars()
         with bar_patch:
-            progress = SubmissionProgress()
+            progress = SubmissionProgress(["youtube", "twitter", "tiktok"])
             self._run_binding("YouTube", {"a": 50, "b": 50}, progress)
+            self._run_binding("Twitter", {"a": 100}, progress)
             self._run_binding("TikTok", {"a": 25, "b": 75}, progress)
 
+        self.assertEqual(created[0].total, 300)
         self.assertEqual(created[0].postfixes[-1],
-                         "YouTube 100% | TikTok 100%")
+                         "YouTube 100% | Twitter/X 100% | TikTok 100%")
 
     def test_outcomes_print_above_the_shared_bar(self):
         created, bar_patch = self._bars()
@@ -601,9 +629,10 @@ class SubmissionProgressBarTests(unittest.TestCase):
                          ["TikTok upload completed",
                           "[TikTok] Video uploaded successfully"])
 
-    def test_a_platform_that_never_uploads_is_not_a_slot(self):
-        # An adapter that fails to initialize leaves its platform out of
-        # enabled_platforms, so it never becomes a slot the bar waits on.
+    def test_a_caller_that_cannot_declare_up_front_still_sizes_its_own_bar(self):
+        # A directly constructed pipeline has no submission to declare for it,
+        # so it registers the adapters it actually initialized; one that
+        # failed to initialize is never a slot the bar waits on.
         created, bar_patch = self._bars()
         with bar_patch, \
                 patch("clipmorph.upload_pipeline.YouTubeUploadPipeline",
@@ -616,6 +645,19 @@ class SubmissionProgressBarTests(unittest.TestCase):
         self.assertFalse(results["YouTube"]["success"])
         self.assertEqual(created[0].total, 100)
         self.assertEqual(created[0].n, 100)
+
+    def test_a_declared_platform_that_never_uploads_stays_at_zero(self):
+        # A platform whose binding fails before any adapter reports keeps its
+        # slot at 0%: the bar ends short of its total rather than claiming an
+        # upload that never happened.
+        created, bar_patch = self._bars()
+        with bar_patch:
+            progress = SubmissionProgress(["youtube", "tiktok"])
+            self._run_binding("TikTok", {"a": 100}, progress)
+
+        self.assertEqual(created[0].n, 100)
+        self.assertEqual(created[0].postfixes[-1],
+                         "YouTube 0% | TikTok 100%")
 
     def test_a_shared_bar_survives_until_the_submission_closes_it(self):
         # A pipeline call that did not create the bar must not close it: the
