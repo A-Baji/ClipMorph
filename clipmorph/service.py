@@ -1755,27 +1755,47 @@ class JobService:
 
         pending = [attempt for attempt in attempts
                    if attempt["status"] != "published"]
-        # Coalesce by (artifact, frozen upload slice): platforms that share both
+        # Coalesce by (artifact, shared upload slice): platforms that share both
         # ride one staged copy through one pipeline call.
+        #
+        # The key is the slice WITHOUT its per-platform adapter options. Every
+        # frozen option is prefixed with its own platform's name and the
+        # orchestrator hands each adapter only the options carrying its own
+        # prefix, so platforms that differ in nothing but their own adapter
+        # options still ride one parallel pipeline call instead of one call
+        # after another (#225). Anything else in the slice (the description,
+        # the tags, the schedule) reaches every adapter in the call
+        # unprefixed, so a difference there must still split the call.
         bindings_out: list[dict[str, Any]] = []
         for attempt in pending:
             artifact_key = manifest.artifacts[attempt["artifact_id"]][
                 "storage"]["key"]
+            snapshot = attempt["configuration_snapshot"]
+            shared_hash = configuration_sha256({
+                key: value for key, value in snapshot.items()
+                if key != "platform_options"})
             match = next((item for item in bindings_out
                           if item["artifact_key"] == artifact_key
-                          and item["snapshot_hash"]
-                          == attempt["configuration_hash"]), None)
+                          and item["shared_hash"]
+                          == shared_hash), None)
             if match is None:
                 match = {
                     "artifact_key": artifact_key,
-                    "snapshot_hash": attempt["configuration_hash"],
-                    "upload_config": attempt["configuration_snapshot"],
+                    "shared_hash": shared_hash,
+                    # Copied: this binding merges each member's options into
+                    # it, and the attempt's own snapshot is the configuration
+                    # recorded for that platform.
+                    "upload_config": deepcopy(snapshot),
                     "attempt_ids": [],
                     "platforms": [],
                     "scheduled_publish_at": attempt.get("scheduled_publish_at"),
                     "scheduled_via": attempt.get("scheduled_via"),
                 }
                 bindings_out.append(match)
+            else:
+                match["upload_config"].setdefault(
+                    "platform_options", {}).update(
+                        snapshot.get("platform_options", {}))
             match["attempt_ids"].append(attempt["attempt_id"])
             match["platforms"].append(attempt["platform"])
         immediate: list[dict[str, Any]] = []

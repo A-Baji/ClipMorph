@@ -1362,16 +1362,60 @@ class PerPlatformBindingTests(unittest.TestCase):
                 service.submit_upload(manifest.job_id, ["youtube", "tiktok"])
                 service._futures[f"upload:{manifest.job_id}"].result(timeout=10)
 
-            # Two bindings, because the platforms differ in artifact and frozen
-            # upload slice. (Other calls construct a pipeline for existing-post
-            # detection, which draws nothing, so only the uploading ones carry
-            # a bar.)
+            # Two bindings, because the platforms differ in artifact. (Other calls
+            # construct a pipeline for existing-post detection, which draws
+            # nothing, so only the uploading ones carry a bar.)
             bar_calls = [call for call in pipeline.call_args_list
                          if call.kwargs.get("submission_progress") is not None]
             self.assertEqual(len(bar_calls), 2)
             # ...but the split stays a transport detail: one submission, one bar.
             bars = [call.kwargs["submission_progress"] for call in bar_calls]
             self.assertIs(bars[0], bars[1])
+
+    def test_a_per_platform_upload_option_keeps_the_uploads_parallel(self):
+        """One deliberate override must not serialize the whole submission."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = _reviewed_job(data_dir)
+            self.addCleanup(service.close)
+            # Every participating platform restates its registry default except
+            # TikTok, so it is the only one whose frozen slice differs.
+            manifest.configuration["platforms"] = {
+                "youtube": {"category": "22", "privacy_status": "public"},
+                "instagram": {"share_to_feed": True, "thumb_offset": 0},
+                "tiktok": {"privacy_level": "SELF_ONLY"},
+                "twitter": {"upload": {"skip": True}},
+                "facebook": {"content_kind": "reel"}}
+            manifest.save(service.jobs_dir)
+
+            with patch("clipmorph.upload_pipeline.UploadPipeline") as pipeline:
+                pipeline.return_value.run.return_value = {
+                    name: {"success": True, "result": "ok"}
+                    for name in ("YouTube", "Instagram", "TikTok", "Facebook")}
+                result = service.submit_upload(manifest.job_id)
+                service._futures[f"upload:{manifest.job_id}"].result(timeout=10)
+
+            # All four ride ONE pipeline call, in parallel: the option is
+            # already prefixed with its own platform's name, so it never needed
+            # a call of its own.
+            upload_calls = [call for call in pipeline.call_args_list
+                            if call.kwargs.get("submission_progress") is not None]
+            self.assertEqual(len(upload_calls), 1)
+            self.assertEqual(
+                sorted(name for name, enabled in upload_calls[0].kwargs.items()
+                       if enabled is True),
+                ["facebook", "instagram", "tiktok", "youtube"])
+            # The override still reaches TikTok and only TikTok.
+            sent = pipeline.return_value.run.call_args.kwargs
+            self.assertEqual(sent["tiktok_privacy_level"], "SELF_ONLY")
+            self.assertNotIn("youtube_privacy_level", sent)
+            # ...and each attempt still records its OWN frozen slice, so the
+            # merge never rewrites the configuration accepted for a platform.
+            frozen = {attempt["platform"]: attempt["configuration_snapshot"][
+                "platform_options"] for attempt in result["attempts"]}
+            self.assertEqual(frozen["tiktok"],
+                             {"tiktok_privacy_level": "SELF_ONLY"})
+            self.assertEqual(frozen["youtube"], {})
 
     def test_the_submission_declares_every_platform_before_the_first_upload(self):
         with tempfile.TemporaryDirectory() as temp_dir:
