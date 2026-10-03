@@ -1032,6 +1032,14 @@ class PerPlatformGroupTests(unittest.TestCase):
                 service._futures[f"upload:{manifest.job_id}"].result(timeout=5)
             self.assertEqual(len(result["attempts"]), 1)
             self.assertEqual(result["attempts"][0]["platform"], "youtube")
+            # A skipped platform never becomes an attempt, a binding, or a slot
+            # in the submission's bar: the bar only ever counts platforms that
+            # will upload.
+            bars = [call.kwargs["submission_progress"]
+                    for call in pipeline_type.call_args_list
+                    if call.kwargs.get("submission_progress") is not None]
+            self.assertEqual(len(bars), 1)
+            self.assertEqual(list(bars[0]._percents), ["youtube"])
 
     def test_all_platforms_skip_a_stage_skips_it(self):
         configuration = {
