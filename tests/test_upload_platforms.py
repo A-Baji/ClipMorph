@@ -1,3 +1,4 @@
+import logging
 import re
 import tempfile
 import unittest
@@ -9,6 +10,7 @@ from clipmorph.policy import CAPABILITY_MATRIX, validate_artifact
 from clipmorph.upload_pipeline import UploadPipeline
 from clipmorph.upload_pipeline.platforms.base import BaseUploadPipeline
 from clipmorph.upload_pipeline.platforms.youtube import YouTubeUploadPipeline
+from clipmorph.upload_pipeline.progress import SubmissionProgress
 
 
 class UploadPipelineTests(unittest.TestCase):
@@ -256,6 +258,39 @@ class _FakeAdapter(BaseUploadPipeline):
         return "fake-result"
 
 
+class _FakeBar:
+    """A tqdm stand-in recording exactly what it was told."""
+
+    def __init__(self, **kwargs):
+        self.total = kwargs.get("total")
+        self.disable = False
+        self.n = 0
+        self.updates = []
+        self.postfixes = []
+        self.descriptions = []
+        self.messages = []
+        self.closed = False
+
+    def update(self, delta):
+        self.n += delta
+        self.updates.append(delta)
+
+    def set_postfix_str(self, text):
+        self.postfixes.append(text)
+
+    def set_description(self, text):
+        self.descriptions.append(text)
+
+    def write(self, message):
+        self.messages.append(message)
+
+    def refresh(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
 class UploadProgressCallbackTests(unittest.TestCase):
     def _run_with_callback(self, allocations):
         updates = []
@@ -300,7 +335,7 @@ class UploadProgressCallbackTests(unittest.TestCase):
     def test_service_progress_callback_keeps_the_combined_cli_bar(self):
         # The real wiring: JobService always installs a progress callback to
         # record live percents, so a callback must not disable CLI progress.
-        with patch("clipmorph.upload_pipeline.tqdm") as orchestrator_tqdm, \
+        with patch("clipmorph.upload_pipeline.progress.tqdm") as orchestrator_tqdm, \
                 patch("clipmorph.upload_pipeline.platforms.base.tqdm"
                       ) as adapter_tqdm:
             updates = []
@@ -356,6 +391,22 @@ class UploadProgressCallbackTests(unittest.TestCase):
         adapter._advance_progress(500)  # clamped
         self.assertEqual(adapter._percent, 100)
 
+    def test_completion_fills_a_bar_that_opened_after_an_early_step(self):
+        # The orchestrator's interactive-auth pass runs before the upload opens
+        # a bar, so TikTok's "authenticate" step counted into _progress_seen
+        # without moving the bar. Completion must still reach 100% instead of
+        # announcing "Upload complete" over a bar frozen short of it.
+        adapter = _FakeAdapter({"authenticate": 5, "video": 95})
+        bar = _FakeBar(total=100)
+        adapter._update_progress("authenticate")  # no bar yet
+        adapter.progress_bar = bar
+        adapter._update_progress("video")
+        self.assertEqual(bar.n, 95)
+
+        adapter._complete_progress_bar(True)
+        self.assertEqual(bar.n, 100)
+        self.assertEqual(bar.descriptions[-1], "[TikTok] Upload complete")
+
     def test_bar_write_falls_back_to_logging_without_a_bar(self):
         adapter = _FakeAdapter({"step_a": 100})
         with patch("clipmorph.upload_pipeline.platforms.base.logging"
@@ -368,7 +419,7 @@ class UploadProgressCallbackTests(unittest.TestCase):
     def test_combined_bar_is_disabled_on_a_non_terminal(self):
         # disable=None keeps the bar out of server logs and redirected
         # output, where the caller's callback is the only progress surface.
-        with patch("clipmorph.upload_pipeline.tqdm") as orchestrator_tqdm:
+        with patch("clipmorph.upload_pipeline.progress.tqdm") as orchestrator_tqdm:
             pipeline = UploadPipeline()
             tiktok = _FakeAdapter({"step_a": 50, "step_b": 50})
             twitter = _FakeAdapter({"step_a": 50, "step_b": 50})
@@ -379,7 +430,7 @@ class UploadProgressCallbackTests(unittest.TestCase):
         self.assertIs(orchestrator_tqdm.call_args.kwargs["disable"], None)
 
     def test_multi_platform_uses_one_combined_progress_bar(self):
-        with patch("clipmorph.upload_pipeline.tqdm") as orchestrator_tqdm, \
+        with patch("clipmorph.upload_pipeline.progress.tqdm") as orchestrator_tqdm, \
                 patch("clipmorph.upload_pipeline.platforms.base.tqdm"
                       ) as adapter_tqdm:
             pipeline = UploadPipeline()
@@ -412,6 +463,170 @@ class UploadProgressCallbackTests(unittest.TestCase):
             pipeline.enabled_platforms = {"TikTok": adapter}
             pipeline.run("video.mp4", "title")
         tqdm.assert_called_once()
+
+
+class SubmissionProgressBarTests(unittest.TestCase):
+    """One bar per submission, however the bindings split.
+
+    A submission whose platforms freeze different upload slices runs several
+    pipeline calls. That split is a transport detail, so every call reports into
+    the one bar the submission owns instead of drawing a bar of its own.
+    """
+
+    def _bars(self):
+        """Patch the bar factory, recording every bar it hands out."""
+        created: list[_FakeBar] = []
+
+        def factory(**kwargs):
+            bar = _FakeBar(**kwargs)
+            created.append(bar)
+            return bar
+
+        return created, patch("clipmorph.upload_pipeline.progress.tqdm",
+                              side_effect=factory)
+
+    def _run_binding(self, platform_name, allocations, progress,
+                     progress_callback=None):
+        adapter = _FakeAdapter(allocations)
+        adapter.platform_name = platform_name
+        # Runtime state the orchestrator needs to skip its interactive-auth pass.
+        adapter.credentials = object()
+        adapter.oauth_session = object()
+        adapter.access_token = "fake"
+        pipeline = UploadPipeline(submission_progress=progress,
+                                  progress_callback=progress_callback)
+        pipeline.enabled_platforms = {platform_name: adapter}
+        pipeline.run("video.mp4", "title")
+        return adapter
+
+    def test_two_pipeline_calls_share_one_bar(self):
+        created, bar_patch = self._bars()
+        with bar_patch, patch("clipmorph.upload_pipeline.platforms.base.tqdm"
+                              ) as adapter_tqdm:
+            progress = SubmissionProgress()
+            self._run_binding("YouTube", {"a": 50, "b": 50}, progress)
+            self._run_binding("TikTok", {"a": 25, "b": 75}, progress)
+
+        # One bar for the submission, and neither binding drew one of its own.
+        self.assertEqual(len(created), 1)
+        adapter_tqdm.assert_not_called()
+        # The second binding's platform widened the first binding's bar instead
+        # of opening a new one, and both advanced it by their own 100.
+        self.assertEqual(created[0].total, 200)
+        self.assertEqual(created[0].n, 200)
+
+    def test_a_single_platform_call_still_reports_into_the_shared_bar(self):
+        created, bar_patch = self._bars()
+        with bar_patch, patch("clipmorph.upload_pipeline.platforms.base.tqdm"
+                              ) as adapter_tqdm:
+            self._run_binding("TikTok", {"a": 60, "b": 40},
+                              SubmissionProgress())
+
+        self.assertEqual(len(created), 1)
+        adapter_tqdm.assert_not_called()
+        self.assertEqual(created[0].total, 100)
+        self.assertEqual(created[0].n, 100)
+
+    def test_the_postfix_lists_every_platform(self):
+        created, bar_patch = self._bars()
+        with bar_patch:
+            progress = SubmissionProgress()
+            self._run_binding("YouTube", {"a": 50, "b": 50}, progress)
+            self._run_binding("TikTok", {"a": 25, "b": 75}, progress)
+
+        self.assertEqual(created[0].postfixes[-1],
+                         "YouTube 100% | TikTok 100%")
+
+    def test_outcomes_print_above_the_shared_bar(self):
+        created, bar_patch = self._bars()
+        with bar_patch:
+            self._run_binding("TikTok", {"a": 100}, SubmissionProgress())
+        self.assertEqual(created[0].messages, ["TikTok upload completed"])
+
+    def test_a_failed_platform_is_announced_through_the_bar(self):
+        class _FailingAdapter(_FakeAdapter):
+            def run(self, video_path, **kwargs):
+                raise RuntimeError("platform is down")
+
+        created, bar_patch = self._bars()
+        with bar_patch:
+            adapter = _FailingAdapter({"a": 100})
+            adapter.platform_name = "TikTok"
+            adapter.access_token = "fake"
+            pipeline = UploadPipeline(
+                submission_progress=SubmissionProgress())
+            pipeline.enabled_platforms = {"TikTok": adapter}
+            pipeline.run("video.mp4", "title")
+        self.assertEqual(created[0].messages,
+                         ["TikTok upload failed: platform is down"])
+
+    def test_a_disabled_bar_keeps_messages_in_the_log_stream(self):
+        # tqdm.write prints to stderr even on a bar it disabled, which would put
+        # progress chatter in front of a server log instead of in it.
+        created, bar_patch = self._bars()
+        with bar_patch, patch("clipmorph.upload_pipeline.progress.logging"
+                              ) as log:
+            progress = SubmissionProgress()
+            self._run_binding("TikTok", {"a": 100}, progress)
+            # tqdm suppresses the bar itself when stderr is not a terminal, but
+            # its write() would still print: the message goes to the log instead.
+            created[0].disable = True
+            progress.write("late message")
+        self.assertEqual(created[0].messages, ["TikTok upload completed"])
+        log.log.assert_called_once_with(logging.INFO, "late message")
+
+    def test_the_caller_callback_still_receives_every_platform(self):
+        updates = []
+        created, bar_patch = self._bars()
+        with bar_patch:
+            progress = SubmissionProgress()
+            self._run_binding(
+                "YouTube", {"a": 50, "b": 50}, progress,
+                progress_callback=lambda name, percent: updates.append(
+                    (name, percent)))
+            self._run_binding(
+                "TikTok", {"a": 25, "b": 75}, progress,
+                progress_callback=lambda name, percent: updates.append(
+                    (name, percent)))
+        self.assertEqual(updates, [("YouTube", 50), ("YouTube", 100),
+                                   ("TikTok", 25), ("TikTok", 100)])
+
+    def test_adapter_messages_reach_the_shared_bar(self):
+        created, bar_patch = self._bars()
+        with bar_patch:
+            adapter = self._run_binding(
+                "TikTok", {"a": 100}, SubmissionProgress())
+            adapter._bar_write("[TikTok] Video uploaded successfully")
+        self.assertEqual(created[0].messages,
+                         ["TikTok upload completed",
+                          "[TikTok] Video uploaded successfully"])
+
+    def test_a_platform_that_never_uploads_is_not_a_slot(self):
+        # An adapter that fails to initialize leaves its platform out of
+        # enabled_platforms, so it never becomes a slot the bar waits on.
+        created, bar_patch = self._bars()
+        with bar_patch, \
+                patch("clipmorph.upload_pipeline.YouTubeUploadPipeline",
+                      side_effect=ValueError("missing credentials")):
+            pipeline = UploadPipeline(
+                youtube=True, submission_progress=SubmissionProgress())
+            pipeline.enabled_platforms["TikTok"] = _FakeAdapter({"a": 100})
+            results = pipeline.run("video.mp4", "title")
+
+        self.assertFalse(results["YouTube"]["success"])
+        self.assertEqual(created[0].total, 100)
+        self.assertEqual(created[0].n, 100)
+
+    def test_a_shared_bar_survives_until_the_submission_closes_it(self):
+        # A pipeline call that did not create the bar must not close it: the
+        # next binding of the same submission still reports into it.
+        created, bar_patch = self._bars()
+        with bar_patch:
+            progress = SubmissionProgress()
+            self._run_binding("TikTok", {"a": 100}, progress)
+            self.assertFalse(created[0].closed)
+            progress.close()
+        self.assertTrue(created[0].closed)
 
 
 if __name__ == "__main__":

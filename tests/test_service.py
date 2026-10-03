@@ -1340,6 +1340,31 @@ class PerPlatformBindingTests(unittest.TestCase):
             self.assertEqual(kinds["youtube"], "source")
             self.assertEqual(kinds["tiktok"], "primary")
 
+    def test_every_binding_of_one_submission_shares_one_progress_bar(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service = JobService(data_dir)
+            self.addCleanup(service.close)
+            manifest = _two_group_job(service, data_dir)
+
+            with patch("clipmorph.upload_pipeline.UploadPipeline") as pipeline:
+                pipeline.return_value.run.return_value = {
+                    "YouTube": {"success": True, "result": "ok"},
+                    "TikTok": {"success": True, "result": "ok"}}
+                service.submit_upload(manifest.job_id, ["youtube", "tiktok"])
+                service._futures[f"upload:{manifest.job_id}"].result(timeout=10)
+
+            # Two bindings, because the platforms differ in artifact and frozen
+            # upload slice. (Other calls construct a pipeline for existing-post
+            # detection, which draws nothing, so only the uploading ones carry
+            # a bar.)
+            bar_calls = [call for call in pipeline.call_args_list
+                         if call.kwargs.get("submission_progress") is not None]
+            self.assertEqual(len(bar_calls), 2)
+            # ...but the split stays a transport detail: one submission, one bar.
+            bars = [call.kwargs["submission_progress"] for call in bar_calls]
+            self.assertIs(bars[0], bars[1])
+
     def test_upload_draft_summary_reports_each_platform_target(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"

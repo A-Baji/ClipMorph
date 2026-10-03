@@ -31,7 +31,8 @@ def content_options(upload_config: dict[str, Any]) -> dict[str, Any]:
 
 def execute_upload_pipeline(platforms: list[str], artifact_path: str,
                             upload_config: dict[str, Any],
-                            progress_callback: Callable[[str, int], None] | None = None
+                            progress_callback: Callable[[str, int], None] | None = None,
+                            submission_progress: Any | None = None
                             ) -> dict[str, Any]:
     """Run the upload pipeline and return per-platform results.
 
@@ -39,13 +40,17 @@ def execute_upload_pipeline(platforms: list[str], artifact_path: str,
     failed result per requested platform so no requested destination silently
     disappears (#87). ``progress_callback`` is threaded through to the
     orchestrator and invoked with ``(platform_name, percent)`` after each
-    adapter step update.
+    adapter step update. ``submission_progress`` is the bar the submission owns
+    for all of its bindings; this call draws nothing of its own when it is
+    given, so a submission split by a per-platform upload option still shows one
+    bar.
     """
     from clipmorph.upload_pipeline import UploadPipeline
 
     platform_flags = {platform: True for platform in platforms}
     pipeline = UploadPipeline(**platform_flags,
-                              progress_callback=progress_callback)
+                              progress_callback=progress_callback,
+                              submission_progress=submission_progress)
     content = upload_config.get("content", {})
     try:
         return pipeline.run(artifact_path, content.get("title", ""),

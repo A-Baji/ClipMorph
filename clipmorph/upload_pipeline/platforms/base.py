@@ -51,6 +51,10 @@ class BaseUploadPipeline(ABC):
         # progress_callback on its own does NOT suppress the bar: the callback
         # only records percents (live web progress) and draws nothing.
         self._suppress_cli_progress = False
+        # Set by the orchestrator to the submission bar's writer when that bar
+        # owns progress reporting, so this adapter's messages print above it
+        # instead of being overwritten by its redraws.
+        self._progress_writer: Callable[[str], None] | None = None
 
     def _retry_request(self,
                        func: Callable,
@@ -207,12 +211,16 @@ class BaseUploadPipeline(ABC):
         by the next bar redraw, but it needs a bar. Adapters use this instead of
         calling ``self.progress_bar.write`` directly, which raises
         ``AttributeError`` in the suppressed-bar paths (orchestrator-owned
-        combined bar, web progress callback).
+        combined bar, web progress callback), and prefer the orchestrator's
+        writer when one is installed, because the shared bar is the bar they
+        are reporting through.
 
         Args:
             message: Text to print
         """
-        if self.progress_bar is not None:
+        if self._progress_writer is not None:
+            self._progress_writer(message)
+        elif self.progress_bar is not None:
             self.progress_bar.write(message)
         else:
             logging.info(message)
@@ -310,7 +318,8 @@ class BaseUploadPipeline(ABC):
             desc=f"[{self.platform_name}] {description}",
             unit="%",
             bar_format="{l_bar}{bar}| {percentage:3.0f}% [{elapsed}<{remaining}]",
-            ncols=100,
+            # No fixed width: a long description would otherwise be clipped at
+            # the right edge, the same way the submission bar's postfix was.
             leave=True,
             position=0,
             disable=None)
@@ -388,9 +397,16 @@ class BaseUploadPipeline(ABC):
             # combined bar, the live web progress) even when this adapter owns
             # no bar of its own.
             self._advance_progress(100)
-            if self.progress_bar is not None:
-                self.progress_bar.set_description(
-                    f"[{self.platform_name}] Upload complete")
+            bar = self.progress_bar
+            if bar is not None:
+                # A step that completed before this bar existed (the
+                # orchestrator's interactive-auth pass runs before the upload
+                # opens a bar) counted into _progress_seen without moving the
+                # bar, so _advance_progress sees its target already reached and
+                # leaves the bar short of the completion it just announced.
+                if bar.n < 100:
+                    bar.update(100 - bar.n)
+                bar.set_description(f"[{self.platform_name}] Upload complete")
         elif self.progress_bar is not None:
             # Show error state without completing to 100%
             self.progress_bar.set_description(

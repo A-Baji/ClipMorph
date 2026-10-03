@@ -2,11 +2,8 @@ from concurrent.futures import as_completed
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import logging
-from threading import Lock
 from functools import partial
 from typing import Any, Dict
-
-from tqdm import tqdm
 
 from clipmorph.platforms import build_platform_default_config
 from clipmorph.policy import build_platform_metadata
@@ -17,6 +14,7 @@ from .platforms import InstagramUploadPipeline
 from .platforms import TikTokUploadPipeline
 from .platforms import TwitterUploadPipeline
 from .platforms import YouTubeUploadPipeline
+from .progress import SubmissionProgress
 
 
 class UploadPipeline:
@@ -58,7 +56,8 @@ class UploadPipeline:
                  twitter: bool = False,
                  facebook: bool = False,
                  max_workers: int = 4,
-                 progress_callback=None):
+                 progress_callback=None,
+                 submission_progress=None):
         """
         Initialize the upload pipeline with platform configurations.
 
@@ -72,9 +71,15 @@ class UploadPipeline:
             progress_callback: Optional callable invoked with
                 ``(platform_name, percent)`` after each adapter step update;
                 ``None`` keeps the default CLI behavior untouched
+            submission_progress: Optional bar shared by every binding of one
+                upload submission. A submission that carries a per-platform
+                upload option runs several pipeline calls, so the bar belongs to
+                the submission; without one this pipeline call owns the bar for
+                the platforms it uploads.
         """
         self.max_workers = max_workers
         self._progress_callback = progress_callback
+        self._submission_progress = submission_progress
         self.enabled_platforms: Dict[str, Any] = {}
         self.initialization_errors: Dict[str, str] = {}
 
@@ -115,53 +120,19 @@ class UploadPipeline:
         self.initialization_errors[platform_name] = message
         logging.warning(message)
 
-    def _build_combined_progress_bar(self):
-        """Create one thread-safe CLI bar fed by per-platform step percents.
-
-        Returns ``(bar, callback)``; adapters report through the callback as
-        ``(platform_name, percent)`` at each step, so the shared bar advances
-        by each platform's own delta and a postfix lists every percent. Bar
-        writes happen under one lock: tqdm is not thread-safe by itself. The
-        bar is created with ``disable=None``, so tqdm suppresses it when stderr
-        is not a terminal (server logs, redirected output) and the caller's
-        progress callback remains the only progress surface there.
-        """
-        bar = tqdm(
-            total=100 * len(self.enabled_platforms),
-            # Name the platforms: one bar covers one artifact binding, so the
-            # count is this binding's platforms, not the whole job's.
-            desc=("Uploading: " + ", ".join(self.enabled_platforms)),
-            unit="%",
-            bar_format="{l_bar}{bar}| {percentage:3.0f}% "
-                       "[{elapsed}<{remaining}] {postfix}",
-            ncols=100,
-            leave=True,
-            position=0,
-            disable=None)
-        percents = {name: 0 for name in self.enabled_platforms}
-        lock = Lock()
-
-        def report(platform_name, percent):
-            delta = max(0, percent - percents.get(platform_name, 0))
-            with lock:
-                percents[platform_name] = percent
-                bar.update(delta)
-                bar.set_postfix_str(
-                    " | ".join(f"{name} {percent_value}%"
-                               for name, percent_value in percents.items()))
-
-        return bar, report
-
     @staticmethod
-    def _bar_write(bar, message: str, level: int = logging.INFO) -> None:
-        """Print a message above ``bar``, or log it when there is no bar.
+    def _bar_write(progress: SubmissionProgress | None, message: str,
+                   level: int = logging.INFO) -> None:
+        """Report an outcome above the bar, or log it when there is no bar.
 
         Logging to the same stream a live bar redraws on produces the
         interleaved, half-overwritten lines a parallel run otherwise shows, so
-        outcomes go through the bar's writer while it is open.
+        outcomes go through the bar while it is open. ``progress`` is the
+        submission's progress surface (which itself falls back to logging when
+        it draws nothing) or ``None``.
         """
-        if bar is not None:
-            bar.write(message)
+        if progress is not None:
+            progress.write(message, level)
         else:
             logging.log(level, message)
 
@@ -349,19 +320,26 @@ class UploadPipeline:
 
         # Multiple parallel CLI progress bars overwrite each other, so every
         # platform reports into ONE combined bar: total = 100% per platform,
-        # postfix shows each platform's percent. The caller's progress callback
-        # only records percents (live web progress); it does not draw, so it
-        # must not suppress the bar. Both are fed from one per-adapter hook.
+        # postfix shows each platform's percent. The bar belongs to the
+        # submission, so a submission split into several bindings by a
+        # per-platform upload option still shows one bar; the caller's progress
+        # callback only records percents (live web progress) and does not draw,
+        # so it must not suppress the bar. Both are fed from one per-adapter
+        # hook.
         external_callback = self._progress_callback
-        combined_bar = None
-        if len(self.enabled_platforms) > 1:
-            combined_bar, combined_callback = (
-                self._build_combined_progress_bar())
+        progress = self._submission_progress
+        owns_progress = False
+        if progress is None and len(self.enabled_platforms) > 1:
+            progress = SubmissionProgress()
+            owns_progress = True
+        if progress is not None:
+            progress.include(self.enabled_platforms)
             for platform_name, pipeline in self.enabled_platforms.items():
                 pipeline.progress_callback = partial(
                     self._report_to_bar_and_callback,
-                    combined_callback, platform_name, external_callback)
+                    progress.report, platform_name, external_callback)
                 pipeline._suppress_cli_progress = True
+                pipeline._progress_writer = progress.write
 
         # Use ThreadPoolExecutor for parallel uploads
         try:
@@ -387,11 +365,11 @@ class UploadPipeline:
                             # Through the bar, so the message is not overwritten
                             # by the next redraw.
                             self._bar_write(
-                                combined_bar,
+                                progress,
                                 f"{platform_name} upload completed")
                         else:
                             self._bar_write(
-                                combined_bar,
+                                progress,
                                 f"{platform_name} upload failed: "
                                 f"{result['error']}", logging.ERROR)
 
@@ -403,11 +381,11 @@ class UploadPipeline:
                             'error': f"Future execution failed: {str(e)}"
                         }
                         self._bar_write(
-                            combined_bar,
+                            progress,
                             f"{platform_name} upload failed with exception: {e}",
                             logging.ERROR)
         finally:
-            if combined_bar is not None:
-                combined_bar.close()
+            if owns_progress and progress is not None:
+                progress.close()
 
         return results

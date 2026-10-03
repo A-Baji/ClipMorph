@@ -1961,7 +1961,9 @@ class JobService:
         upload_config}`` records the submission produced.  Platforms that render
         a vertical and platforms that upload the source ride different bindings,
         so each pipeline call only ever sees attempts that share one artifact
-        and one frozen upload slice.
+        and one frozen upload slice.  The binding split is a transport detail
+        though: every call reports into the one progress bar this submission
+        owns.
         """
         from clipmorph.upload_attempts import execute_upload_pipeline
         from clipmorph.upload_attempts import normalize_results
@@ -1994,9 +1996,17 @@ class JobService:
             # state the cancel left it in.
             return
         merged: dict[str, Any] = {}
-        for binding in bindings:
-            merged.update(self._run_upload_binding(job_id, binding,
-                                                   execute_upload_pipeline))
+        from clipmorph.upload_pipeline.progress import SubmissionProgress
+        # The progress bar belongs to the submission, not to one binding: the
+        # binding split (per-platform upload option, separate conversion group)
+        # is a transport detail the user should never see as a second bar.
+        progress = SubmissionProgress()
+        try:
+            for binding in bindings:
+                merged.update(self._run_upload_binding(
+                    job_id, binding, execute_upload_pipeline, progress))
+        finally:
+            progress.close()
         normalized_results = normalize_results(merged)
         with self._lock:
             manifest = self.get_job(job_id)
@@ -2088,8 +2098,13 @@ class JobService:
             self._live_progress.pop(job_id, None)
 
     def _run_upload_binding(self, job_id: str, binding: dict[str, Any],
-                            execute_upload_pipeline: Callable) -> dict[str, Any]:
-        """Stage one bound artifact, run its pipeline, and release the copy."""
+                            execute_upload_pipeline: Callable,
+                            progress: Any = None) -> dict[str, Any]:
+        """Stage one bound artifact, run its pipeline, and release the copy.
+
+        ``progress`` is the submission's shared progress bar, so this binding's
+        platforms report into the same bar as every other binding's.
+        """
         platforms = binding["platforms"]
         try:
             staged_path = self._stage_artifact(binding["artifact_key"])
@@ -2107,7 +2122,8 @@ class JobService:
         try:
             return execute_upload_pipeline(
                 platforms, str(staged_path), binding["upload_config"],
-                progress_callback=self._on_progress(job_id))
+                progress_callback=self._on_progress(job_id),
+                submission_progress=progress)
         except Exception as error:
             now = datetime.now(timezone.utc).isoformat()
             return {platform: {"success": False, "error": str(error),
