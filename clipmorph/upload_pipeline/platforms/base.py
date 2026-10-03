@@ -199,6 +199,52 @@ class BaseUploadPipeline(ABC):
             # If we can't parse the error, just continue
             pass
 
+    def _bar_write(self, message: str):
+        """
+        Print a message above the progress bar, or log it when there is no bar.
+
+        ``tqdm.write`` is the only way to keep a message from being overwritten
+        by the next bar redraw, but it needs a bar. Adapters use this instead of
+        calling ``self.progress_bar.write`` directly, which raises
+        ``AttributeError`` in the suppressed-bar paths (orchestrator-owned
+        combined bar, web progress callback).
+
+        Args:
+            message: Text to print
+        """
+        if self.progress_bar is not None:
+            self.progress_bar.write(message)
+        else:
+            logging.info(message)
+
+    def _advance_progress(self, target: int):
+        """
+        Advance this adapter's progress to ``target`` (0-100, allocation space).
+
+        Single sink for progress movement: the adapter's own bar when it owns
+        one, and the progress callback always. The interpolated upload and
+        processing loops must go through here instead of writing to
+        ``self.progress_bar`` directly, or their movement disappears whenever
+        the orchestrator owns a combined bar (a multi-platform CLI run) or a
+        progress callback is installed (the live web progress).
+
+        Monotonic: a target at or below the progress already reported is
+        ignored, so the loops' own throttles stay authoritative.
+
+        Args:
+            target: Absolute progress to reach in allocation space (0-100)
+        """
+        target = max(0, min(100, int(target)))
+        if target <= self._progress_seen:
+            return
+        delta = target - self._progress_seen
+        self._progress_seen = target
+        self._percent = target
+        if self.progress_bar is not None:
+            self.progress_bar.update(delta)
+        if self.progress_callback is not None:
+            self.progress_callback(self._percent)
+
     def _update_progress(self, step_name: str, description: str = ""):
         """
         Update the progress bar based on step completion.
@@ -336,17 +382,16 @@ class BaseUploadPipeline(ABC):
         Args:
             success: Whether the operation was successful
         """
-        if not self.progress_bar:
-            return
-
         if success:
-            # Complete to 100% only on success
-            total_progress = sum(self.progress_allocations.values())
-            remaining = total_progress - self.progress_bar.n
-            if remaining > 0:
-                self.progress_bar.update(remaining)
-            
-            self.progress_bar.set_description(f"[{self.platform_name}] Upload complete")
-        else:
+            # Complete to 100% only on success. Advance through the shared sink
+            # so the completion reaches the callback (the orchestrator's
+            # combined bar, the live web progress) even when this adapter owns
+            # no bar of its own.
+            self._advance_progress(100)
+            if self.progress_bar is not None:
+                self.progress_bar.set_description(
+                    f"[{self.platform_name}] Upload complete")
+        elif self.progress_bar is not None:
             # Show error state without completing to 100%
-            self.progress_bar.set_description(f"[{self.platform_name}] Upload failed")
+            self.progress_bar.set_description(
+                f"[{self.platform_name}] Upload failed")

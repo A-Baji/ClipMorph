@@ -128,7 +128,9 @@ class UploadPipeline:
         """
         bar = tqdm(
             total=100 * len(self.enabled_platforms),
-            desc=(f"Uploading to {len(self.enabled_platforms)} platforms"),
+            # Name the platforms: one bar covers one artifact binding, so the
+            # count is this binding's platforms, not the whole job's.
+            desc=("Uploading: " + ", ".join(self.enabled_platforms)),
             unit="%",
             bar_format="{l_bar}{bar}| {percentage:3.0f}% "
                        "[{elapsed}<{remaining}] {postfix}",
@@ -149,6 +151,19 @@ class UploadPipeline:
                                for name, percent_value in percents.items()))
 
         return bar, report
+
+    @staticmethod
+    def _bar_write(bar, message: str, level: int = logging.INFO) -> None:
+        """Print a message above ``bar``, or log it when there is no bar.
+
+        Logging to the same stream a live bar redraws on produces the
+        interleaved, half-overwritten lines a parallel run otherwise shows, so
+        outcomes go through the bar's writer while it is open.
+        """
+        if bar is not None:
+            bar.write(message)
+        else:
+            logging.log(level, message)
 
     def _report_to_bar_and_callback(self, bar_callback, platform_name: str,
                                     external_callback, percent: int) -> None:
@@ -369,11 +384,16 @@ class UploadPipeline:
                         if result['success']:
                             # A quiet console between errors looks hung during a
                             # parallel run: say every platform's final outcome.
-                            logging.info(f"{platform_name} upload completed")
+                            # Through the bar, so the message is not overwritten
+                            # by the next redraw.
+                            self._bar_write(
+                                combined_bar,
+                                f"{platform_name} upload completed")
                         else:
-                            logging.error(
-                                f"{platform_name} upload failed: {result['error']}"
-                            )
+                            self._bar_write(
+                                combined_bar,
+                                f"{platform_name} upload failed: "
+                                f"{result['error']}", logging.ERROR)
 
                     except Exception as e:
                         results[platform_name] = {
@@ -382,8 +402,10 @@ class UploadPipeline:
                             'result': None,
                             'error': f"Future execution failed: {str(e)}"
                         }
-                        logging.error(
-                            f"{platform_name} upload failed with exception: {e}")
+                        self._bar_write(
+                            combined_bar,
+                            f"{platform_name} upload failed with exception: {e}",
+                            logging.ERROR)
         finally:
             if combined_bar is not None:
                 combined_bar.close()

@@ -255,8 +255,7 @@ class TikTokUploadPipeline(BaseUploadPipeline):
         the refresh grant outside this method must never re-request tokens:
         a second call can consume the freshly issued refresh token.
         """
-        if self.progress_bar:
-            self.progress_bar.write(message)
+        self._bar_write(message)
         return self.generate_refresh_token()
 
     def _validate_video_file(self, video_path: str):

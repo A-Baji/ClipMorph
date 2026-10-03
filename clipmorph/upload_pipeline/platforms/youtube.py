@@ -310,7 +310,10 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
             self.MIN_PROGRESS_INCREMENT, self.MAX_PROGRESS_DURING_PROCESSING /
             (estimated_time / self.API_POLL_INTERVAL))
 
-        current_progress = self.progress_bar.n if self.progress_bar else 0
+        # Interpolate from whatever this adapter has already reported, so the base
+        # is right whether the adapter owns a bar or the orchestrator does.
+        current_progress = (self.progress_bar.n if self.progress_bar
+                            else self._progress_seen)
 
         while response is None:
             try:
@@ -334,6 +337,11 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
                                         increment_per_update)
                         if increment > 0:
                             self.progress_bar.update(increment)
+                    else:
+                        # No bar of its own (the orchestrator owns one): report
+                        # through the callback so the shared bar still moves
+                        # during the upload instead of jumping at the end.
+                        self._advance_progress(target_progress)
 
                 if response is not None:
                     if 'id' in response:

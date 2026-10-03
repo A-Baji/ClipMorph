@@ -327,6 +327,44 @@ class UploadProgressCallbackTests(unittest.TestCase):
             orchestrator_tqdm.return_value.update.call_args_list)
         self.assertEqual(update_totals, 200)
 
+    def test_interpolated_progress_reaches_the_caller_without_a_bar(self):
+        # The adapters' upload/processing loops interpolate through
+        # _advance_progress. When the orchestrator owns the combined bar the
+        # adapter has no bar of its own, so writing to self.progress_bar
+        # directly silently dropped every intermediate update and the shared
+        # bar froze at the last step boundary.
+        adapter = _FakeAdapter({"step_a": 20, "step_b": 80})
+        updates = []
+        adapter.progress_callback = updates.append
+
+        adapter._update_progress("step_a")  # 20% reported, no bar
+        for target in (40, 60, 80):  # interpolated during the upload
+            adapter._advance_progress(target)
+
+        self.assertEqual(updates, [20, 40, 60, 80])
+        self.assertEqual(adapter._percent, 80)
+
+        # Completion reaches the caller too, so the bar can finish at 100.
+        adapter._complete_progress_bar(True)
+        self.assertEqual(updates[-1], 100)
+
+    def test_advance_progress_is_monotonic_and_clamped(self):
+        adapter = _FakeAdapter({"step_a": 100})
+        adapter.progress_callback = lambda percent: None
+        adapter._advance_progress(60)
+        adapter._advance_progress(30)  # below what was reported: ignored
+        adapter._advance_progress(500)  # clamped
+        self.assertEqual(adapter._percent, 100)
+
+    def test_bar_write_falls_back_to_logging_without_a_bar(self):
+        adapter = _FakeAdapter({"step_a": 100})
+        with patch("clipmorph.upload_pipeline.platforms.base.logging"
+                   ) as logging_mock:
+            adapter._bar_write("[Instagram] No access token found.")
+        # A suppressed bar must not raise AttributeError on progress_bar.write.
+        logging_mock.info.assert_called_once_with(
+            "[Instagram] No access token found.")
+
     def test_combined_bar_is_disabled_on_a_non_terminal(self):
         # disable=None keeps the bar out of server logs and redirected
         # output, where the caller's callback is the only progress surface.

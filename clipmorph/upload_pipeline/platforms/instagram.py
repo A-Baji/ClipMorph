@@ -388,7 +388,8 @@ class InstagramUploadPipeline(BaseUploadPipeline):
             self.MIN_PROGRESS_INCREMENT,
             self.MAX_PROGRESS_DURING_PROCESSING / estimated_time)
 
-        current_progress = self.progress_bar.n if self.progress_bar else 0
+        current_progress = (self.progress_bar.n if self.progress_bar
+                            else self._progress_seen)
         status = None
 
         while time.time() - start < self.processing_timeout:
@@ -418,6 +419,11 @@ class InstagramUploadPipeline(BaseUploadPipeline):
                     self.MAX_PROGRESS_DURING_PROCESSING - self.progress_bar.n)
                 if increment > 0:
                     self.progress_bar.update(increment)
+            else:
+                # No bar of its own (the orchestrator owns one): report
+                # through the callback so the shared bar still moves while
+                # Instagram is processing the reel.
+                self._advance_progress(target_progress)
 
             if status == 'FINISHED':
                 if self.progress_bar:
@@ -496,12 +502,12 @@ class InstagramUploadPipeline(BaseUploadPipeline):
 
                 # Get necessary tokens and IDs
                 if not self.access_token:
-                    self.progress_bar.write(
+                    self._bar_write(
                         "[Instagram] No access token found. Starting OAuth flow..."
                     )
                     self.access_token = self._generate_long_lived_access_token(
                     )
-                    self.progress_bar.write(
+                    self._bar_write(
                         "\nInstagram access token generated. Store it securely in "
                         "FACEBOOK_ACCESS_TOKEN; it is not displayed by ClipMorph.\n")
 

@@ -118,10 +118,9 @@ class TwitterUploadPipeline(BaseUploadPipeline):
     def _authenticate(self):
         """Authenticate the X API v2 session with a fresh-enough user token."""
         if not self.access_token and not self.refresh_token:
-            if self.progress_bar:
-                self.progress_bar.write(
-                    "[Twitter] No OAuth2 user token found. Starting authorization flow..."
-                )
+            self._bar_write(
+                "[Twitter] No OAuth2 user token found. Starting authorization flow..."
+            )
             authorize_twitter(self.data_dir)
             self.access_token = os.getenv("TWITTER_OAUTH2_ACCESS_TOKEN")
             self.refresh_token = os.getenv("TWITTER_OAUTH2_REFRESH_TOKEN")
@@ -138,10 +137,9 @@ class TwitterUploadPipeline(BaseUploadPipeline):
             try:
                 values = refresh_twitter_access_token(self.data_dir)
             except requests.exceptions.HTTPError:
-                if self.progress_bar:
-                    self.progress_bar.write(
-                        "[Twitter] Refresh token rejected. Starting authorization flow..."
-                    )
+                self._bar_write(
+                    "[Twitter] Refresh token rejected. Starting authorization flow..."
+                )
                 authorize_twitter(self.data_dir)
                 values = {
                     "oauth2_access_token": os.getenv("TWITTER_OAUTH2_ACCESS_TOKEN"),
@@ -258,7 +256,10 @@ class TwitterUploadPipeline(BaseUploadPipeline):
             self.MIN_PROGRESS_INCREMENT, self.MAX_PROGRESS_DURING_PROCESSING /
             (estimated_time / self.API_POLL_INTERVAL))
 
-        current_progress = self.progress_bar.n if self.progress_bar else 0
+        # Interpolate from whatever this adapter has already reported, so the base
+        # is right whether the adapter owns a bar or the orchestrator does.
+        current_progress = (self.progress_bar.n if self.progress_bar
+                            else self._progress_seen)
 
         while (processing_state != "succeeded"
                and retry_count < self.max_processing_retries
@@ -313,6 +314,11 @@ class TwitterUploadPipeline(BaseUploadPipeline):
                                 target_progress - self.progress_bar.n)
                             if increment > 0:
                                 self.progress_bar.update(increment)
+                        else:
+                            # No bar of its own (the orchestrator owns one):
+                            # report through the callback so the shared bar
+                            # still moves while the video is processing.
+                            self._advance_progress(target_progress)
 
                         check_after_secs = processing_info.get(
                             "check_after_secs", self.API_POLL_INTERVAL)
