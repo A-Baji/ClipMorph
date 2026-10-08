@@ -1,11 +1,13 @@
 """One CLI progress bar for a whole upload submission.
 
-A submission is coalesced into bindings by frozen upload slice, so any
-per-platform upload option (a different privacy level, a different content
-kind) runs its own pipeline call. A bar per binding therefore meant that one
-deliberate per-platform override silently gave the user a second, separate bar
-instead of one bar per submission. This bar is owned by the submission and
-shared by every binding's pipeline call.
+A submission is coalesced into bindings by (artifact, shared upload slice),
+where the shared slice is the frozen snapshot minus each platform's prefixed
+adapter options: every option is frozen under its own ``{platform}_`` prefix,
+so platforms that differ in nothing but those options ride ONE parallel
+pipeline call, and the options never leak across adapters. A remaining
+binding split (a different artifact, or a different unprefixed slice) is a
+transport detail: this bar belongs to the submission and is shared by every
+binding's pipeline call.
 
 The submission knows every platform it will upload before the first binding
 runs, so it declares them all when it creates the bar: the total and the
