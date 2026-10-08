@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 import tempfile
 import unittest
@@ -629,6 +630,28 @@ class SubmissionProgressBarTests(unittest.TestCase):
                          ["TikTok upload completed",
                           "[TikTok] Video uploaded successfully"])
 
+    def test_the_no_refresh_token_message_reaches_the_progress_writer(self):
+        created, bar_patch = self._bars()
+        with bar_patch:
+            adapter = YouTubeUploadPipeline(google_client_id="id",
+                                            google_client_secret="secret")
+            adapter.refresh_token = None
+            received = []
+            adapter._progress_writer = received.append
+            # The sentinel stops the auth flow before any Credentials or
+            # network work, so the test stays offline while still reaching the
+            # no-refresh-token message path; patch.dict restores os.environ.
+            with patch.dict(os.environ), patch.object(
+                    adapter, "generate_refresh_token",
+                    side_effect=RuntimeError("oauth flow starts")):
+                os.environ.pop("GOOGLE_REFRESH_TOKEN", None)
+                with self.assertRaisesRegex(RuntimeError,
+                                            "oauth flow starts"):
+                    adapter._authenticate()
+        self.assertEqual(
+            received,
+            ["[YouTube] No refresh token found. Starting OAuth flow..."])
+
     def test_a_caller_that_cannot_declare_up_front_still_sizes_its_own_bar(self):
         # A directly constructed pipeline has no submission to declare for it,
         # so it registers the adapters it actually initialized; one that
@@ -685,8 +708,14 @@ class SharedBarWriteDriftTests(unittest.TestCase):
     def test_no_concrete_adapter_writes_the_bar_directly(self):
         platforms_dir = Path(__file__).resolve().parent.parent / (
             "clipmorph/upload_pipeline/platforms")
-        for name in ("youtube.py", "instagram.py", "tiktok.py", "twitter.py",
-                     "facebook.py"):
+        modules = sorted(platforms_dir.glob("*.py"))
+        scanned = [path.name for path in modules
+                   if path.name not in ("base.py", "__init__.py")]
+        # An empty scan proves nothing: fail rather than pass vacuously.
+        self.assertTrue(
+            scanned,
+            f"no platform modules found under {platforms_dir}")
+        for name in scanned:
             with self.subTest(module=name):
                 source = (platforms_dir / name).read_text(encoding="utf-8")
                 self.assertNotIn("self.progress_bar.write", source)

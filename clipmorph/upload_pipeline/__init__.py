@@ -321,8 +321,9 @@ class UploadPipeline:
         # Multiple parallel CLI progress bars overwrite each other, so every
         # platform reports into ONE combined bar: total = 100% per platform,
         # postfix shows each platform's percent. The bar belongs to the
-        # submission, so a submission split into several bindings by a
-        # per-platform upload option still shows one bar; the caller's progress
+        # submission, so a submission split into several bindings (a different
+        # artifact, or a different unprefixed slice member) still shows one
+        # bar; the caller's progress
         # callback only records percents (live web progress) and does not draw,
         # so it must not suppress the bar. Both are fed from one per-adapter
         # hook.

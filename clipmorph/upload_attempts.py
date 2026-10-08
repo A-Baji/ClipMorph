@@ -42,8 +42,8 @@ def execute_upload_pipeline(platforms: list[str], artifact_path: str,
     orchestrator and invoked with ``(platform_name, percent)`` after each
     adapter step update. ``submission_progress`` is the bar the submission owns
     for all of its bindings; this call draws nothing of its own when it is
-    given, so a submission split by a per-platform upload option still shows one
-    bar.
+    given, so a submission split across bindings (a different artifact, or a
+    different unprefixed slice member) still shows one bar.
     """
     from clipmorph.upload_pipeline import UploadPipeline
 
