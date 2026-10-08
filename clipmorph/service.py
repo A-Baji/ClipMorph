@@ -204,6 +204,20 @@ def _select_upload_platforms(job_effective: dict[str, Any],
     return [platform for platform in participants if platform in requested]
 
 
+def _shared_upload_sha256(snapshot: dict[str, Any]) -> str:
+    """Hash the slice every adapter in one pipeline call receives unprefixed.
+
+    Per-platform flat adapter options are excluded: each is frozen under its
+    own ``{platform}_`` prefix, and the orchestrator hands every adapter only
+    the options carrying its own prefix, so a difference there does not split
+    the call (#225). A difference in anything the slice reaches unprefixed —
+    the description, the tags, the schedule — still splits it.
+    """
+    return configuration_sha256(
+        {key: value for key, value in snapshot.items()
+         if key != "platform_options"})
+
+
 def _stage_skipped(configuration: dict[str, Any], stage: str) -> bool:
     """Report whether a stage is skipped for EVERY effective per-platform section.
 
@@ -578,8 +592,11 @@ class JobService:
                 continue
             if publish_at <= now:
                 continue
+            snapshot = attempt.get("configuration_snapshot")
+            if not isinstance(snapshot, dict):
+                continue
             key = (str(attempt.get("artifact_id")),
-                   str(attempt.get("configuration_hash")), stamp)
+                   _shared_upload_sha256(snapshot), stamp)
             groups.setdefault(key, []).append(attempt)
         armed = 0
         for (artifact_id, _hash, stamp), group in groups.items():
@@ -590,13 +607,22 @@ class JobService:
                     "Skipping re-arm for %s: artifact %s or its upload "
                     "snapshot is missing", manifest.job_id, artifact_id)
                 continue
+            # Copied: this binding merges each later member's per-platform
+            # options into it, and each attempt's own snapshot is the frozen
+            # configuration recorded for that platform. _schedule_attempts
+            # deep-copies the payload again, so no further copying is needed.
+            upload_config = deepcopy(snapshot)
+            for member in group[1:]:
+                upload_config.setdefault("platform_options", {}).update(
+                    member["configuration_snapshot"].get("platform_options",
+                                                         {}))
             self._schedule_attempts(
                 manifest.job_id,
                 [{
                     "attempt_ids": [item["attempt_id"] for item in group],
                     "platforms": [item["platform"] for item in group],
                     "artifact_key": artifact["storage"]["key"],
-                    "upload_config": snapshot,
+                    "upload_config": upload_config,
                 }],
                 _parse_utc_timestamp(stamp))
             armed += len(group)
@@ -1771,9 +1797,7 @@ class JobService:
             artifact_key = manifest.artifacts[attempt["artifact_id"]][
                 "storage"]["key"]
             snapshot = attempt["configuration_snapshot"]
-            shared_hash = configuration_sha256({
-                key: value for key, value in snapshot.items()
-                if key != "platform_options"})
+            shared_hash = _shared_upload_sha256(snapshot)
             match = next((item for item in bindings_out
                           if item["artifact_key"] == artifact_key
                           and item["shared_hash"]
@@ -1981,9 +2005,10 @@ class JobService:
         upload_config}`` records the submission produced.  Platforms that render
         a vertical and platforms that upload the source ride different bindings,
         so each pipeline call only ever sees attempts that share one artifact
-        and one frozen upload slice.  The binding split is a transport detail
-        though: every call reports into the one progress bar this submission
-        owns.
+        and one shared upload slice (each attempt's own ``{platform}``-prefixed
+        adapter options ride the same call).  The binding split is a transport
+        detail though: every call reports into the one progress bar this
+        submission owns.
         """
         from clipmorph.upload_attempts import execute_upload_pipeline
         from clipmorph.upload_attempts import normalize_results

@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from clipmorph.job import JobManifest
-from clipmorph.service import JobService
+from clipmorph.service import JobService, _parse_utc_timestamp
 
 
 def _reviewed_job(data_dir: Path, upload: dict | None = None
@@ -45,6 +45,133 @@ def _upload_results(platforms):
                 for platform in platforms}
 
     return run
+
+
+class RestartReArmSharedSliceTests(unittest.TestCase):
+    """Re-arm groups scheduled attempts exactly like the live path does.
+
+    The submission coalesces its pipeline calls by (artifact, shared upload
+    slice) with each attempt's own ``{platform}``-prefixed options merged into
+    the call. A restart must re-arm the timers from the SAME grouping: a
+    per-platform override must not resurrect one sequential binding per
+    whole-slice hash.
+    """
+
+    def _submit_scheduled_submission(self, data_dir: Path):
+        """Submit a job whose whole upload defers an hour out via local timers.
+
+        TikTok and Facebook each carry a flat override that differs from the
+        registry default, so their whole-snapshot hashes differ from the other
+        platforms' while their shared upload slices stay identical.
+        """
+        upload = _future_schedule()
+        upload["schedule"]["mode"] = "local"
+        service, manifest = _reviewed_job(data_dir, upload)
+        manifest.configuration["platforms"] = {
+            "youtube": {"category": "22", "privacy_status": "public"},
+            "instagram": {"share_to_feed": True, "thumb_offset": 0},
+            "tiktok": {"privacy_level": "SELF_ONLY"},
+            "twitter": {"upload": {"skip": True}},
+            "facebook": {"content_kind": "video"}}
+        manifest.save(service.jobs_dir)
+
+        with patch("clipmorph.upload_attempts.execute_upload_pipeline",
+                   side_effect=_upload_results(
+                       ["youtube", "instagram", "tiktok", "facebook"])), \
+             patch.object(service, "_detect_existing_posts",
+                          return_value=({}, [])):
+            service.submit_upload(manifest.job_id, honor_schedule=True)
+        return service, manifest.job_id
+
+    def test_an_override_does_not_rearm_sequential_bindings(self):
+        """The re-arm must carry one binding for tiktok AND facebook."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, job_id = self._submit_scheduled_submission(data_dir)
+            try:
+                with patch.object(service, "_schedule_attempts") as capture:
+                    armed = service._arm_manifest_schedules(
+                        service.get_job(job_id))
+
+                self.assertEqual(armed, 4)
+                # One timer call, and its binding covers the overrides in one
+                # pipeline call instead of re-arming one binding per hash.
+                self.assertEqual(len(capture.call_args_list), 1)
+                call = capture.call_args_list[0]
+                self.assertEqual(call.args[0], job_id)
+                groups = call.args[1]
+                self.assertEqual(len(groups), 1)
+                binding = groups[0]
+                self.assertEqual(sorted(binding["platforms"]),
+                                 ["facebook", "instagram", "tiktok",
+                                  "youtube"])
+                options = binding["upload_config"]["platform_options"]
+                self.assertEqual(options.get("tiktok_privacy_level"),
+                                 "SELF_ONLY")
+                self.assertEqual(options.get("facebook_content_kind"),
+                                 "video")
+
+                # Each attempt's OWN frozen snapshot survives the merge and
+                # its scheduling fields are what the re-arm read.
+                saved = service.get_job(job_id)
+                frozen = {attempt["platform"]:
+                          attempt["configuration_snapshot"][
+                              "platform_options"]
+                          for attempt in saved.upload_attempts}
+                self.assertEqual(frozen["tiktok"],
+                                 {"tiktok_privacy_level": "SELF_ONLY"})
+                self.assertEqual(frozen["facebook"],
+                                 {"facebook_content_kind": "video"})
+                self.assertEqual(frozen["youtube"], {})
+                self.assertEqual(frozen["instagram"], {})
+                for attempt in saved.upload_attempts:
+                    self.assertEqual(attempt["scheduled_via"], "local")
+                    self.assertEqual(
+                        call.args[2],
+                        _parse_utc_timestamp(
+                            attempt["scheduled_publish_at"]))
+            finally:
+                service.close()
+
+    def test_a_different_unprefixed_slice_still_splits_the_rearm(self):
+        """A retitled attempt shares artifact and stamp but not the slice."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, job_id = self._submit_scheduled_submission(data_dir)
+            try:
+                saved = service.get_job(job_id)
+                victim = next(attempt for attempt in saved.upload_attempts
+                              if attempt["platform"] == "tiktok")
+                victim["configuration_snapshot"]["content"] = dict(
+                    victim["configuration_snapshot"].get("content") or {},
+                    title="Retitled")
+                saved.save(service.jobs_dir)
+                neighbour_title = next(
+                    attempt["configuration_snapshot"]["content"]["title"]
+                    for attempt in saved.upload_attempts
+                    if attempt["platform"] == "facebook")
+
+                with patch.object(service, "_schedule_attempts") as capture:
+                    armed = service._arm_manifest_schedules(
+                        service.get_job(job_id))
+
+                self.assertEqual(armed, 4)
+                self.assertEqual(len(capture.call_args_list), 2)
+                bindings = [call.args[1][0]
+                            for call in capture.call_args_list]
+                self.assertEqual(
+                    {tuple(binding["platforms"]) for binding in bindings},
+                    {("tiktok",), ("youtube", "instagram", "facebook")})
+                retitled = next(binding for binding in bindings
+                                if tuple(binding["platforms"]) == ("tiktok",))
+                self.assertEqual(retitled["upload_config"]["content"]["title"],
+                                 "Retitled")
+                parallel = next(binding for binding in bindings
+                                if "tiktok" not in binding["platforms"])
+                self.assertEqual(parallel["upload_config"]["content"]["title"],
+                                 neighbour_title)
+            finally:
+                service.close()
 
 
 class UploadFilterTests(unittest.TestCase):
