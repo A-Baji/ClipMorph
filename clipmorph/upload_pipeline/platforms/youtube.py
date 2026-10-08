@@ -139,9 +139,8 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
             self.refresh_token = os.getenv("GOOGLE_REFRESH_TOKEN")
 
         if not self.refresh_token:
-            if self.progress_bar:
-                self.progress_bar.write(
-                    "[YouTube] No refresh token found. Starting OAuth flow...")
+            self._bar_write(
+                "[YouTube] No refresh token found. Starting OAuth flow...")
             self.refresh_token = self.generate_refresh_token()
 
         self.credentials = Credentials(None,
@@ -157,10 +156,9 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
                     self.credentials.refresh(Request())
                 except Exception:
                     # If refresh fails, generate a new token
-                    if self.progress_bar:
-                        self.progress_bar.write(
-                            "[YouTube] Refresh token expired or invalid. Generating a new token."
-                        )
+                    self._bar_write(
+                        "[YouTube] Refresh token expired or invalid. Generating a new token."
+                    )
                     self.refresh_token = self.generate_refresh_token()
 
                     # Create new credentials with the fresh token
@@ -174,10 +172,9 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
                     self.credentials.refresh(Request())
             else:
                 # Generate new token if credentials are completely invalid
-                if self.progress_bar:
-                    self.progress_bar.write(
-                        "[YouTube] Invalid credentials. Generating new refresh token..."
-                    )
+                self._bar_write(
+                    "[YouTube] Invalid credentials. Generating new refresh token..."
+                )
                 self.refresh_token = self.generate_refresh_token()
 
                 # Create new credentials with the fresh token
@@ -409,16 +406,14 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
             open_browser=True)
 
         # Show the setup message whenever a new token is generated
-        if self.progress_bar:
-            self.progress_bar.write(
-                "\nYouTube refresh token generated. Store it securely in "
-                "GOOGLE_REFRESH_TOKEN; it is not displayed by ClipMorph.\n")
+        self._bar_write(
+            "\nYouTube refresh token generated. Store it securely in "
+            "GOOGLE_REFRESH_TOKEN; it is not displayed by ClipMorph.\n")
 
         saved_path = persist_auth_credential("youtube", "refresh_token",
                                              creds.refresh_token)
-        if self.progress_bar:
-            self.progress_bar.write(
-                f"YouTube refresh token saved to {saved_path}")
+        self._bar_write(
+            f"YouTube refresh token saved to {saved_path}")
 
         return creds.refresh_token
 

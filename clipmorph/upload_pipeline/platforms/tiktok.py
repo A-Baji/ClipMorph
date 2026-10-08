@@ -226,10 +226,9 @@ class TikTokUploadPipeline(BaseUploadPipeline):
                               ('access_token', 'refresh_token')
                               if resp_json.get(key)}
             except requests.exceptions.HTTPError as error:
-                if self.progress_bar:
-                    self.progress_bar.write(
-                        f"[TikTok] Refresh token rejected ({error}). "
-                        "Starting OAuth flow...")
+                self._bar_write(
+                    f"[TikTok] Refresh token rejected ({error}). "
+                    "Starting OAuth flow...")
 
         if tokens is None:
             tokens = self._authorize_interactively(

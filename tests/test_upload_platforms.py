@@ -671,5 +671,26 @@ class SubmissionProgressBarTests(unittest.TestCase):
         self.assertTrue(created[0].closed)
 
 
+class SharedBarWriteDriftTests(unittest.TestCase):
+    """Every adapter message goes through the shared write, or it is dropped.
+
+    An adapter that guards ``self.progress_bar.write`` directly loses the
+    message on every orchestrator-owned-bar path: the guard fails for a bar
+    the adapter does not own. ``BaseUploadPipeline._bar_write`` is the shared
+    sink (``_progress_writer`` -> own bar -> logging) and is the only module
+    allowed to touch ``self.progress_bar.write``; base.py is excluded from the
+    scan because its ``_bar_write`` legitimately implements the fallback.
+    """
+
+    def test_no_concrete_adapter_writes_the_bar_directly(self):
+        platforms_dir = Path(__file__).resolve().parent.parent / (
+            "clipmorph/upload_pipeline/platforms")
+        for name in ("youtube.py", "instagram.py", "tiktok.py", "twitter.py",
+                     "facebook.py"):
+            with self.subTest(module=name):
+                source = (platforms_dir / name).read_text(encoding="utf-8")
+                self.assertNotIn("self.progress_bar.write", source)
+
+
 if __name__ == "__main__":
     unittest.main()
