@@ -599,6 +599,10 @@ class JobService:
                    _shared_upload_sha256(snapshot), stamp)
             groups.setdefault(key, []).append(attempt)
         armed = 0
+        # One _schedule_attempts call per stamp, exactly like the live path's
+        # local_by_time bucketing in submit_upload: bindings that share a
+        # publish time share one timer (and one progress bar).
+        by_stamp: dict[str, list[dict[str, Any]]] = {}
         for (artifact_id, _hash, stamp), group in groups.items():
             artifact = manifest.artifacts.get(artifact_id)
             snapshot = group[0].get("configuration_snapshot")
@@ -616,16 +620,16 @@ class JobService:
                 upload_config.setdefault("platform_options", {}).update(
                     member["configuration_snapshot"].get("platform_options",
                                                          {}))
-            self._schedule_attempts(
-                manifest.job_id,
-                [{
-                    "attempt_ids": [item["attempt_id"] for item in group],
-                    "platforms": [item["platform"] for item in group],
-                    "artifact_key": artifact["storage"]["key"],
-                    "upload_config": upload_config,
-                }],
-                _parse_utc_timestamp(stamp))
+            by_stamp.setdefault(stamp, []).append({
+                "attempt_ids": [item["attempt_id"] for item in group],
+                "platforms": [item["platform"] for item in group],
+                "artifact_key": artifact["storage"]["key"],
+                "upload_config": upload_config,
+            })
             armed += len(group)
+        for stamp, bindings in by_stamp.items():
+            self._schedule_attempts(
+                manifest.job_id, bindings, _parse_utc_timestamp(stamp))
         return armed
 
     def _schedule_attempts(self, job_id: str,
@@ -2043,8 +2047,9 @@ class JobService:
         merged: dict[str, Any] = {}
         from clipmorph.upload_pipeline.progress import SubmissionProgress
         # The progress bar belongs to the submission, not to one binding: the
-        # binding split (per-platform upload option, separate conversion group)
-        # is a transport detail the user should never see as a second bar.
+        # binding split (a different artifact, or a different unprefixed slice
+        # member) is a transport detail the user should never see as a second
+        # bar.
         # Every platform this submission will upload is declared here, before
         # the first binding runs, so the bar's total and description never move
         # while it is on screen: a binding that runs later shows 0% instead of

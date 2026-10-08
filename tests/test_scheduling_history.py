@@ -134,7 +134,12 @@ class RestartReArmSharedSliceTests(unittest.TestCase):
                 service.close()
 
     def test_a_different_unprefixed_slice_still_splits_the_rearm(self):
-        """A retitled attempt shares artifact and stamp but not the slice."""
+        """A retitled attempt splits into its own binding on the same timer.
+
+        The retitled attempt shares artifact and stamp with the others, so the
+        re-arm fires one _schedule_attempts call carrying BOTH bindings: the
+        split survives at binding level (two pipeline calls from one timer).
+        """
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
             service, job_id = self._submit_scheduled_submission(data_dir)
@@ -156,9 +161,11 @@ class RestartReArmSharedSliceTests(unittest.TestCase):
                         service.get_job(job_id))
 
                 self.assertEqual(armed, 4)
-                self.assertEqual(len(capture.call_args_list), 2)
-                bindings = [call.args[1][0]
-                            for call in capture.call_args_list]
+                # One timer call for the shared stamp; the split lives in its
+                # payload, which carries TWO bindings.
+                self.assertEqual(len(capture.call_args_list), 1)
+                call = capture.call_args_list[0]
+                bindings = call.args[1]
                 self.assertEqual(
                     {tuple(binding["platforms"]) for binding in bindings},
                     {("tiktok",), ("youtube", "instagram", "facebook")})
@@ -170,6 +177,63 @@ class RestartReArmSharedSliceTests(unittest.TestCase):
                                 if "tiktok" not in binding["platforms"])
                 self.assertEqual(parallel["upload_config"]["content"]["title"],
                                  neighbour_title)
+            finally:
+                service.close()
+
+    def test_mixed_artifacts_share_one_rearm_timer(self):
+        """Attempts on two artifacts at one stamp re-arm as one timer call."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, job_id = self._submit_scheduled_submission(data_dir)
+            try:
+                saved = service.get_job(job_id)
+                render = Path(temp_dir) / "render.mp4"
+                render.write_bytes(b"render")
+                saved.record_artifact("conversion", render, service.jobs_dir)
+                render_artifact_id = saved.current_artifact_id
+                # Repoint two attempts' artifact_id to the new render artifact
+                # using the sibling test's configuration_snapshot mutation
+                # style; the other two keep the source artifact.
+                for platform in ("tiktok", "facebook"):
+                    attempt = next(item for item in saved.upload_attempts
+                                   if item["platform"] == platform)
+                    attempt["artifact_id"] = render_artifact_id
+                saved.save(service.jobs_dir)
+
+                with patch.object(service, "_schedule_attempts") as capture:
+                    armed = service._arm_manifest_schedules(
+                        service.get_job(job_id))
+
+                self.assertEqual(armed, 4)
+                # One timer call even though the submission is mixed: bindings
+                # differed by artifact, not by stamp.
+                self.assertEqual(len(capture.call_args_list), 1)
+                call = capture.call_args_list[0]
+                bindings = call.args[1]
+                self.assertEqual(len(bindings), 2)
+                # Each binding carries a distinct artifact's storage key.
+                self.assertNotEqual(bindings[0]["artifact_key"],
+                                    bindings[1]["artifact_key"])
+                self.assertEqual(
+                    {platform for binding in bindings
+                     for platform in binding["platforms"]},
+                    {"youtube", "instagram", "tiktok", "facebook"})
+                stamp = next(attempt["scheduled_publish_at"]
+                             for attempt in saved.upload_attempts)
+                self.assertEqual(call.args[2], _parse_utc_timestamp(stamp))
+
+                # The merge never rewrites the persisted snapshots: each
+                # attempt's own frozen platform_options survive.
+                frozen = {attempt["platform"]:
+                          attempt["configuration_snapshot"][
+                              "platform_options"]
+                          for attempt in saved.upload_attempts}
+                self.assertEqual(frozen["tiktok"],
+                                 {"tiktok_privacy_level": "SELF_ONLY"})
+                self.assertEqual(frozen["facebook"],
+                                 {"facebook_content_kind": "video"})
+                self.assertEqual(frozen["youtube"], {})
+                self.assertEqual(frozen["instagram"], {})
             finally:
                 service.close()
 
