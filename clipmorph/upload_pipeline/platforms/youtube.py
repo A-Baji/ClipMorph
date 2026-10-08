@@ -139,9 +139,8 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
             self.refresh_token = os.getenv("GOOGLE_REFRESH_TOKEN")
 
         if not self.refresh_token:
-            if self.progress_bar:
-                self.progress_bar.write(
-                    "[YouTube] No refresh token found. Starting OAuth flow...")
+            self._bar_write(
+                "[YouTube] No refresh token found. Starting OAuth flow...")
             self.refresh_token = self.generate_refresh_token()
 
         self.credentials = Credentials(None,
@@ -157,10 +156,9 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
                     self.credentials.refresh(Request())
                 except Exception:
                     # If refresh fails, generate a new token
-                    if self.progress_bar:
-                        self.progress_bar.write(
-                            "[YouTube] Refresh token expired or invalid. Generating a new token."
-                        )
+                    self._bar_write(
+                        "[YouTube] Refresh token expired or invalid. Generating a new token."
+                    )
                     self.refresh_token = self.generate_refresh_token()
 
                     # Create new credentials with the fresh token
@@ -174,10 +172,9 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
                     self.credentials.refresh(Request())
             else:
                 # Generate new token if credentials are completely invalid
-                if self.progress_bar:
-                    self.progress_bar.write(
-                        "[YouTube] Invalid credentials. Generating new refresh token..."
-                    )
+                self._bar_write(
+                    "[YouTube] Invalid credentials. Generating new refresh token..."
+                )
                 self.refresh_token = self.generate_refresh_token()
 
                 # Create new credentials with the fresh token
@@ -310,7 +307,10 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
             self.MIN_PROGRESS_INCREMENT, self.MAX_PROGRESS_DURING_PROCESSING /
             (estimated_time / self.API_POLL_INTERVAL))
 
-        current_progress = self.progress_bar.n if self.progress_bar else 0
+        # Interpolate from whatever this adapter has already reported, so the base
+        # is right whether the adapter owns a bar or the orchestrator does.
+        current_progress = (self.progress_bar.n if self.progress_bar
+                            else self._progress_seen)
 
         while response is None:
             try:
@@ -334,6 +334,11 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
                                         increment_per_update)
                         if increment > 0:
                             self.progress_bar.update(increment)
+                    else:
+                        # No bar of its own (the orchestrator owns one): report
+                        # through the callback so the shared bar still moves
+                        # during the upload instead of jumping at the end.
+                        self._advance_progress(target_progress)
 
                 if response is not None:
                     if 'id' in response:
@@ -401,16 +406,14 @@ class YouTubeUploadPipeline(BaseUploadPipeline):
             open_browser=True)
 
         # Show the setup message whenever a new token is generated
-        if self.progress_bar:
-            self.progress_bar.write(
-                "\nYouTube refresh token generated. Store it securely in "
-                "GOOGLE_REFRESH_TOKEN; it is not displayed by ClipMorph.\n")
+        self._bar_write(
+            "\nYouTube refresh token generated. Store it securely in "
+            "GOOGLE_REFRESH_TOKEN; it is not displayed by ClipMorph.\n")
 
         saved_path = persist_auth_credential("youtube", "refresh_token",
                                              creds.refresh_token)
-        if self.progress_bar:
-            self.progress_bar.write(
-                f"YouTube refresh token saved to {saved_path}")
+        self._bar_write(
+            f"YouTube refresh token saved to {saved_path}")
 
         return creds.refresh_token
 

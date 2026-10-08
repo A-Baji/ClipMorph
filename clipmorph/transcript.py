@@ -8,12 +8,32 @@ import json
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from clipmorph.configuration import atomic_write_text
 
 EDIT_SESSION_SCHEMA_VERSION = 2
 TYPOGRAPHY_KEYS = {
     "size", "color", "font_file", "outline_color", "bold", "italic", "underline"
 }
+
+
+def native_scalars(value: Any) -> Any:
+    """Convert numpy scalars to Python natives for JSON/YAML persistence.
+
+    The transcription models return numpy timestamps. ``np.float64`` subclasses
+    ``float``, so ``json.dumps`` accepts it while YAML's exact-type representer
+    raises ``cannot represent an object`` — which failed the manifest save
+    after a clean transcription. Sessions are the persistence contract for both
+    formats, so every scalar entering one is native.
+    """
+    if isinstance(value, dict):
+        return {key: native_scalars(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [native_scalars(item) for item in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
 
 
 def validate_segments(segments: list[dict[str, Any]],
@@ -53,7 +73,7 @@ def validate_segments(segments: list[dict[str, Any]],
 
 def create_edit_session(source_sha256: str, segments: list[dict[str, Any]],
                         media_duration: float | None = None) -> dict[str, Any]:
-    original = deepcopy(segments)
+    original = deepcopy(native_scalars(segments))
     for index, segment in enumerate(original):
         if not isinstance(segment, dict):
             raise ValueError("Each transcript segment must be an object")

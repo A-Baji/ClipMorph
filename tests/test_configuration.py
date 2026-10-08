@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
 import yaml
 
 from clipmorph.configuration import APP_CONFIG_VERSION
@@ -897,6 +898,157 @@ class JobServiceConfigurationTests(unittest.TestCase):
             finally:
                 service.close()
 
+    def test_conversion_run_after_a_transcript_session_save_renders(self):
+        """A session save changes the conversion digest; the run must render.
+
+        Groups are keyed by their conversion digest, and saving the transcript
+        session materializes captions into `conversion.layout`, so the stored
+        group set always differs from the derived one on the first conversion
+        run. The group sync must persist before the run reloads, or every
+        resume is a silent no-op stalled at "conversion stale".
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            (data_dir / "sources").mkdir()
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"video")
+            service = JobService(data_dir)
+            self.addCleanup(service.close)
+            manifest = service.create_job(source.name, {
+                "general": {"no_confirm": True}})
+
+            session = create_edit_session(manifest.source_sha256, [{
+                "id": "segment-1", "start": 0, "end": 1, "text": "Hello",
+            }], 2)
+            service.save_transcript_session(
+                manifest.job_id, session, expected_revision=0)
+            persisted = JobManifest.load(manifest.job_id, service.jobs_dir)
+            persisted = service.accept_checkpoint(
+                persisted.job_id, "transcript",
+                persisted.checkpoints["transcript"]["revision"])
+            self.assertEqual(persisted.checkpoints["conversion"]["status"],
+                             "stale")
+
+            rendered = data_dir / "render.mp4"
+            rendered.write_bytes(b"vertical")
+            pipeline = type("FakePipeline", (), {
+                "__init__": lambda self, **kwargs: None,
+                "run": lambda self: str(rendered),
+            })()
+            fake_runner = type("FakeRunner", (), {
+                "get_video_info": lambda _self, _path: {
+                    "format": {"duration": "3"},
+                    "streams": [{"codec_type": "video", "width": 1920,
+                                 "height": 1080}],
+                },
+            })()
+
+            def upload_results(_artifact_path, _title, *_args, **_kwargs):
+                stamp = "2026-10-01T00:00:00+00:00"
+                return {platform: {"success": True, "result": f"{platform} ok",
+                                   "started_at": stamp, "completed_at": stamp}
+                        for platform in enabled}
+
+            enabled = ["youtube", "instagram", "tiktok", "twitter", "facebook"]
+            with patch("clipmorph.workflow.configure_ffmpeg"), \
+                    patch("clipmorph.workflow.FFmpegRunner",
+                          return_value=fake_runner), \
+                    patch("clipmorph.workflow.PreflightValidator"), \
+                    patch("clipmorph.conversion_pipeline.ConversionPipeline",
+                          return_value=pipeline), \
+                    patch("clipmorph.upload_attempts.execute_upload_pipeline",
+                          side_effect=upload_results):
+                execute_job(persisted, CancellationToken(), service.jobs_dir)
+
+            saved = service.get_job(manifest.job_id)
+            self.assertEqual(saved.status, "completed")
+            self.assertEqual(saved.checkpoints["conversion"]["status"],
+                             "completed")
+
+    def test_created_job_without_a_runner_is_resumable(self):
+        """A plain creation (no `--yes`) must remain actionable.
+
+        The job stays `created`; `job resume` accepts that status and runs the
+        pipeline from the first checkpoint.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            (data_dir / "sources").mkdir()
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"video")
+            service = JobService(data_dir)
+
+            def pause_for_review(job, _token):
+                job.transition_checkpoint("transcript", "running", 0,
+                                          service.jobs_dir)
+                job.transition_checkpoint("transcript", "awaiting_review", 1,
+                                          service.jobs_dir)
+
+            try:
+                created = service.create_job(source.name, {})
+                self.assertEqual(created.status, "created")
+                resumed = service.resume_job(created.job_id, pause_for_review)
+                service._futures[resumed.job_id].result(timeout=2)
+                saved = service.get_job(created.job_id)
+                self.assertEqual(saved.status, "awaiting_review")
+            finally:
+                service.close()
+
+    def test_transcript_stage_survives_its_own_session_service(self):
+        """A live job must survive the service construction its worker makes.
+
+        ``execute_job`` saves the transcript session through a nested
+        ``JobService``; before the nested service skipped the restart-boundary
+        scans, that construction reconciled the caller's own running job as
+        "interrupted by restart", so the save hit "stale checkpoint revision"
+        and the job failed right after a clean transcription.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            (data_dir / "sources").mkdir()
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"video")
+            service = JobService(data_dir)
+            fake_runner = type("FakeRunner", (), {
+                "extract_audio": lambda _self, _path: "audio.wav",
+                "get_video_info": lambda _self, _path: {
+                    "format": {"duration": "3"},
+                    "streams": [{"codec_type": "video", "width": 1920,
+                                 "height": 1080}],
+                },
+            })()
+            # WhisperX emits numpy timestamps; the session save must coerce
+            # them before the manifest's YAML dump sees one.
+            fake_pipeline = type("FakePipeline", (), {
+                "run": lambda self: [{"start": np.float64(0), "end": np.float64(1),
+                                      "text": "Hello there"}],
+            })()
+
+            try:
+                with patch("clipmorph.workflow.configure_ffmpeg"), \
+                        patch("clipmorph.workflow.FFmpegRunner",
+                              return_value=fake_runner), \
+                        patch("clipmorph.conversion_pipeline.transcribe"
+                              ".TranscriptionPipeline",
+                              return_value=fake_pipeline):
+                    manifest = service.create_job(
+                        source.name, {},
+                        lambda job, token: execute_job(
+                            job, token, service.jobs_dir,
+                            service.app_config_path))
+                    service._futures[manifest.job_id].result(timeout=30)
+
+                saved = service.get_job(manifest.job_id)
+                self.assertEqual(saved.status, "awaiting_review")
+                self.assertEqual(saved.current_checkpoint, "transcript")
+                self.assertEqual(
+                    saved.checkpoints["transcript"]["status"], "awaiting_review")
+                self.assertIsNone(
+                    saved.checkpoints["transcript"]["error"])
+                self.assertEqual(saved.active_transcript["revision"], 1)
+            finally:
+                service.close()
+
     def test_runner_failures_are_structured_safe_and_checkpointed(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
@@ -1491,6 +1643,34 @@ class JobServiceRevisionTests(unittest.TestCase):
                 self.assertEqual(len(result["created"]), 2)
                 self.assertEqual(len(result["skipped"]), 1)
                 self.assertEqual(result["skipped"][0]["code"], "duplicate_content")
+            finally:
+                service.close()
+
+    def test_creation_overrides_beat_sidecars_and_job_records(self):
+        """`--yes` (`general.no_confirm = true`) is an explicit CLI override.
+
+        It must inject the flag into every created job's effective
+        configuration and win over a sidecar and a job record that both set
+        `no_confirm: false`.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            source_dir = data_dir / "sources"
+            source_dir.mkdir()
+            (source_dir / "one.mp4").write_bytes(b"one")
+            service = JobService(data_dir)
+            sidecar = source_dir / "one.yml"
+            sidecar.write_text(yaml.safe_dump({
+                "general": {"source": "one.mp4", "no_confirm": False},
+            }), encoding="utf-8")
+            try:
+                result = service.create_jobs(
+                    job_configs=[{"general": {"source": "one.mp4",
+                                              "no_confirm": False}}],
+                    confirmed=True)
+
+                manifest = service.get_job(result["created"][0]["job_id"])
+                self.assertTrue(manifest.configuration["general"]["no_confirm"])
             finally:
                 service.close()
 

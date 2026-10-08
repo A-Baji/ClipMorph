@@ -31,10 +31,16 @@ _SECRET_ASSIGNMENT = re.compile(
 
 def safe_error_message(message: Any) -> str:
     return _SECRET_ASSIGNMENT.sub(r"\1\2[REDACTED]", str(message))[:1000]
+
+# A `pending` transition from `running` re-arms a stranded attempt: only a
+# retry process can legitimately walk a `running` checkpoint, so abandoning an
+# unreported attempt is the honest retry action (the revision check guards any
+# concurrent writer, so the transition cannot race).
 CHECKPOINT_TRANSITIONS = {
     "transcript": {
         "pending": {"running", "awaiting_review", "skipped", "failed", "cancelled"},
-        "running": {"awaiting_review", "completed", "failed", "cancelled"},
+        "running": {"awaiting_review", "completed", "failed", "cancelled",
+                    "pending"},
         "awaiting_review": {"awaiting_review", "completed", "pending", "cancelled"},
         "completed": {"stale"}, "partial_failure": {"pending", "stale"},
         "skipped": {"pending"}, "failed": {"pending"}, "cancelled": {"pending"},
@@ -42,7 +48,8 @@ CHECKPOINT_TRANSITIONS = {
     },
     "conversion": {
         "pending": {"running", "awaiting_review", "skipped", "failed", "cancelled"},
-        "running": {"awaiting_review", "completed", "failed", "cancelled"},
+        "running": {"awaiting_review", "completed", "failed", "cancelled",
+                    "pending"},
         "awaiting_review": {"awaiting_review", "completed", "pending", "cancelled"},
         "completed": {"stale"}, "partial_failure": {"pending", "stale"},
         "skipped": {"pending"}, "failed": {"pending"}, "cancelled": {"pending"},
@@ -51,7 +58,8 @@ CHECKPOINT_TRANSITIONS = {
     "upload": {
         "pending": {"awaiting_review", "running", "skipped", "failed", "cancelled"},
         "awaiting_review": {"awaiting_review", "running", "pending", "cancelled"},
-        "running": {"completed", "partial_failure", "failed", "cancelled"},
+        "running": {"completed", "partial_failure", "failed", "cancelled",
+                    "pending"},
         "completed": {"stale"}, "partial_failure": {"running", "stale", "pending"},
         "skipped": {"pending"}, "failed": {"pending"}, "cancelled": {"pending"},
         "stale": {"pending", "awaiting_review", "running", "skipped"},
@@ -268,10 +276,19 @@ class JobManifest:
         return atomic_write_text(path, json.dumps(asdict(self), indent=2))
 
     def _next_checkpoint(self) -> str | None:
-        for stage in ("transcript", "conversion", "upload"):
-            if self.checkpoints.get(stage, {}).get("status") in {
-                    "pending", "running", "awaiting_review", "failed",
-                    "cancelled", "stale", "partial_failure"}:
+        stages = ("transcript", "conversion", "upload")
+        for index, stage in enumerate(stages):
+            status = self.checkpoints.get(stage, {}).get("status")
+            if status == "pending" and any(
+                    self.checkpoints.get(later, {}).get("status") != "pending"
+                    for later in stages[index + 1:]):
+                # A later stage already advanced past its birth; this
+                # born-``pending`` stage is a phantom, not actionable work —
+                # the pipeline position never rewinds behind an advanced
+                # stage.
+                continue
+            if status in {"pending", "running", "awaiting_review", "failed",
+                          "cancelled", "stale", "partial_failure"}:
                 return stage
         return None
 

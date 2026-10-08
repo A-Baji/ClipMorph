@@ -1032,6 +1032,14 @@ class PerPlatformGroupTests(unittest.TestCase):
                 service._futures[f"upload:{manifest.job_id}"].result(timeout=5)
             self.assertEqual(len(result["attempts"]), 1)
             self.assertEqual(result["attempts"][0]["platform"], "youtube")
+            # A skipped platform never becomes an attempt, a binding, or a slot
+            # in the submission's bar: the bar only ever counts platforms that
+            # will upload.
+            bars = [call.kwargs["submission_progress"]
+                    for call in pipeline_type.call_args_list
+                    if call.kwargs.get("submission_progress") is not None]
+            self.assertEqual(len(bars), 1)
+            self.assertEqual(list(bars[0]._percents), ["youtube"])
 
     def test_all_platforms_skip_a_stage_skips_it(self):
         configuration = {
@@ -1178,6 +1186,51 @@ class WorkflowStageSkipReconciliationTests(unittest.TestCase):
                     "current_artifact_id"])
 
 
+class WorkflowAutoUploadTests(unittest.TestCase):
+    def test_upload_gate_auto_accepts_and_submits_under_no_confirm(self):
+        """`general.no_confirm = true` skips the upload approval gate.
+
+        The workflow parks a pending upload checkpoint at `awaiting_review`
+        and then, because the gate is confirmed, submits the attempts through
+        a borrowed service and waits for them to settle before returning.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            source_dir = data_dir / "sources"
+            source_dir.mkdir(parents=True)
+            source = source_dir / "clip.mp4"
+            source.write_bytes(b"video")
+            service = JobService(data_dir)
+            self.addCleanup(service.close)
+            manifest = JobManifest.create(str(source), {
+                "general": {"no_confirm": True},
+                "conversion": {"skip": True, "subtitles": {"skip": True}},
+            }, service.jobs_dir)
+            manifest.record_artifact("source", source, service.jobs_dir)
+            fake_runner = type("FakeRunner", (), {
+                "get_video_info": lambda _self, _path: {
+                    "format": {"duration": "3"},
+                    "streams": [{"codec_type": "video", "width": 1920,
+                                 "height": 1080}],
+                },
+            })()
+
+            with patch("clipmorph.workflow.configure_ffmpeg"), \
+                    patch("clipmorph.workflow.FFmpegRunner",
+                          return_value=fake_runner), \
+                    patch("clipmorph.workflow.PreflightValidator"), \
+                    patch("clipmorph.upload_attempts.execute_upload_pipeline",
+                          side_effect=_upload_results(
+                              ["youtube", "instagram", "tiktok", "twitter",
+                               "facebook"])):
+                execute_job(manifest, CancellationToken(), service.jobs_dir)
+
+            saved = service.get_job(manifest.job_id)
+            self.assertEqual(saved.checkpoints["upload"]["status"], "completed")
+            self.assertEqual(saved.upload_attempts[0]["status"], "published")
+            self.assertEqual(saved.status, "completed")
+
+
 def _two_group_job(service: JobService, data_dir: Path) -> JobManifest:
     """Create a job with a rendered group and a source-bound group.
 
@@ -1294,6 +1347,104 @@ class PerPlatformBindingTests(unittest.TestCase):
                      for platform, artifact_id in bound.items()}
             self.assertEqual(kinds["youtube"], "source")
             self.assertEqual(kinds["tiktok"], "primary")
+
+    def test_every_binding_of_one_submission_shares_one_progress_bar(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service = JobService(data_dir)
+            self.addCleanup(service.close)
+            manifest = _two_group_job(service, data_dir)
+
+            with patch("clipmorph.upload_pipeline.UploadPipeline") as pipeline:
+                pipeline.return_value.run.return_value = {
+                    "YouTube": {"success": True, "result": "ok"},
+                    "TikTok": {"success": True, "result": "ok"}}
+                service.submit_upload(manifest.job_id, ["youtube", "tiktok"])
+                service._futures[f"upload:{manifest.job_id}"].result(timeout=10)
+
+            # Two bindings, because the platforms differ in artifact. (Other calls
+            # construct a pipeline for existing-post detection, which draws
+            # nothing, so only the uploading ones carry a bar.)
+            bar_calls = [call for call in pipeline.call_args_list
+                         if call.kwargs.get("submission_progress") is not None]
+            self.assertEqual(len(bar_calls), 2)
+            # ...but the split stays a transport detail: one submission, one bar.
+            bars = [call.kwargs["submission_progress"] for call in bar_calls]
+            self.assertIs(bars[0], bars[1])
+
+    def test_a_per_platform_upload_option_keeps_the_uploads_parallel(self):
+        """One deliberate override must not serialize the whole submission."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service, manifest = _reviewed_job(data_dir)
+            self.addCleanup(service.close)
+            # Every participating platform restates its registry default except
+            # TikTok, so it is the only one whose frozen slice differs.
+            manifest.configuration["platforms"] = {
+                "youtube": {"category": "22", "privacy_status": "public"},
+                "instagram": {"share_to_feed": True, "thumb_offset": 0},
+                "tiktok": {"privacy_level": "SELF_ONLY"},
+                "twitter": {"upload": {"skip": True}},
+                "facebook": {"content_kind": "reel"}}
+            manifest.save(service.jobs_dir)
+
+            with patch("clipmorph.upload_pipeline.UploadPipeline") as pipeline:
+                pipeline.return_value.run.return_value = {
+                    name: {"success": True, "result": "ok"}
+                    for name in ("YouTube", "Instagram", "TikTok", "Facebook")}
+                result = service.submit_upload(manifest.job_id)
+                service._futures[f"upload:{manifest.job_id}"].result(timeout=10)
+
+            # All four ride ONE pipeline call, in parallel: the option is
+            # already prefixed with its own platform's name, so it never needed
+            # a call of its own.
+            upload_calls = [call for call in pipeline.call_args_list
+                            if call.kwargs.get("submission_progress") is not None]
+            self.assertEqual(len(upload_calls), 1)
+            self.assertEqual(
+                sorted(name for name, enabled in upload_calls[0].kwargs.items()
+                       if enabled is True),
+                ["facebook", "instagram", "tiktok", "youtube"])
+            # The override still reaches TikTok and only TikTok.
+            sent = pipeline.return_value.run.call_args.kwargs
+            self.assertEqual(sent["tiktok_privacy_level"], "SELF_ONLY")
+            self.assertNotIn("youtube_privacy_level", sent)
+            # ...and each attempt still records its OWN frozen slice, so the
+            # merge never rewrites the configuration accepted for a platform.
+            frozen = {attempt["platform"]: attempt["configuration_snapshot"][
+                "platform_options"] for attempt in result["attempts"]}
+            self.assertEqual(frozen["tiktok"],
+                             {"tiktok_privacy_level": "SELF_ONLY"})
+            self.assertEqual(frozen["youtube"], {})
+
+    def test_the_submission_declares_every_platform_before_the_first_upload(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            service = JobService(data_dir)
+            self.addCleanup(service.close)
+            manifest = _two_group_job(service, data_dir)
+
+            totals = []
+
+            def _record_run(*_args, **_kwargs):
+                # Snapshot the shared bar as each binding starts; the mocked
+                # pipeline never reports a percent, so the declared total is
+                # the only thing that ever sizes this bar.
+                bar = pipeline.call_args_list[-1].kwargs["submission_progress"]
+                totals.append((sorted(bar._percents), bar._bar.total))
+                return {
+                    "YouTube": {"success": True, "result": "ok"},
+                    "TikTok": {"success": True, "result": "ok"}}
+
+            with patch("clipmorph.upload_pipeline.UploadPipeline") as pipeline:
+                pipeline.return_value.run.side_effect = _record_run
+                service.submit_upload(manifest.job_id, ["youtube", "tiktok"])
+                service._futures[f"upload:{manifest.job_id}"].result(timeout=10)
+
+            # Two bindings, both already fully sized when each one started: the
+            # total and the description cannot move once the second one begins.
+            self.assertEqual(
+                totals, [(["tiktok", "youtube"], 200)] * 2)
 
     def test_upload_draft_summary_reports_each_platform_target(self):
         with tempfile.TemporaryDirectory() as temp_dir:

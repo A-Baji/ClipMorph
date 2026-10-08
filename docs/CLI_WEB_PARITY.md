@@ -50,20 +50,21 @@ imports lazy.
 Commands that report records render a rich table for humans and print the
 machine-readable JSON payload when `--json` is passed; colour is dropped
 automatically when output is not a terminal. Every `[--json]` below reproduces
-the previous JSON payload unchanged. Process statuses are `0` success, `1` a
-source/runtime failure, `2` a usage or configuration failure, and `130` an
-interruption.
+the previous JSON payload unchanged, except `job create`, whose created rows
+carry the pipeline status the job reached, and `job run`, which is new. Process
+statuses are `0` success, `1` a source/runtime failure, `2` a usage or
+configuration failure, and `130` an interruption.
 
 | Command | Contract |
 | --- | --- |
 | `clipmorph --help`; `clipmorph init [--config-path PATH]` | Lightweight help; `-h` is accepted wherever `--help` is. init writes app.yml and adjacent auth.yaml, no media work. |
 | `clipmorph web [--host HOST] [--port PORT]` | Start API/dashboard; global `--data-dir` and `--app-config` precede the command. |
 | `clipmorph auth status [--json]`; `auth set PLATFORM`; `auth twitter` | Status only; secure prompt + auth.yaml update; existing Twitter/X OAuth flow. Never print secrets. |
-| `clipmorph auth status --probe [PLATFORM ...]` | Opt-in network probe; one read-only call per platform, masked verdict as JSON. Never automatic (not from preflight, startup, or the bare status command). Exits 1 when any probe fails; `unavailable` rows neither fail nor block. |
-| `clipmorph job create SOURCE [--job-configs FILE] [--config-dir DIR] [--dry-run] [--yes] [--json]` | SOURCE is a supported root-level file beneath `app.yml:source_dir` or that directory. Directory creation fans out over immediate files; JSONL is object-per-line, YAML is a list. Dry-run writes no job or manifest. |
+| `clipmorph auth status --probe [PLATFORM ...]` | Opt-in network probe; read-only calls only, masked verdict as JSON. Never automatic (not from preflight, startup, or the bare status command). Exits 1 when any probe fails; `unavailable` rows neither fail nor block. |
+| `clipmorph job create SOURCE [--job-configs FILE] [--config-dir DIR] [--dry-run] [--yes] [--json]` | SOURCE is a supported root-level file beneath `app.yml:source_dir` or that directory. Directory creation fans out over immediate files; JSONL is object-per-line, YAML is a list. Dry-run writes no job or manifest. A plain creation only creates the resource; with `--yes` (equivalent to `general.no_confirm = true` on every created job) each created job's pipeline runs during the command and the rows report the final status landed, and the command fails when a created job failed (`POST /api/v1/jobs` always processes and returns `202` with a `status_url`). |
 | `clipmorph job list [--status STATUS] [--json]`; `job get ID [--json]` | List/show manifest, effective config, checkpoint, artifacts and platform results; redact secrets. |
-| `clipmorph job update ID --patch FILE [--reopen] [--json]`; `job resume ID`; `job cancel ID --yes [--json]`; `job delete ID --yes` | Apply a validated per-job patch using the current config hash; persist finalized job.yml and apply #180 invalidation. Reopen completed work only with confirmation; source identity is immutable. |
-| `clipmorph job review ID CHECKPOINT [--edits FILE] [--accept] [--group GID] [--json]`; `job render ID [--group GID]` | `--edits` supplies a complete transcript edit-session YAML/JSON object. Review acceptance uses the current manifest revision; `--group` accepts one conversion group and omitting it accepts every group awaiting review. Render creates a new immutable artifact for the whole job, or for one group with `--group`. |
+| `clipmorph job update ID --patch FILE [--reopen] [--json]`; `job cancel ID --yes [--json]`; `job delete ID --yes` | Apply a validated per-job patch using the current config hash; persist finalized job.yml and apply #180 invalidation. Reopen completed work only with confirmation; source identity is immutable. |
+| `clipmorph job run ID [--yes] [--json]` | The only pipeline-running command. Runs checkpoints until the job reaches its next stop; at a review gate it shows the checkpoint content and prompts `[y] accept, [e] edit, [q] stop` interactively (an edit object is a YAML/JSON file path for the checkpoint, and omitting a group accepts every group awaiting review), so one command reaches the landed status; exit `1` when the run failed. `--yes` accepts every gate without prompting; the upload gate submits its attempts immediately (a future `schedule.publish_at` still defers to its timer). Non-terminal input requires a TTY or `--yes`. Web equivalents stay separate: `POST /api/v1/jobs/{id}/resume`, checkpoint accept/edit endpoints. `job render ID [--group GID]` rerenders the accepted composition into a new immutable artifact for the whole job or one group; it is a tool, not lifecycle advancement. |
 | `clipmorph job upload ID [--platform PLATFORM] [--json]`; `job upload retry ID PLATFORM [--attempt-id ID]` | Submit the accepted upload draft or retry one failed attempt. Retries use frozen artifact/settings and upload immediately; historical use requires explicit ID and confirmation. PLATFORM is a supported id (`youtube`, `instagram`, `tiktok`, `twitter`, `facebook`) validated against `clipmorph/platforms.py::SUPPORTED_PLATFORMS`, which stays the single source of truth. |
 | `clipmorph job uploads ID [--status S] [--platform P] [--since ISO] [--json]` | List a job's upload attempt history with optional status, platform, and since filters. Returns filtered attempts with result fields (`platform_post_id`, `platform_url`, `published_at`). |
 | `clipmorph job metrics ID [--pull] [--dimensions] [--json]` | List a job's metric snapshots; `--pull` triggers a bounded pull from platforms first. Returns snapshot records with `captured_at`, `platform`, `metrics`, `unavailable`, `unavailable_reason`. `--dimensions` joins each record to its manifest dimensions (`duration_seconds`, `title`, `layout_id`, `subtitles_renderer`, `platform_overrides`). |
@@ -148,10 +149,12 @@ registry has not blessed, and it ships disabled for every platform until the
 maintainer's probe has run, so in a default build `mode: platform` reports the
 registry's strict error.
 
-Every service construction reconciles manifests left `running` by a process
-that never returned, so both surfaces heal phantom queue entries on first
-touch: the in-flight checkpoint becomes `failed` with
-`{"code":"interrupted_by_restart","retryable":true}`. A `running` upload
+Every service construction at a process boundary reconciles manifests left
+`running` by a process that never returned, so both surfaces heal phantom queue
+entries on first touch: the in-flight checkpoint becomes `failed` with
+`{"code":"interrupted_by_restart","retryable":true}`. Constructions inside the
+live process (the workflow's transcript-session save) skip the scans so a job
+cannot be failed by the thread running it. A `running` upload
 checkpoint whose every `scheduled` attempt waits on a future `publish_at`
 is left alone, and reconciliation runs before the re-arm scan restores those
 timers. A past-due `scheduled` attempt is healed as an interrupted failure,

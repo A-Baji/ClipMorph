@@ -9,11 +9,18 @@ from .base import BaseUploadPipeline
 class FacebookUploadPipeline(BaseUploadPipeline):
     """Direct-multipart Facebook Page Reels and Page video uploads.
 
-    Facebook shares Instagram's Meta app and Page token, so this adapter has no
-    credential block of its own: it reads the same ``FACEBOOK_*`` environment
-    keys Instagram populates (see ``docs/AUTHENTICATION.md``). Transport only:
-    the post text arrives already composed and bounded by
+    Facebook shares Instagram's Meta app and user token, so this adapter has
+    no credential block of its own: it reads the same ``FACEBOOK_*``
+    environment keys Instagram populates (see ``docs/AUTHENTICATION.md``).
+    Transport only: the post text arrives already composed and bounded by
     ``clipmorph.policy``.
+
+    Credential lifecycle: the stored ``FACEBOOK_ACCESS_TOKEN`` value is a
+    long-lived **user** access token — finite-lived (~60 days) — from which
+    the Page access token Meta requires on Page endpoints is derived at
+    publish time (``_resolve_page_token``); the adapter has no renewal
+    path, so a revoked or expired token is restored by regenerating it
+    from the Meta app flow.
 
     ``content_kind`` selects the endpoint family. ``"reel"`` drives the
     two-phase ``/{page_id}/video_reels`` flow (start, binary upload to the
@@ -49,7 +56,8 @@ class FacebookUploadPipeline(BaseUploadPipeline):
                 ``FACEBOOK_APP_SECRET``.
             facebook_page_id (str, optional): Page id to publish to. Defaults
                 to ``FACEBOOK_PAGE_ID``.
-            facebook_access_token (str, optional): Page access token. Defaults
+            facebook_access_token (str, optional): Meta user access token
+                from which the Page token is derived. Defaults
                 to ``FACEBOOK_ACCESS_TOKEN``.
             api_version (str, optional): Graph API version. Defaults to
                 ``v23.0``, matching the shared Meta app.
@@ -133,6 +141,31 @@ class FacebookUploadPipeline(BaseUploadPipeline):
 
     def _media_type(self, video_path: str) -> str:
         return mimetypes.guess_type(video_path)[0] or "video/mp4"
+
+    def _resolve_page_token(self, page_id: str, access_token: str) -> str:
+        """Derive the Page access token Meta requires on Page endpoints.
+
+        The stored ``FACEBOOK_ACCESS_TOKEN`` is a long-lived user token.
+        Meta's Reels and Page-video publishing prerequisites name a Page
+        access token, so the same ``fields=access_token`` exchange the
+        Instagram adapter performs turns it into the Page token for
+        ``page_id`` before any value reaches an upload session. A Page
+        token stored outright answers the same exchange with itself, so a
+        response without an ``access_token`` falls back to the configured
+        token unchanged; request errors surface through
+        ``_retry_request`` as for every other Graph call.
+        """
+        url = (f"{self.FACEBOOK_GRAPH_BASE_URL}/{self.api_version}/{page_id}"
+               f"?fields=access_token&access_token={access_token}")
+        response = self._retry_request(requests.get, url,
+                                       timeout=self.request_timeout)
+        try:
+            payload = response.json()
+        except Exception:
+            payload = {}
+        page_token = (payload.get("access_token")
+                      if isinstance(payload, dict) else None)
+        return str(page_token) if page_token else access_token
 
     def _initialize_reel(self, page_id: str, access_token: str) -> tuple[str, str]:
         """Open a Reels upload session and return ``(video_id, upload_url)``."""
@@ -306,7 +339,8 @@ class FacebookUploadPipeline(BaseUploadPipeline):
             description (str): Composed post text from ``clipmorph.policy``.
             content_kind (str, optional): ``"reel"`` (default) or ``"video"``.
             page_id (str, optional): Override the configured Page id.
-            access_token (str, optional): Override the configured Page token.
+            access_token (str, optional): Override the configured Meta user
+                token from which the Page token is derived.
             content_tags (list | str, optional): Tagged Page ids.
             video_state (str, optional): Reel finish state (default
                 ``PUBLISHED``; ``DRAFT`` is also accepted by the API).
@@ -331,23 +365,26 @@ class FacebookUploadPipeline(BaseUploadPipeline):
         with self._progress_context(total_progress, "Starting upload"):
             try:
                 self._update_progress(
-                    "authenticate", "Using shared Meta Page token")
+                    "authenticate", "Deriving the Meta Page token")
+                page_token = self._resolve_page_token(page, token)
                 file_size = self._validate_video_file(video_path)
 
                 if content_kind == "reel":
-                    video_id, upload_url = self._initialize_reel(page, token)
-                    self._upload_reel(video_path, upload_url, token, file_size)
+                    video_id, upload_url = self._initialize_reel(
+                        page, page_token)
+                    self._upload_reel(video_path, upload_url, page_token,
+                                      file_size)
                     result_id = self._finish_reel(
-                        video_id, page, token, description, video_state,
+                        video_id, page, page_token, description, video_state,
                         content_tags)
                 else:
                     session_id, video_id, start_offset, end_offset = (
-                        self._initialize_video(page, token, file_size))
+                        self._initialize_video(page, page_token, file_size))
                     self._upload_chunks(
-                        video_path, page, token, session_id, start_offset,
+                        video_path, page, page_token, session_id, start_offset,
                         end_offset, file_size)
                     result_id = self._finish_video(
-                        session_id, page, token, description, video_id,
+                        session_id, page, page_token, description, video_id,
                         content_tags)
 
                 self._complete_progress_bar(True)

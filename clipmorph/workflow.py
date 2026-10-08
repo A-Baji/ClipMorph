@@ -108,7 +108,10 @@ def execute_job(manifest: JobManifest, token: CancellationToken,
             video_info = ffmpeg_runner.get_video_info(manifest.source_path)
             duration = float(video_info.get("format", {}).get("duration", 0) or 0)
             session = create_edit_session(manifest.source_sha256, segments, duration)
-            session_service = JobService(data_dir)
+            # The session save needs the service's manifest helpers only; the
+            # restart-boundary scans are skipped so this in-process service
+            # cannot fail the job that this same thread is still running.
+            session_service = JobService(data_dir, reconcile=False)
             try:
                 session_service.save_transcript_session(
                     manifest.job_id, session,
@@ -154,8 +157,12 @@ def execute_job(manifest: JobManifest, token: CancellationToken,
         # Reconcile the stored group set with what the current configuration
         # derives, so a group created or dropped by a configuration edit (or by
         # a layout registry change) is rendered or forgotten instead of
-        # silently skipped.
+        # silently skipped. The sync must be persisted before the reload below:
+        # including the transcript's materialized captions, a session save
+        # changes the conversion digest, so the stored group set can always
+        # differ from the derived one on the first conversion run.
         manifest.sync_conversion_groups(groups)
+        manifest.save(jobs_root)
         manifest = JobManifest.load(manifest.job_id, jobs_root)
         conversion_checkpoint = manifest.checkpoints["conversion"]
         for group in groups:
@@ -169,7 +176,11 @@ def execute_job(manifest: JobManifest, token: CancellationToken,
                 continue
             if group_record["status"] == "completed":
                 continue
-            if group_record["status"] in {"stale", "failed", "cancelled"}:
+            if group_record["status"] in {
+                    "running", "stale", "failed", "cancelled"}:
+                # A `running` group is stranded by definition here: this
+                # process has not executed it yet, so a failed render that
+                # closed only the aggregate must re-arm for the retry.
                 manifest.transition_checkpoint(
                     "conversion", "pending", group_record["revision"],
                     jobs_root, group_id=group_id)
@@ -284,6 +295,18 @@ def execute_job(manifest: JobManifest, token: CancellationToken,
         _transition(manifest, "upload", "awaiting_review", jobs_root)
         manifest.set_step("upload", "awaiting_review", jobs_root,
                           artifact_id=manifest.current_artifact_id)
+        if not _effective_no_confirm(configuration, "upload"):
+            return
+        # The gate is auto-accepted under no_confirmed: submit the attempts
+        # immediately through a borrowed service and wait for them to settle,
+        # so the job's landed status is truthful when this runner returns. A
+        # configured future `publish_at` still defers to its schedule instead
+        # of uploading now.
+        upload_service = JobService(data_dir, reconcile=False)
+        try:
+            upload_service.submit_upload(manifest.job_id)
+        finally:
+            upload_service.close()
         return
     if upload_checkpoint["status"] == "awaiting_review":
         return

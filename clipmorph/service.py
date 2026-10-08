@@ -204,6 +204,20 @@ def _select_upload_platforms(job_effective: dict[str, Any],
     return [platform for platform in participants if platform in requested]
 
 
+def _shared_upload_sha256(snapshot: dict[str, Any]) -> str:
+    """Hash the slice every adapter in one pipeline call receives unprefixed.
+
+    Per-platform flat adapter options are excluded: each is frozen under its
+    own ``{platform}_`` prefix, and the orchestrator hands every adapter only
+    the options carrying its own prefix, so a difference there does not split
+    the call (#225). A difference in anything the slice reaches unprefixed —
+    the description, the tags, the schedule — still splits it.
+    """
+    return configuration_sha256(
+        {key: value for key, value in snapshot.items()
+         if key != "platform_options"})
+
+
 def _stage_skipped(configuration: dict[str, Any], stage: str) -> bool:
     """Report whether a stage is skipped for EVERY effective per-platform section.
 
@@ -266,7 +280,8 @@ class JobService:
     """Persist job lifecycle state while executing bounded background work."""
 
     def __init__(self, data_dir: str | Path, max_workers: int = 1,
-                 app_config_path: str | Path | None = None):
+                 app_config_path: str | Path | None = None,
+                 reconcile: bool = True):
         self.data_dir = Path(data_dir)
         self.jobs_dir = self.data_dir / "jobs"
         self.app_config_path = Path(app_config_path) if app_config_path else self.data_dir / "app.yml"
@@ -296,8 +311,13 @@ class JobService:
         self._live_progress: dict[str, dict[str, int]] = {}
         # Order matters: reconciliation must settle stalled checkpoints first so
         # that only genuinely scheduled uploads survive into the re-arm scan.
-        self._reconcile_interrupted_jobs()
-        self._rearm_scheduled_attempts()
+        # Both scans exist for work orphaned by a process restart; a service
+        # constructed inside a live process (e.g. the workflow's transcript
+        # session save) must not fail the jobs that process is still running,
+        # which is why in-process constructions pass ``reconcile=False``.
+        if reconcile:
+            self._reconcile_interrupted_jobs()
+            self._rearm_scheduled_attempts()
 
     @property
     def storage(self) -> ArtifactStorage:
@@ -572,10 +592,17 @@ class JobService:
                 continue
             if publish_at <= now:
                 continue
+            snapshot = attempt.get("configuration_snapshot")
+            if not isinstance(snapshot, dict):
+                continue
             key = (str(attempt.get("artifact_id")),
-                   str(attempt.get("configuration_hash")), stamp)
+                   _shared_upload_sha256(snapshot), stamp)
             groups.setdefault(key, []).append(attempt)
         armed = 0
+        # One _schedule_attempts call per stamp, exactly like the live path's
+        # local_by_time bucketing in submit_upload: bindings that share a
+        # publish time share one timer (and one progress bar).
+        by_stamp: dict[str, list[dict[str, Any]]] = {}
         for (artifact_id, _hash, stamp), group in groups.items():
             artifact = manifest.artifacts.get(artifact_id)
             snapshot = group[0].get("configuration_snapshot")
@@ -584,16 +611,25 @@ class JobService:
                     "Skipping re-arm for %s: artifact %s or its upload "
                     "snapshot is missing", manifest.job_id, artifact_id)
                 continue
-            self._schedule_attempts(
-                manifest.job_id,
-                [{
-                    "attempt_ids": [item["attempt_id"] for item in group],
-                    "platforms": [item["platform"] for item in group],
-                    "artifact_key": artifact["storage"]["key"],
-                    "upload_config": snapshot,
-                }],
-                _parse_utc_timestamp(stamp))
+            # Copied: this binding merges each later member's per-platform
+            # options into it, and each attempt's own snapshot is the frozen
+            # configuration recorded for that platform. _schedule_attempts
+            # deep-copies the payload again, so no further copying is needed.
+            upload_config = deepcopy(snapshot)
+            for member in group[1:]:
+                upload_config.setdefault("platform_options", {}).update(
+                    member["configuration_snapshot"].get("platform_options",
+                                                         {}))
+            by_stamp.setdefault(stamp, []).append({
+                "attempt_ids": [item["attempt_id"] for item in group],
+                "platforms": [item["platform"] for item in group],
+                "artifact_key": artifact["storage"]["key"],
+                "upload_config": upload_config,
+            })
             armed += len(group)
+        for stamp, bindings in by_stamp.items():
+            self._schedule_attempts(
+                manifest.job_id, bindings, _parse_utc_timestamp(stamp))
         return armed
 
     def _schedule_attempts(self, job_id: str,
@@ -721,9 +757,10 @@ class JobService:
         return unmarked
 
     def create_job(self, source_path: str, configuration: dict[str, Any],
-                   runner: Callable[[JobManifest, CancellationToken], None] | None = None
-                   ) -> JobManifest:
-        source, effective, global_defaults = self.resolve_job(source_path, configuration)
+                   runner: Callable[[JobManifest, CancellationToken], None] | None = None,
+                   confirmed: bool = False) -> JobManifest:
+        source, effective, global_defaults = self.resolve_job(
+            source_path, configuration, confirmed=confirmed)
         manifest = JobManifest.create(
             str(source), effective, self.jobs_dir,
             global_defaults=global_defaults)
@@ -738,9 +775,16 @@ class JobService:
         return manifest
 
     def resolve_job(self, source_path: str, configuration: dict[str, Any],
-                    config_dir: str | Path | None = None
+                    config_dir: str | Path | None = None,
+                    confirmed: bool = False
                     ) -> tuple[Path, dict[str, Any], dict[str, Any]]:
-        """Normalize a source and job override object without writing state."""
+        """Normalize a source and job override object without writing state.
+
+        ``confirmed`` is the CLI ``--yes`` tier: it applies
+        ``general.no_confirm = true`` above every merge tier, so the finalized
+        configuration (stored as the job's ``job.yml``) is confirmed regardless
+        of sidecars or job records.
+        """
         app_configuration = load_app_configuration(self.app_config_path)
         source_root = Path(app_configuration["source_dir"])
         if not source_root.is_absolute():
@@ -784,6 +828,9 @@ class JobService:
         effective = resolve_job_configuration(
             app_configuration["job_defaults"], overrides,
             app_configuration["layouts"])
+        if confirmed:
+            general = effective.setdefault("general", {})
+            general["no_confirm"] = True
         return source, effective, app_configuration["job_defaults"]
 
     def create_jobs(self, source_names: list[str] | None = None,
@@ -791,7 +838,8 @@ class JobService:
                     config_dir: str | Path | None = None,
                     overrides: dict[str, Any] | None = None,
                     runner: Callable[[JobManifest, CancellationToken], None] | None = None,
-                    dry_run: bool = False) -> dict[str, Any]:
+                    dry_run: bool = False,
+                    confirmed: bool = False) -> dict[str, Any]:
         """Fan out a source selection into independent jobs with partial results."""
         app_configuration = load_app_configuration(self.app_config_path)
         source_root = Path(app_configuration["source_dir"])
@@ -909,7 +957,8 @@ class JobService:
                         "Configuration is valid"))
                     seen_hashes.add(digest)
                     continue
-                manifest = self.create_job(safe_name, per_source, runner)
+                manifest = self.create_job(safe_name, per_source, runner,
+                                           confirmed=confirmed)
                 created.append(self._source_outcome(
                     safe_name, record_index, "created", "created",
                     "Job created", manifest.job_id,
@@ -1736,27 +1785,45 @@ class JobService:
 
         pending = [attempt for attempt in attempts
                    if attempt["status"] != "published"]
-        # Coalesce by (artifact, frozen upload slice): platforms that share both
+        # Coalesce by (artifact, shared upload slice): platforms that share both
         # ride one staged copy through one pipeline call.
+        #
+        # The key is the slice WITHOUT its per-platform adapter options. Every
+        # frozen option is prefixed with its own platform's name and the
+        # orchestrator hands each adapter only the options carrying its own
+        # prefix, so platforms that differ in nothing but their own adapter
+        # options still ride one parallel pipeline call instead of one call
+        # after another (#225). Anything else in the slice (the description,
+        # the tags, the schedule) reaches every adapter in the call
+        # unprefixed, so a difference there must still split the call.
         bindings_out: list[dict[str, Any]] = []
         for attempt in pending:
             artifact_key = manifest.artifacts[attempt["artifact_id"]][
                 "storage"]["key"]
+            snapshot = attempt["configuration_snapshot"]
+            shared_hash = _shared_upload_sha256(snapshot)
             match = next((item for item in bindings_out
                           if item["artifact_key"] == artifact_key
-                          and item["snapshot_hash"]
-                          == attempt["configuration_hash"]), None)
+                          and item["shared_hash"]
+                          == shared_hash), None)
             if match is None:
                 match = {
                     "artifact_key": artifact_key,
-                    "snapshot_hash": attempt["configuration_hash"],
-                    "upload_config": attempt["configuration_snapshot"],
+                    "shared_hash": shared_hash,
+                    # Copied: this binding merges each member's options into
+                    # it, and the attempt's own snapshot is the configuration
+                    # recorded for that platform.
+                    "upload_config": deepcopy(snapshot),
                     "attempt_ids": [],
                     "platforms": [],
                     "scheduled_publish_at": attempt.get("scheduled_publish_at"),
                     "scheduled_via": attempt.get("scheduled_via"),
                 }
                 bindings_out.append(match)
+            else:
+                match["upload_config"].setdefault(
+                    "platform_options", {}).update(
+                        snapshot.get("platform_options", {}))
             match["attempt_ids"].append(attempt["attempt_id"])
             match["platforms"].append(attempt["platform"])
         immediate: list[dict[str, Any]] = []
@@ -1942,7 +2009,10 @@ class JobService:
         upload_config}`` records the submission produced.  Platforms that render
         a vertical and platforms that upload the source ride different bindings,
         so each pipeline call only ever sees attempts that share one artifact
-        and one frozen upload slice.
+        and one shared upload slice (each attempt's own ``{platform}``-prefixed
+        adapter options ride the same call).  The binding split is a transport
+        detail though: every call reports into the one progress bar this
+        submission owns.
         """
         from clipmorph.upload_attempts import execute_upload_pipeline
         from clipmorph.upload_attempts import normalize_results
@@ -1975,9 +2045,24 @@ class JobService:
             # state the cancel left it in.
             return
         merged: dict[str, Any] = {}
-        for binding in bindings:
-            merged.update(self._run_upload_binding(job_id, binding,
-                                                   execute_upload_pipeline))
+        from clipmorph.upload_pipeline.progress import SubmissionProgress
+        # The progress bar belongs to the submission, not to one binding: the
+        # binding split (a different artifact, or a different unprefixed slice
+        # member) is a transport detail the user should never see as a second
+        # bar.
+        # Every platform this submission will upload is declared here, before
+        # the first binding runs, so the bar's total and description never move
+        # while it is on screen: a binding that runs later shows 0% instead of
+        # appearing under a bar that already read 100%.
+        progress = SubmissionProgress(
+            platform for binding in bindings
+            for platform in binding["platforms"])
+        try:
+            for binding in bindings:
+                merged.update(self._run_upload_binding(
+                    job_id, binding, execute_upload_pipeline, progress))
+        finally:
+            progress.close()
         normalized_results = normalize_results(merged)
         with self._lock:
             manifest = self.get_job(job_id)
@@ -2069,8 +2154,13 @@ class JobService:
             self._live_progress.pop(job_id, None)
 
     def _run_upload_binding(self, job_id: str, binding: dict[str, Any],
-                            execute_upload_pipeline: Callable) -> dict[str, Any]:
-        """Stage one bound artifact, run its pipeline, and release the copy."""
+                            execute_upload_pipeline: Callable,
+                            progress: Any = None) -> dict[str, Any]:
+        """Stage one bound artifact, run its pipeline, and release the copy.
+
+        ``progress`` is the submission's shared progress bar, so this binding's
+        platforms report into the same bar as every other binding's.
+        """
         platforms = binding["platforms"]
         try:
             staged_path = self._stage_artifact(binding["artifact_key"])
@@ -2088,7 +2178,8 @@ class JobService:
         try:
             return execute_upload_pipeline(
                 platforms, str(staged_path), binding["upload_config"],
-                progress_callback=self._on_progress(job_id))
+                progress_callback=self._on_progress(job_id),
+                submission_progress=progress)
         except Exception as error:
             now = datetime.now(timezone.utc).isoformat()
             return {platform: {"success": False, "error": str(error),
@@ -2420,6 +2511,15 @@ class JobService:
                 pass
         manifest.set_status("cancelled", self.jobs_dir)
 
+    def wait_for_job(self, job_id: str, timeout: float | None = None
+                     ) -> JobManifest:
+        """Block until one queued run settles, then return the landed manifest."""
+        with self._lock:
+            future = self._futures.pop(job_id, None)
+        if future is not None:
+            future.result(timeout=timeout)
+        return self.get_job(job_id)
+
     def get_job(self, job_id: str) -> JobManifest:
         return JobManifest.load(job_id, self.jobs_dir)
 
@@ -2647,7 +2747,8 @@ class JobService:
             raise ValueError("job requires review before it can resume")
         if manifest.status == "completed":
             raise ValueError("completed job requires explicit reopen confirmation")
-        if manifest.status not in {"failed", "cancelled", "partial_failure", "queued"}:
+        if manifest.status not in {
+                "created", "failed", "cancelled", "partial_failure", "queued"}:
             raise ValueError("job is not resumable")
         token = CancellationToken()
         manifest.set_status("queued", self.jobs_dir)

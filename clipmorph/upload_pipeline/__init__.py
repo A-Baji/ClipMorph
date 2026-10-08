@@ -2,6 +2,7 @@ from concurrent.futures import as_completed
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import logging
+from functools import partial
 from typing import Any, Dict
 
 from clipmorph.platforms import build_platform_default_config
@@ -13,6 +14,7 @@ from .platforms import InstagramUploadPipeline
 from .platforms import TikTokUploadPipeline
 from .platforms import TwitterUploadPipeline
 from .platforms import YouTubeUploadPipeline
+from .progress import SubmissionProgress
 
 
 class UploadPipeline:
@@ -54,7 +56,8 @@ class UploadPipeline:
                  twitter: bool = False,
                  facebook: bool = False,
                  max_workers: int = 4,
-                 progress_callback=None):
+                 progress_callback=None,
+                 submission_progress=None):
         """
         Initialize the upload pipeline with platform configurations.
 
@@ -68,9 +71,15 @@ class UploadPipeline:
             progress_callback: Optional callable invoked with
                 ``(platform_name, percent)`` after each adapter step update;
                 ``None`` keeps the default CLI behavior untouched
+            submission_progress: Optional bar shared by every binding of one
+                upload submission. A submission that carries a per-platform
+                upload option runs several pipeline calls, so the bar belongs to
+                the submission; without one this pipeline call owns the bar for
+                the platforms it uploads.
         """
         self.max_workers = max_workers
         self._progress_callback = progress_callback
+        self._submission_progress = submission_progress
         self.enabled_platforms: Dict[str, Any] = {}
         self.initialization_errors: Dict[str, str] = {}
 
@@ -110,6 +119,33 @@ class UploadPipeline:
                    "Check its credentials and platform configuration.")
         self.initialization_errors[platform_name] = message
         logging.warning(message)
+
+    @staticmethod
+    def _bar_write(progress: SubmissionProgress | None, message: str,
+                   level: int = logging.INFO) -> None:
+        """Report an outcome above the bar, or log it when there is no bar.
+
+        Logging to the same stream a live bar redraws on produces the
+        interleaved, half-overwritten lines a parallel run otherwise shows, so
+        outcomes go through the bar while it is open. ``progress`` is the
+        submission's progress surface (which itself falls back to logging when
+        it draws nothing) or ``None``.
+        """
+        if progress is not None:
+            progress.write(message, level)
+        else:
+            logging.log(level, message)
+
+    def _report_to_bar_and_callback(self, bar_callback, platform_name: str,
+                                    external_callback, percent: int) -> None:
+        """Feed one adapter's percent into the combined bar and the caller.
+
+        ``bar_callback`` is the combined bar's ``(platform_name, percent)``
+        reporter; ``external_callback`` may be ``None``.
+        """
+        bar_callback(platform_name, percent)
+        if external_callback is not None:
+            external_callback(platform_name, percent)
 
     def _map_common_parameters(self, platform_name: str, title: str,
                                **kwargs) -> Dict:
@@ -194,7 +230,10 @@ class UploadPipeline:
 
             # Wire the orchestrator's progress callback onto the adapter so
             # each step update during run forwards (platform_name, percent).
-            if self._progress_callback:
+            # A callback the orchestrator already installed (the combined
+            # multi-platform bar, which also forwards to the caller's
+            # callback) is left alone.
+            if self._progress_callback and pipeline.progress_callback is None:
                 pipeline.progress_callback = (
                     lambda percent, _name=platform_name:
                     self._progress_callback(_name, percent))
@@ -230,6 +269,9 @@ class UploadPipeline:
                 elif platform_name == 'TikTok' \
                         and getattr(pipeline, "access_token", None) is None:
                     pipeline._refresh_access_token()
+                elif platform_name == 'Twitter' \
+                        and not getattr(pipeline, "oauth_session", None):
+                    pipeline._authenticate()
             except Exception as error:
                 results[platform_name] = {
                     'platform': platform_name,
@@ -238,6 +280,10 @@ class UploadPipeline:
                     'error': str(error),
                 }
                 del self.enabled_platforms[platform_name]
+                # This failure never reaches the worker-thread reporting, so
+                # log it here or the user sees no reason for the skip.
+                logging.error(
+                    f"{platform_name} authentication failed: {error}")
 
     def run(self, video_path: str, title: str,
             **platform_kwargs) -> Dict[str, Dict]:
@@ -272,36 +318,75 @@ class UploadPipeline:
         if not self.enabled_platforms:
             return results
 
+        # Multiple parallel CLI progress bars overwrite each other, so every
+        # platform reports into ONE combined bar: total = 100% per platform,
+        # postfix shows each platform's percent. The bar belongs to the
+        # submission, so a submission split into several bindings (a different
+        # artifact, or a different unprefixed slice member) still shows one
+        # bar; the caller's progress
+        # callback only records percents (live web progress) and does not draw,
+        # so it must not suppress the bar. Both are fed from one per-adapter
+        # hook.
+        external_callback = self._progress_callback
+        progress = self._submission_progress
+        owns_progress = False
+        if progress is None and len(self.enabled_platforms) > 1:
+            progress = SubmissionProgress()
+            owns_progress = True
+        if progress is not None:
+            progress.include(self.enabled_platforms)
+            for platform_name, pipeline in self.enabled_platforms.items():
+                pipeline.progress_callback = partial(
+                    self._report_to_bar_and_callback,
+                    progress.report, platform_name, external_callback)
+                pipeline._suppress_cli_progress = True
+                pipeline._progress_writer = progress.write
+
         # Use ThreadPoolExecutor for parallel uploads
-        with ThreadPoolExecutor(max_workers=min(
-                self.max_workers, len(self.enabled_platforms))) as executor:
-            # Submit all upload tasks
-            future_to_platform = {
-                executor.submit(self._upload_single_platform, platform_name, pipeline, video_path, title, **platform_kwargs):
-                platform_name
-                for platform_name, pipeline in self.enabled_platforms.items()
-            }
+        try:
+            with ThreadPoolExecutor(max_workers=min(
+                    self.max_workers, len(self.enabled_platforms))) as executor:
+                # Submit all upload tasks
+                future_to_platform = {
+                    executor.submit(self._upload_single_platform, platform_name, pipeline, video_path, title, **platform_kwargs):
+                    platform_name
+                    for platform_name, pipeline in self.enabled_platforms.items()
+                }
 
-            # Collect results as they complete
-            for future in as_completed(future_to_platform):
-                platform_name = future_to_platform[future]
-                try:
-                    result = future.result()
-                    results[platform_name] = result
+                # Collect results as they complete
+                for future in as_completed(future_to_platform):
+                    platform_name = future_to_platform[future]
+                    try:
+                        result = future.result()
+                        results[platform_name] = result
 
-                    if not result['success']:
-                        logging.error(
-                            f"{platform_name} upload failed: {result['error']}"
-                        )
+                        if result['success']:
+                            # A quiet console between errors looks hung during a
+                            # parallel run: say every platform's final outcome.
+                            # Through the bar, so the message is not overwritten
+                            # by the next redraw.
+                            self._bar_write(
+                                progress,
+                                f"{platform_name} upload completed")
+                        else:
+                            self._bar_write(
+                                progress,
+                                f"{platform_name} upload failed: "
+                                f"{result['error']}", logging.ERROR)
 
-                except Exception as e:
-                    results[platform_name] = {
-                        'platform': platform_name,
-                        'success': False,
-                        'result': None,
-                        'error': f"Future execution failed: {str(e)}"
-                    }
-                    logging.error(
-                        f"{platform_name} upload failed with exception: {e}")
+                    except Exception as e:
+                        results[platform_name] = {
+                            'platform': platform_name,
+                            'success': False,
+                            'result': None,
+                            'error': f"Future execution failed: {str(e)}"
+                        }
+                        self._bar_write(
+                            progress,
+                            f"{platform_name} upload failed with exception: {e}",
+                            logging.ERROR)
+        finally:
+            if owns_progress and progress is not None:
+                progress.close()
 
         return results

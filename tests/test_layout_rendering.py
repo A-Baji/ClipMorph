@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 import inspect
 from pathlib import Path
@@ -15,9 +16,17 @@ class FakeRunner:
 
     def __init__(self):
         self.commands = []
+        self._temp_files = []
 
     def run_ffmpeg(self, command):
         self.commands.append(command)
+
+    def create_temp_file(self, suffix):
+        handle = tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=suffix, delete=False)
+        handle.close()
+        self._temp_files.append(handle.name)
+        return handle.name
 
 
 class LayoutRenderingTests(unittest.TestCase):
@@ -103,6 +112,31 @@ class LayoutRenderingTests(unittest.TestCase):
         self.assertIn("drawbox=", filter_graph)
         self.assertIn("color=cyan:t=fill", filter_graph)
         self.assertIn("enable='between(t,1,3)'", filter_graph)
+
+    def test_caption_text_with_an_apostrophe_uses_a_textfile(self):
+        """Inline drawtext cannot carry an apostrophe inside `text='...'`.
+
+        A quote terminates the quoted value regardless of escaping, so caption
+        text like "I'm gonna get in" must reach drawtext through a temp file
+        that preserves it raw, with expansion disabled.
+        """
+        runner = FakeRunner()
+        pipeline = EditingPipeline.__new__(EditingPipeline)
+        pipeline.layout = {"captions": {"overlay": {"items": [{
+            "text": "I'm gonna get in the plane",
+            "range": [0.223, 0.669],
+        }]}}}
+        pipeline.ffmpeg_runner = runner
+        pipeline._apply_layout("input.mp4", "output.mp4")
+
+        graph = runner.commands[0][runner.commands[0].index("-filter_complex") + 1]
+        self.assertIn("expansion=none", graph)
+        self.assertIn("textfile='", graph)
+        self.assertNotIn("text='I", graph)
+        textfiles = [Path(path) for path in runner._temp_files]
+        self.assertTrue(textfiles)
+        self.assertEqual(textfiles[-1].read_text(encoding="utf-8"),
+                         "I'm gonna get in the plane")
 
     def test_windows_renderer_uses_matching_system_font_variant(self):
         runner = FakeRunner()

@@ -18,8 +18,6 @@ GAMING_PROMPT = ("Yo what the hell was that?\n"
                  "Bro I'm lagging so hard right now.\n"
                  "Nah man that was clean.\n")
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
 
 def resolve_transcription_device(requested: str | None = None) -> str:
     """Resolve the preferred device and fall back when unavailable."""
@@ -77,7 +75,7 @@ class TranscriptionPipeline:
         """Load alignment model and metadata on first access."""
         logging.info("Loading alignment model...")
         model, metadata = whisperx.load_align_model(language_code="en",
-                                                    device=DEVICE)
+                                                    device=self.device)
         return {"model": model, "metadata": metadata}
 
     @cached_property
@@ -92,10 +90,10 @@ class TranscriptionPipeline:
         logging.info("Loading diarization model...")
         try:
             return whisperx_diarize.DiarizationPipeline(token=hf_token,
-                                                        device=DEVICE)
+                                                        device=self.device)
         except TypeError:
             return whisperx_diarize.DiarizationPipeline(
-                use_auth_token=hf_token, device=DEVICE)
+                use_auth_token=hf_token, device=self.device)
 
     def _filter_empty_segments(
             self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

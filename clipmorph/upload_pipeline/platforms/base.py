@@ -46,6 +46,15 @@ class BaseUploadPipeline(ABC):
         self._progress_seen = 0
         self._percent = 0
         self.progress_callback = None
+        # Set by the orchestrator when it takes over progress reporting with a
+        # combined bar, so this adapter draws no bar of its own. A
+        # progress_callback on its own does NOT suppress the bar: the callback
+        # only records percents (live web progress) and draws nothing.
+        self._suppress_cli_progress = False
+        # Set by the orchestrator to the submission bar's writer when that bar
+        # owns progress reporting, so this adapter's messages print above it
+        # instead of being overwritten by its redraws.
+        self._progress_writer: Callable[[str], None] | None = None
 
     def _retry_request(self,
                        func: Callable,
@@ -194,6 +203,56 @@ class BaseUploadPipeline(ABC):
             # If we can't parse the error, just continue
             pass
 
+    def _bar_write(self, message: str):
+        """
+        Print a message above the progress bar, or log it when there is no bar.
+
+        ``tqdm.write`` is the only way to keep a message from being overwritten
+        by the next bar redraw, but it needs a bar. Adapters use this instead of
+        calling ``self.progress_bar.write`` directly, which raises
+        ``AttributeError`` in the suppressed-bar paths (orchestrator-owned
+        combined bar, web progress callback), and prefer the orchestrator's
+        writer when one is installed, because the shared bar is the bar they
+        are reporting through.
+
+        Args:
+            message: Text to print
+        """
+        if self._progress_writer is not None:
+            self._progress_writer(message)
+        elif self.progress_bar is not None:
+            self.progress_bar.write(message)
+        else:
+            logging.info(message)
+
+    def _advance_progress(self, target: int):
+        """
+        Advance this adapter's progress to ``target`` (0-100, allocation space).
+
+        Single sink for progress movement: the adapter's own bar when it owns
+        one, and the progress callback always. The interpolated upload and
+        processing loops must go through here instead of writing to
+        ``self.progress_bar`` directly, or their movement disappears whenever
+        the orchestrator owns a combined bar (a multi-platform CLI run) or a
+        progress callback is installed (the live web progress).
+
+        Monotonic: a target at or below the progress already reported is
+        ignored, so the loops' own throttles stay authoritative.
+
+        Args:
+            target: Absolute progress to reach in allocation space (0-100)
+        """
+        target = max(0, min(100, int(target)))
+        if target <= self._progress_seen:
+            return
+        delta = target - self._progress_seen
+        self._progress_seen = target
+        self._percent = target
+        if self.progress_bar is not None:
+            self.progress_bar.update(delta)
+        if self.progress_callback is not None:
+            self.progress_callback(self._percent)
+
     def _update_progress(self, step_name: str, description: str = ""):
         """
         Update the progress bar based on step completion.
@@ -231,22 +290,39 @@ class BaseUploadPipeline(ABC):
                           description: str = "Starting upload"):
         """
         Context manager for progress bar to ensure proper cleanup.
-        
+
+        When the orchestrator has taken over progress reporting
+        (``_suppress_cli_progress``, multi-platform CLI), no tqdm bar is
+        created; step updates still fire the callback and track the normalized
+        percent. Otherwise the adapter draws its own bar, which tqdm disables
+        automatically when stderr is not a terminal (server logs, redirected
+        output).
+
         Args:
             total_progress: Total progress value (usually 100)
             description: Initial description for the progress bar
-            
+
         Yields:
-            tqdm progress bar object
+            tqdm progress bar object or None when the bar is suppressed
         """
+        if self._suppress_cli_progress:
+            self.progress_bar = None
+            try:
+                yield None
+            finally:
+                self.progress_bar = None
+            return
+
         progress_bar = tqdm(
             total=total_progress,
             desc=f"[{self.platform_name}] {description}",
             unit="%",
             bar_format="{l_bar}{bar}| {percentage:3.0f}% [{elapsed}<{remaining}]",
-            ncols=100,
+            # No fixed width: a long description would otherwise be clipped at
+            # the right edge, the same way the submission bar's postfix was.
             leave=True,
-            position=0)
+            position=0,
+            disable=None)
         self.progress_bar = progress_bar
         try:
             yield progress_bar
@@ -315,17 +391,23 @@ class BaseUploadPipeline(ABC):
         Args:
             success: Whether the operation was successful
         """
-        if not self.progress_bar:
-            return
-
         if success:
-            # Complete to 100% only on success
-            total_progress = sum(self.progress_allocations.values())
-            remaining = total_progress - self.progress_bar.n
-            if remaining > 0:
-                self.progress_bar.update(remaining)
-            
-            self.progress_bar.set_description(f"[{self.platform_name}] Upload complete")
-        else:
+            # Complete to 100% only on success. Advance through the shared sink
+            # so the completion reaches the callback (the orchestrator's
+            # combined bar, the live web progress) even when this adapter owns
+            # no bar of its own.
+            self._advance_progress(100)
+            bar = self.progress_bar
+            if bar is not None:
+                # A step that completed before this bar existed (the
+                # orchestrator's interactive-auth pass runs before the upload
+                # opens a bar) counted into _progress_seen without moving the
+                # bar, so _advance_progress sees its target already reached and
+                # leaves the bar short of the completion it just announced.
+                if bar.n < 100:
+                    bar.update(100 - bar.n)
+                bar.set_description(f"[{self.platform_name}] Upload complete")
+        elif self.progress_bar is not None:
             # Show error state without completing to 100%
-            self.progress_bar.set_description(f"[{self.platform_name}] Upload failed")
+            self.progress_bar.set_description(
+                f"[{self.platform_name}] Upload failed")

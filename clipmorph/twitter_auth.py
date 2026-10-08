@@ -89,6 +89,8 @@ def _token_values(response: requests.Response) -> dict[str, str]:
 
 
 def authorize_twitter(data_dir: str | Path | None = None) -> Path:
+    if data_dir is None:
+        data_dir = active_auth_file_path().parent
     config = load_auth_config(data_dir)
     twitter = config.get("twitter", {})
     client_id = twitter.get("client_id")
@@ -143,6 +145,8 @@ def authorize_twitter(data_dir: str | Path | None = None) -> Path:
 
 
 def refresh_twitter_access_token(data_dir: str | Path | None = None) -> dict[str, str]:
+    if data_dir is None:
+        data_dir = active_auth_file_path().parent
     config = load_auth_config(data_dir)
     twitter = config.get("twitter", {})
     client_id = twitter.get("client_id")

@@ -1,8 +1,17 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from clipmorph.transcript import create_edit_session, load_edit_session, save_edit_session
+import numpy as np
+import yaml
+
+from clipmorph.transcript import (
+    create_edit_session,
+    load_edit_session,
+    native_scalars,
+    save_edit_session,
+)
 
 
 class TranscriptEditSessionTests(unittest.TestCase):
@@ -37,6 +46,30 @@ class TranscriptEditSessionTests(unittest.TestCase):
             ], 3)
         with self.assertRaises(ValueError):
             create_edit_session("hash", [{"start": 0, "end": 4}], 3)
+
+    def test_numpy_scalars_are_coerced_to_native_persistence_types(self):
+        """WhisperX emits numpy timestamps; the session must store natives.
+
+        ``np.float64`` subclasses ``float``, so the JSON session write accepts
+        it while the manifest's YAML dump raises "cannot represent an object"
+        and fails the job after a clean transcription.
+        """
+        session = create_edit_session("source-hash", [{
+            "start": np.float64(0.1),
+            "end": np.float64(0.9),
+            "text": "Hello there",
+            "words": [{"word": "hello", "start": np.float64(0.1),
+                       "end": np.float64(0.5), "score": np.float32(0.9)}],
+        }], 3.0)
+
+        self.assertNotIsInstance(session["segments"][0]["start"], np.generic)
+        self.assertNotIsInstance(
+            session["segments"][0]["words"][0]["score"], np.generic)
+        self.assertEqual(session["segments"][0]["start"], 0.1)
+        json.dumps(session)
+        yaml.safe_dump(session)
+        self.assertIsInstance(native_scalars(np.float64(1.5)), float)
+        self.assertIsInstance(native_scalars(np.int64(2)), int)
 
     def test_sessions_have_stable_ids_and_segment_typography_overrides(self):
         session = create_edit_session("hash", [{
