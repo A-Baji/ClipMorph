@@ -31,7 +31,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CAPABILITIES_DOC = REPO_ROOT / "docs" / "PLATFORM_CAPABILITIES.md"
 EXTENSION_GUIDE_DOC = REPO_ROOT / "docs" / "PLATFORM_EXTENSION_GUIDE.md"
 PARITY_DOC = REPO_ROOT / "docs" / "CLI_WEB_PARITY.md"
-FRONTEND_APP = REPO_ROOT / "frontend" / "src" / "App.svelte"
+FRONTEND_FORMAT_MODULE = REPO_ROOT / "frontend" / "src" / "lib" / "format.js"
+FRONTEND_PLATFORM_MARK = (
+    REPO_ROOT / "frontend" / "src" / "components" / "PlatformMark.svelte"
+)
 WEB_MODULE = REPO_ROOT / "clipmorph" / "web.py"
 ADAPTER_DIRECTORY = REPO_ROOT / "clipmorph" / "upload_pipeline" / "platforms"
 ADAPTER_PACKAGE = "clipmorph.upload_pipeline.platforms"
@@ -328,8 +331,13 @@ class PlatformCoverageDriftTests(unittest.TestCase):
     def test_parity_cli_rows_reference_every_platform(self):
         self.assert_platform_in(PARITY_DOC, section=CLI_CONTRACT_SECTION)
 
-    def test_frontend_platforms_const_lists_every_platform(self):
-        self.assert_platform_in(FRONTEND_APP)
+    def test_frontend_platform_registry_lists_every_platform(self):
+        # The extracted UI registry carries display names for every platform;
+        # the upload surfaces iterate it via the store, never a second literal.
+        self.assert_platform_in(FRONTEND_FORMAT_MODULE)
+
+    def test_frontend_platform_badges_cover_every_platform(self):
+        self.assert_platform_in(FRONTEND_PLATFORM_MARK)
 
     def test_web_credential_surface_covers_every_platform(self):
         # One generic route serves every platform, so web.py needs no

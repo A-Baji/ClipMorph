@@ -127,14 +127,20 @@ when these markers and the registry disagree, in either direction.
    *Fails without it:*
    `PlatformCoverageDriftTests.test_parity_cli_rows_reference_every_platform`.
 
-7. **Frontend — `frontend/src/App.svelte`.** Add the platform id to the
-   `platforms` const. The nav's job-form platform list, the upload draft
-   platform checkboxes, and the Settings credential status list all iterate that
-   const, so do not add a second literal for an upload surface; build the
-   dashboard (`frontend/dist`) through its own workflow when the change needs a
-   rebuilt asset.
+7. **Frontend — `frontend/src/lib/format.js` and
+   `frontend/src/components/PlatformMark.svelte`.** Add the platform id to the
+   `PLATFORM_LABELS` map in `frontend/src/lib/format.js` (display names every
+   view uses) and to the `initials` map in `frontend/src/components/PlatformMark.svelte`
+   (badge text). The upload surfaces (queue platform chips, upload-draft
+   platform checkboxes, Settings credential status list) iterate `app.platforms`,
+   which the store seeds from `configuration.job_defaults.platforms` with
+   `FALLBACK_PLATFORMS` in `frontend/src/lib/store.svelte.js` as the fallback,
+   so do not add a second literal for an upload surface. Rebuild the packaged
+   dashboard with `npm --prefix frontend run build`, which regenerates
+   `clipmorph/web_assets/`, when the change needs a rebuilt asset.
    *Fails without it:*
-   `PlatformCoverageDriftTests.test_frontend_platforms_const_lists_every_platform`.
+   `PlatformCoverageDriftTests.test_frontend_platform_registry_lists_every_platform`
+   and `PlatformCoverageDriftTests.test_frontend_platform_badges_cover_every_platform`.
 
 8. **Docs health and the drift suite.** Run the focused suite and the
    documentation check; the full gate list is in `AGENTS.md`.

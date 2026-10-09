@@ -1,0 +1,144 @@
+/* ==========================================================================
+   ClipMorph design tokens — the single source of truth for every view.
+   Three layers: primitive (raw values) -> semantic (purpose) -> component.
+   Views and components must only reference semantic/component tokens here;
+   per-view hardcoded colors, spacing, radii, or fonts are a bug.
+
+   Approved direction (see frontend/DESIGN.md): "Calm Slate" — a calm, modern,
+   dark interface for a local prosumer video tool: deep desaturated slate
+   surfaces, one confident teal accent, Inter for UI and JetBrains Mono for
+   machine values. Chosen over the "Soft UI (light indigo)" and "Swiss
+   monochrome" candidates.
+   ========================================================================== */
+
+:root {
+  /* --- Layer 1: primitive ------------------------------------------------ */
+
+  /* Neutral slate scale */
+  --slate-950: #0b0f14;
+  --slate-900: #10151c;
+  --slate-850: #151b24;
+  --slate-800: #1b232e;
+  --slate-700: #26303d;
+  --slate-600: #33404f;
+  --slate-500: #4a5a6e;
+  --slate-400: #6b7c92;
+  --slate-350: #7c8da3;
+  --slate-300: #93a2b5;
+  --slate-200: #c2ccd8;
+  --slate-100: #e7ecf2;
+  --white: #ffffff;
+
+  /* Accent + status */
+  --teal-600: #0d9488;
+  --teal-500: #14b8a6;
+  --teal-400: #2dd4bf;
+  --teal-300: #5eead4;
+  --green-400: #4ade80;
+  --amber-400: #f5b856;
+  --red-500: #ef4444;
+  --red-400: #f87171;
+  --blue-400: #60a5fa;
+  --violet-400: #a78bfa;
+
+  /* Typography primitives */
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI',
+    Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Code',
+    Menlo, Consolas, monospace;
+  --text-2xs: 0.6875rem;
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.875rem;
+  --text-lg: 1rem;
+  --text-xl: 1.25rem;
+  --text-2xl: 1.5rem;
+  --text-3xl: 1.875rem;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* Spacing scale (standard density) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* Radii */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-full: 999px;
+
+  /* Motion */
+  --duration-fast: 140ms;
+  --duration-base: 200ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  /* --- Layer 2: semantic ------------------------------------------------- */
+
+  --color-bg: var(--slate-950);
+  --color-surface: var(--slate-900);
+  --color-surface-raised: var(--slate-850);
+  --color-surface-hover: var(--slate-800);
+  --color-border: rgba(231, 236, 242, 0.1);
+  --color-border-strong: rgba(231, 236, 242, 0.18);
+
+  --color-text: var(--slate-100);
+  --color-text-muted: var(--slate-300);
+  --color-text-faint: var(--slate-350);
+  --color-text-inverse: var(--slate-950);
+
+  --color-primary: var(--teal-400);
+  --color-primary-hover: var(--teal-300);
+  --color-primary-muted: rgba(45, 212, 191, 0.12);
+  --color-on-primary: var(--slate-950);
+
+  --color-success: var(--green-400);
+  --color-success-muted: rgba(74, 222, 128, 0.12);
+  --color-warning: var(--amber-400);
+  --color-warning-muted: rgba(245, 184, 86, 0.12);
+  --color-danger: var(--red-400);
+  --color-danger-muted: rgba(248, 113, 113, 0.12);
+  --color-info: var(--blue-400);
+  --color-info-muted: rgba(96, 165, 250, 0.12);
+  --color-special: var(--violet-400);
+  --color-focus: var(--teal-400);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.35);
+
+  /* --- Layer 3: component ------------------------------------------------ */
+
+  --button-radius: var(--radius-md);
+  --button-primary-bg: var(--color-primary);
+  --button-primary-bg-hover: var(--color-primary-hover);
+  --button-primary-fg: var(--color-on-primary);
+  --button-ghost-fg: var(--color-text-muted);
+  --button-ghost-bg-hover: var(--color-surface-hover);
+  --button-quiet-border: var(--color-border);
+
+  --input-bg: var(--slate-900);
+  --input-border: var(--color-border-strong);
+  --input-fg: var(--color-text);
+  --input-placeholder: var(--color-text-faint);
+  --input-radius: var(--radius-md);
+
+  --card-bg: var(--color-surface);
+  --card-border: var(--color-border);
+  --card-radius: var(--radius-lg);
+
+  --nav-item-fg: var(--color-text-muted);
+  --nav-item-fg-active: var(--color-text);
+  --nav-item-bg-active: var(--color-surface-hover);
+  --nav-item-accent: var(--color-primary);
+
+  --focus-ring: 0 0 0 2px var(--color-bg), 0 0 0 4px var(--color-focus);
+}
