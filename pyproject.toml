@@ -24,6 +24,8 @@ web = [
     "uvicorn[standard]>=0.34.0",
     "python-multipart>=0.0.20",
     "httpx2>=2.13.1",
+    "pywebview>=6.2",
+    "pystray>=0.19.5",
 ]
 dev = [
     "ruff>=0.16.0",
@@ -46,6 +48,7 @@ clipmorph = [
     "ffmpeg/mac/*",
     "ffmpeg/windows/*",
     "resources/fonts/roboto/*",
+    "resources/*.ico",
     "web_assets/**/*"
 ]
 

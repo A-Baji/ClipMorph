@@ -17,6 +17,12 @@ The rules themselves, and their source links, are in
 [PLATFORM_CAPABILITIES.md](PLATFORM_CAPABILITIES.md); the CLI and API contract
 is in [CLI_WEB_PARITY.md](CLI_WEB_PARITY.md).
 
+The native desktop shell (`clipmorph/desktop_app.py`, see
+[PACKAGE_MATRIX.md](PACKAGE_MATRIX.md)) is **not** a platform: it wraps the same
+service and dashboard, adds no adapter, credential, config key, route, or
+validation, and is covered by `docs/CLI_WEB_PARITY.md`. No step below applies to
+it, and platform work never touches it.
+
 ## Platform status
 
 `- [x]` marks a platform that is registered in `SUPPORTED_PLATFORMS` and

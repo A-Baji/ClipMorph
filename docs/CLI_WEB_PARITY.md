@@ -38,6 +38,12 @@ artifacts, and platform results.
   read a staged copy under `data_dir/staging`, released after the attempt.
 - Use shared source/config/layout/transcript/preflight/platform validation;
   CLI and API use the same error fields/messages.
+- The web app (`clipmorph web`) and the desktop app (`clipmorph-ui`) are the
+  same application minus desktop-specific features: one FastAPI service, one
+  Svelte `web_assets` build, identical behavior, sourced from the same code and
+  the same `app.yml`/`--data-dir`. The desktop shell adds only a native window,
+  tray residency, and run-at-logon (Windows v1); it adds no route, field, or
+  validation.
 
 ## CLI Contract
 
@@ -292,6 +298,7 @@ CONFIG_LAYERS.md remains authoritative for field meaning.
 | Restart reconciliation | Implicit on every service construction | Queue self-healing | Recorded `running` status; unreadable manifests skipped | None | `interrupted_by_restart` checkpoint failure | CLI 0/1; API n/a | `tests/test_reconciliation.py` |
 | Events/progress/errors | GET job events SSE | Queue progress/checkpoint/errors | Shared status serializer | No config change | Manifest progress/status/errors | Same error fields; terminal SSE; `upload_progress` is live/in-memory only (empty when idle) | Event/status parity |
 | Metrics comparison | `metrics compare [--platform --limit]`; GET /metrics/comparison; `job get ID --metrics [--dimensions]`; `job update ID --metrics-pull`; GET /jobs/{id}/metrics?include=dimensions | Metrics view cross-job table + platform filter chips; job-detail per-post delta cards | Platform against `SUPPORTED_PLATFORMS_SET`; limit 1-500; `include=dimensions` only | Read-only over stored snapshots | None (local snapshots) | CLI 0/2; API 200/422 | `tests/test_metrics.py`; `tests/test_web.py`; `tests/test_cli.py` |
+| Desktop shell (`clipmorph-ui`) | Same API routes as `clipmorph web` (no route added) | Native window + system-tray menu (Show / Launch on logon / Quit), close-to-tray, optional run-at-logon (default off) | None added: the shell reuses the section's resolver/preflight/policy; the web app is the same application | Same `app.yml` and `--data-dir` as `clipmorph web`; `HKCU\...\Run` for logon only | Same manifests/artifacts; Quit stops the one local service | CLI 0/1; API identical | `tests/test_desktop_app.py`; `tests/test_ui_launcher.py` |
 
 ## Differential Test Plan
 
@@ -310,6 +317,7 @@ or network calls.
 | Checkpoint/upload | Review gates, content/platform updates, partial result, one-platform retry, historical result, future `publish_at` deferral, schedule disarm on draft change/rerender, and immediate retry. Service/web/upload; checkpoint tests under #180. |
 | Lifecycle/artifacts | CRUD/status, immutable source, confirm, cancel/resume/events, preview/download containment, rename/recycle/pointers/no remote deletion, storage-reference keys and staged upload copies, retention prune and restart reconciliation. Service/web/CLI/storage tests. |
 | Frontend | Source/results, masked settings, layouts, review checkpoints, `publish_at` field and scheduled-attempt badge, progress/errors, desktop/mobile. Extend `test_e2e_dashboard.py`. |
+| Desktop shell | `clipmorph-ui` starts the same FastAPI service + `web_assets` as `clipmorph web`; the native window/tray/logon are the only additions and add no route, field, or validation. `tests/test_desktop_app.py`; `tests/test_ui_launcher.py`. |
 
 Do not introduce legacy configuration/manifest readers or duplicate validation paths; preserve lazy media imports.
 
