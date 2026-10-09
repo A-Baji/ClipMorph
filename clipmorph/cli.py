@@ -53,7 +53,7 @@ if hasattr(typer_click.exceptions, "Exit"):
 if hasattr(typer_click.exceptions, "Abort"):
     _ABORT_ERRORS += (typer_click.exceptions.Abort,)
 
-from clipmorph.job import JobManifest, default_data_dir
+from clipmorph.job import JobManifest, configuration_sha256, default_data_dir
 from clipmorph.platforms import build_platform_default_config
 from clipmorph.platforms import SUPPORTED_PLATFORMS
 
@@ -462,6 +462,52 @@ def _print_upload_result(result: dict[str, Any], json_output: bool) -> None:
                     f"status_url: {result.get('status_url')}"])
 
 
+_ARTIFACT_COLUMNS = ["artifact_id", "revision", "kind", "display_name",
+                     "state", "created_at", "sha256"]
+
+
+def _artifact_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Row projection shared by `job get --artifacts` and `job artifacts list`."""
+    return [{
+        "artifact_id": item.get("id"),
+        "revision": item.get("revision"),
+        "kind": item.get("kind"),
+        "display_name": item.get("display_name"),
+        "state": _status(item.get("state")),
+        "created_at": item.get("created_at"),
+        "sha256": _short_hash(item.get("sha256")),
+    } for item in records]
+
+
+def _upload_draft_overlay(overlay: dict[str, Any]) -> dict[str, Any]:
+    """Restrict a validated ``--set`` overlay to the upload draft surface.
+
+    The draft owns ``{upload, platforms}``; a platform entry carries its
+    mirrored ``upload`` section plus its flat adapter options. Root or
+    platform composition editing is refused so an override is never silently
+    dropped from a submission (edit the composition via ``--patch`` instead).
+    """
+    forbidden = set(overlay) - {"upload", "platforms"}
+    if forbidden:
+        raise ValueError(
+            "--upload overrides are draft-only: drop "
+            f"{', '.join(sorted(forbidden))} or use --patch")
+    platforms = overlay.get("platforms") or {}
+    if not isinstance(platforms, dict):
+        raise ValueError("platforms must be an object")
+    defaults = build_platform_default_config()
+    for platform, entry in platforms.items():
+        if not isinstance(entry, dict):
+            raise ValueError(f"platforms.{platform} must be an object")
+        allowed = set(defaults.get(platform, {})) | {"upload"}
+        disallowed = set(entry) - allowed
+        if disallowed:
+            raise ValueError(
+                f"--upload may not edit platforms.{platform}.{{"
+                f"{', '.join(sorted(disallowed))}}}; edit the composition instead")
+    return dict(overlay)
+
+
 @dataclass(frozen=True)
 class _GlobalOptions:
     """Global options collected by the root callback for subcommands."""
@@ -533,20 +579,65 @@ def main_callback(ctx: typer.Context, data_dir: DataDirOption = None,
     ctx.obj = _GlobalOptions(data_dir=data_dir, app_config=app_config)
 
 
+def _backup_for_regen(path: Path) -> Path | None:
+    """Move an existing file to ``<name>.bak``, overwriting a previous backup.
+
+    The regen path writes fresh generated defaults that are authoritative by
+    construction, so the backup is the safety net and intentionally replaces
+    instead of rotating (issue #239): a stale ``.bak`` never survives a newer
+    regeneration.
+    """
+    if not path.exists():
+        return None
+    backup = path.with_name(f"{path.name}.bak")
+    shutil.move(str(path), str(backup))
+    return backup
+
+
 @app.command("init")
 def init_command(
         ctx: typer.Context,
         config_path: Annotated[Optional[Path], typer.Option(
             "--config-path", help="Write the app configuration template here.")] = None,
-        data_dir: DataDirOption = None,
-        app_config: AppConfigOption = None) -> None:
+        app_config_regen: Annotated[bool, typer.Option(
+            "--app-config", help="Regenerate only the app configuration with "
+            "fresh defaults, backing up any existing file to app.yml.bak.")] = False,
+        auth_config_regen: Annotated[bool, typer.Option(
+            "--auth-config", help="Regenerate only the auth configuration with "
+            "fresh defaults, backing up any existing file to auth.yaml.bak.")] = False,
+        data_dir: DataDirOption = None) -> None:
     """Create app.yml and auth.yaml templates."""
+    from clipmorph.auth import AUTH_TEMPLATE
     from clipmorph.auth import create_auth_template
     from clipmorph.configuration import DEFAULT_APP_CONFIGURATION
     from clipmorph.configuration import save_app_configuration
 
-    _, selected_config = _resolve_paths(ctx, data_dir, app_config)
+    # Init intentionally does not register the global --app-config path option:
+    # that name is the regeneration mode flag above (issue #239), and template
+    # targeting stays on --config-path or the inherited data directory.
+    _, selected_config = _resolve_paths(ctx, data_dir, None)
     target = config_path or selected_config
+    if app_config_regen or auth_config_regen:
+        # Selective regeneration (#239): only the chosen file is rewritten, the
+        # fresh generated defaults never merge with old values, and any
+        # pre-existing file moves to `<name>.bak` first. The mode flags skip
+        # only the file choice; the generated file itself is authoritative.
+        lines: list[str] = []
+        if app_config_regen:
+            backup = _backup_for_regen(target)
+            save_app_configuration(target, DEFAULT_APP_CONFIGURATION)
+            lines.append(f"Regenerated {target}")
+            if backup is not None:
+                lines.append(f"Backed up previous file to {backup}")
+        if auth_config_regen:
+            auth_target = target.parent / "auth.yaml"
+            backup = _backup_for_regen(auth_target)
+            auth_target.write_text(AUTH_TEMPLATE, encoding="utf-8")
+            lines.append(f"Regenerated {auth_target}")
+            if backup is not None:
+                lines.append(f"Backed up previous file to {backup}")
+        _print_summary(lines)
+        return
     if not target.exists():
         save_app_configuration(target, DEFAULT_APP_CONFIGURATION)
     create_auth_template(target.parent)
@@ -777,14 +868,23 @@ def job_create_command(
             "--yes", help="Same as `general.no_confirm = true` on every "
             "created job: run the pipeline and auto-accept each review gate "
             "it reaches, reporting the final status.")] = False,
+        set_overrides: Annotated[Optional[list[str]], typer.Option(
+            "--set", help="Inline configuration override as dotted.path=value; "
+            "repeatable, applied after job-record resolution.")] = None,
         json_output: JsonOption = False,
         data_dir: DataDirOption = None,
         app_config: AppConfigOption = None) -> None:
     """Create one job, or fan out over every source in the source directory."""
     from clipmorph.configuration import load_app_configuration
     from clipmorph.configuration import load_job_records
+    from clipmorph.configuration import parse_config_overrides
+    from clipmorph.configuration import validate_config_overlay
     from clipmorph.service import JobService
 
+    overlay = None
+    if set_overrides:
+        overlay = parse_config_overrides(set_overrides)
+        validate_config_overlay(overlay)
     selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
     with closing(JobService(selected_data_dir,
                            app_config_path=selected_config)) as service:
@@ -811,7 +911,7 @@ def job_create_command(
         result = service.create_jobs(
             source_names=source_names, job_configs=records,
             config_dir=config_dir, runner=runner, dry_run=dry_run,
-            confirmed=yes and not dry_run)
+            confirmed=yes and not dry_run, overrides=overlay)
     result, records_by_job = _refresh_creation_outcomes(result, selected_data_dir)
     _print_creation_result(result, json_output, records_by_job)
     if result["failed"] or any(record["status"] == "failed"
@@ -849,16 +949,97 @@ def job_list_command(
 def job_get_command(
         ctx: typer.Context,
         job_id: Annotated[str, typer.Argument(help="Job ID.")],
+        uploads: Annotated[bool, typer.Option(
+            "--uploads", help="Show the upload attempt history instead of the "
+            "manifest.")] = False,
+        metrics: Annotated[bool, typer.Option(
+            "--metrics", help="Show stored metric snapshots instead of the "
+            "manifest; a pure read, no network calls.")] = False,
+        artifacts: Annotated[bool, typer.Option(
+            "--artifacts", help="Show registered artifact revisions instead "
+            "of the manifest.")] = False,
+        status: Annotated[Optional[str], typer.Option(
+            "--status", help="With --uploads: keep only attempts in this "
+            "status.")] = None,
+        platform: Annotated[Optional[str], typer.Option(
+            "--platform", help="With --uploads: keep only attempts for this "
+            "platform.")] = None,
+        since: Annotated[Optional[str], typer.Option(
+            "--since", help="With --uploads: keep only attempts created at or "
+            "after this ISO-8601 instant.")] = None,
+        dimensions: Annotated[bool, typer.Option(
+            "--dimensions", help="With --metrics: join each snapshot to its "
+            "manifest dimensions.")] = False,
         json_output: JsonOption = False,
         data_dir: DataDirOption = None,
         app_config: AppConfigOption = None) -> None:
-    """Show one job manifest with its checkpoints, artifacts, and platforms."""
+    """Show one job manifest, or an --uploads/--metrics/--artifacts aspect."""
+    from clipmorph.metrics import join_dimensions
     from clipmorph.service import JobService
 
+    aspects = sorted(name for name, active in (
+        ("--uploads", uploads), ("--metrics", metrics), ("--artifacts", artifacts))
+        if active)
+    if len(aspects) > 1:
+        raise ValueError("job get accepts at most one aspect flag; "
+                         f"conflicting: {', '.join(aspects)}")
+    if (status, platform, since) != (None, None, None) and not uploads:
+        raise ValueError("--status, --platform, and --since require --uploads")
+    if dimensions and not metrics:
+        raise ValueError("--dimensions requires --metrics")
+
+    record: dict[str, Any] = {}
     selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
     with closing(JobService(selected_data_dir,
                            app_config_path=selected_config)) as service:
-        record = asdict(service.get_job(job_id))
+        if uploads:
+            attempts = service.list_upload_attempts(job_id, status, platform, since)
+        elif metrics:
+            snapshots = service.list_metrics(job_id)
+            if dimensions:
+                manifest = service.get_job(job_id)
+                snapshots = [{**item, **join_dimensions(item, manifest)}
+                             for item in snapshots]
+        elif artifacts:
+            manifest = service.get_job(job_id)
+            records = list(manifest.artifacts.values())
+        else:
+            record = asdict(service.get_job(job_id))
+    if uploads:
+        if json_output:
+            _print_json(attempts)
+            return
+        _print_table(f"Upload attempts for job {job_id}", [{
+            "platform": attempt.get("platform"),
+            "attempt_id": attempt.get("attempt_id"),
+            "status": _status(attempt.get("status")),
+            "scheduled_publish_at": attempt.get("scheduled_publish_at"),
+        } for attempt in attempts],
+            ["platform", "attempt_id", "status", "scheduled_publish_at"],
+            nowrap=("attempt_id",))
+        return
+    if metrics:
+        if json_output:
+            _print_json(snapshots)
+            return
+        columns = ["platform", "captured_at", "unavailable", "metrics"]
+        if dimensions:
+            columns = columns + ["duration_seconds", "title", "layout_id",
+                                 "subtitles_renderer"]
+        _print_table(f"Metrics for job {job_id}", [{
+            "platform": item.get("platform"),
+            "captured_at": item.get("captured_at"),
+            "unavailable": item.get("unavailable"),
+            "metrics": item.get("metrics"),
+        } for item in snapshots], columns)
+        return
+    if artifacts:
+        if json_output:
+            _print_json(records)
+            return
+        _print_table(f"Artifacts for job {job_id}", _artifact_rows(records),
+                     _ARTIFACT_COLUMNS, nowrap=("artifact_id",))
+        return
     if json_output:
         _print_json(record)
         return
@@ -869,28 +1050,154 @@ def job_get_command(
 def job_update_command(
         ctx: typer.Context,
         job_id: Annotated[str, typer.Argument(help="Job ID.")],
-        patch: Annotated[Path, typer.Option(
-            "--patch", help="YAML/JSON per-job configuration patch.")],
+        patch: Annotated[Optional[Path], typer.Option(
+            "--patch", help="YAML/JSON per-job configuration patch.")] = None,
+        cancel: Annotated[bool, typer.Option(
+            "--cancel", help="Cancel queued or running work; with --attempt-id "
+            "cancel one scheduled upload attempt.")] = False,
+        metrics_pull: Annotated[bool, typer.Option(
+            "--metrics-pull", help="Pull fresh engagement metrics from "
+            "platforms; snapshots appear on the next `job get --metrics`.")] = False,
+        render: Annotated[bool, typer.Option(
+            "--render", help="Rerender the accepted composition as a new "
+            "immutable artifact.")] = False,
+        upload: Annotated[bool, typer.Option(
+            "--upload", help="Submit the accepted upload draft, or retry one "
+            "failed attempt with --attempt-id.")] = False,
         reopen: Annotated[bool, typer.Option(
             "--reopen", help="Reopen completed work for the changed inputs.")] = False,
+        group: Annotated[Optional[str], typer.Option(
+            "--group", help="With --render: rerender only this conversion "
+            "group id.")] = None,
+        platform: Annotated[Optional[list[str]], typer.Option(
+            "--platform", help="With --upload: limit the submission to this "
+            "platform; repeatable. Exactly one is required for a retry.")] = None,
+        attempt_id: Annotated[Optional[str], typer.Option(
+            "--attempt-id", help="With --cancel: scheduled attempt ID to "
+            "cancel. With --upload: failed attempt ID to retry.")] = None,
+        artifact_id: Annotated[Optional[str], typer.Option(
+            "--artifact-id", help="With --upload: artifact ID for a "
+            "historical retry.")] = None,
+        confirm_historical_artifact: Annotated[bool, typer.Option(
+            "--confirm-historical-artifact", help="With --upload: confirm "
+            "retrying an artifact other than the current one.")] = False,
+        set_overrides: Annotated[Optional[list[str]], typer.Option(
+            "--set", help="Inline configuration override as dotted.path=value; "
+            "repeatable, applied over --patch or the upload draft.")] = None,
+        yes: Annotated[bool, typer.Option(
+            "--yes", help="Confirm the cancellation.")] = False,
         json_output: JsonOption = False,
         data_dir: DataDirOption = None,
         app_config: AppConfigOption = None) -> None:
-    """Apply a validated per-job configuration patch against the current hash."""
+    """Apply one action: config patch, cancel, metrics pull, rerender, upload."""
+    from clipmorph.configuration import merge_configuration
+    from clipmorph.configuration import parse_config_overrides
+    from clipmorph.configuration import validate_config_overlay
     from clipmorph.service import JobService
+    from clipmorph.workflow import execute_job
+
+    actions = sorted(name for name, active in (
+        ("--patch", patch is not None),
+        ("--cancel", cancel),
+        ("--metrics-pull", metrics_pull),
+        ("--render", render),
+        ("--upload", upload),
+    ) if active)
+    if not actions:
+        raise ValueError("job update requires one action flag: --patch, "
+                         "--cancel, --metrics-pull, --render, or --upload")
+    if len(actions) > 1:
+        raise ValueError("job update accepts at most one action flag; "
+                         f"conflicting: {', '.join(actions)}")
+    action = actions[0]
+    if attempt_id is not None and action not in {"--cancel", "--upload"}:
+        raise ValueError("--attempt-id is only accepted with --cancel or --upload")
+    if group is not None and action != "--render":
+        raise ValueError("--group requires --render")
+    if (artifact_id is not None or confirm_historical_artifact) and action != "--upload":
+        raise ValueError(
+            "--artifact-id and --confirm-historical-artifact require --upload")
+    if set_overrides and action in {"--cancel", "--metrics-pull", "--render"}:
+        raise ValueError(
+            f"--set has no effect with {action}; it composes with --patch or --upload")
+    if set_overrides and action == "--upload" and attempt_id:
+        raise ValueError("--set is not accepted with --attempt-id; a retry "
+                         "uses the failed attempt's frozen settings")
 
     selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
     with closing(JobService(selected_data_dir,
-                           app_config_path=selected_config)) as service:
-        manifest = service.get_job(job_id)
-        updated = service.update_job_configuration(
-            job_id, _read_structured_file(patch),
-            manifest.current_configuration_hash, reopen)
-    record = asdict(updated)
-    if json_output:
-        _print_json(record)
-        return
-    _print_fields(f"Job {job_id}", _job_fields(record))
+                            app_config_path=selected_config)) as service:
+        if action == "--patch":
+            assert patch is not None  # "--patch" is only active when given
+            patch_value = _read_structured_file(patch)
+            if set_overrides:
+                overlay = parse_config_overrides(set_overrides)
+                validate_config_overlay(overlay)
+                patch_value = merge_configuration(patch_value, overlay)
+            manifest = service.get_job(job_id)
+            updated = service.update_job_configuration(
+                job_id, patch_value, manifest.current_configuration_hash, reopen)
+            record = asdict(updated)
+            if json_output:
+                _print_json(record)
+                return
+            _print_fields(f"Job {job_id}", _job_fields(record))
+            return
+        if action == "--cancel":
+            if attempt_id:
+                result = service.cancel_scheduled_upload(job_id, attempt_id)
+                if json_output:
+                    _print_json(result)
+                    return
+                _print_table(f"Cancelled upload attempt {result['attempt_id']}",
+                             [result],
+                             ["job_id", "attempt_id", "platform",
+                              "scheduled_via", "status"],
+                             nowrap=("attempt_id",))
+                return
+            if not yes:
+                raise ValueError("job update --cancel requires --yes")
+            record = asdict(service.cancel_job(job_id))
+            if json_output:
+                _print_json(record)
+                return
+            _print_fields(f"Job {job_id}", _job_fields(record))
+            return
+        if action == "--metrics-pull":
+            result = service.pull_metrics(job_id)
+            if json_output:
+                _print_json(result)
+                return
+            _print_fields(f"Metrics pull for job {job_id}", [
+                ("Job ID", result.get("job_id")),
+                ("Snapshots", result.get("snapshots")),
+                ("Pulled", result.get("pulled"))])
+            return
+        if action == "--render":
+            service.rerender_job(job_id, group)
+            service.resume_job(job_id, lambda job, token: execute_job(
+                job, token, service.jobs_dir, service.app_config_path))
+            return
+        # --upload: draft overrides first, then submit or retry.
+        if set_overrides:
+            overlay = parse_config_overrides(set_overrides)
+            validate_config_overlay(overlay)
+            draft_overlay = _upload_draft_overlay(overlay)
+            draft_manifest = service.get_job(job_id)
+            service.update_upload_draft(
+                job_id, draft_overlay,
+                draft_manifest.checkpoints["upload"]["revision"], False)
+        if attempt_id:
+            if not platform or len(platform) != 1:
+                raise ValueError("retrying a failed upload attempt requires "
+                                 "exactly one --platform")
+            result = service.retry_upload(
+                job_id, platform[0], attempt_id, artifact_id,
+                confirm_historical_artifact)
+        else:
+            result = service.submit_upload(
+                job_id, platform, artifact_id, confirm_historical_artifact)
+    _print_upload_result(result, json_output)
 
 
 @job_app.command("delete")
@@ -923,30 +1230,6 @@ def job_delete_command(
         if output_job.exists():
             send2trash(str(output_job))
     _print_summary([manifest.job_id])
-
-
-@job_app.command("cancel")
-def job_cancel_command(
-        ctx: typer.Context,
-        job_id: Annotated[str, typer.Argument(help="Job ID.")],
-        yes: Annotated[bool, typer.Option(
-            "--yes", help="Confirm the cancellation.")] = False,
-        json_output: JsonOption = False,
-        data_dir: DataDirOption = None,
-        app_config: AppConfigOption = None) -> None:
-    """Cancel queued or running work for a job."""
-    from clipmorph.service import JobService
-
-    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
-    with closing(JobService(selected_data_dir,
-                           app_config_path=selected_config)) as service:
-        if not yes:
-            raise ValueError("job cancel requires --yes")
-        record = asdict(service.cancel_job(job_id))
-    if json_output:
-        _print_json(record)
-        return
-    _print_fields(f"Job {job_id}", _job_fields(record))
 
 
 # Prompt seams keep the interactive review testable without stdio plumbing.
@@ -1026,6 +1309,39 @@ def _print_gate_summary(manifest: JobManifest, gate: str,
             ("Title", content.get("title", "")),
             ("Description", content.get("description", "")),
             ("Tags", ", ".join(content.get("tags") or []))])
+        suggestions = (manifest.configuration.get("upload", {})
+                       .get("suggestions", {}) or {})
+        suggestion_rows = {
+            name: row for name, row in suggestions.items()
+            if name not in {"provider", "model"}}
+        if suggestion_rows:
+            _print_table("Suggestions", [{
+                "platform": name,
+                "title": row.get("title"),
+                "hashtags": " ".join(row.get("hashtags") or []),
+            } for name, row in suggestion_rows.items()],
+                         ["platform", "title", "hashtags"])
+
+
+def _upload_gate_offer(manifest: JobManifest) -> tuple[bool, list[str]]:
+    """Decide what the upload gate should offer for the current draft.
+
+    Returns ``(can_generate, pending)``: [g] generation is offered only when
+    the suggestions block is absent or the existing rows are stale (their
+    ``configuration_hash`` no longer matches the current ``upload.content``
+    hash); [a] acceptance is offered when any suggestion rows are pending.
+    """
+    upload = manifest.configuration.get("upload", {})
+    block = upload.get("suggestions", {}) or {}
+    rows = {name: row for name, row in block.items()
+            if name not in {"provider", "model"}}
+    stale = False
+    if rows:
+        content_hash = configuration_sha256(upload.get("content", {}))
+        stale = any(not isinstance(row, dict)
+                    or row.get("configuration_hash") != content_hash
+                    for row in rows.values())
+    return (not rows) or stale, sorted(rows)
 
 
 def _interactive_review(service, manifest: JobManifest, gate: str,
@@ -1033,8 +1349,24 @@ def _interactive_review(service, manifest: JobManifest, gate: str,
     """Show the gate and prompt a decision. True when the gate is accepted."""
     while True:
         _print_gate_summary(manifest, gate, jobs_dir)
-        choice = _prompt_choice(
-            f"Accept the {gate} gate? [y] accept, [e] edit, [q] stop")
+        if gate == "upload":
+            # The upload gate also drives the removed suggestion commands
+            # (#240): [g] generates fresh drafts for the awaiting review
+            # (offered only when the suggestions block is absent or stale,
+            # i.e. the rows' content-hash no longer matches the draft) and
+            # [a] accepts all pending rows or a comma-separated platform
+            # subset into the draft. Both loop back to the summary so the
+            # operator sees the result of the choice before accepting.
+            can_generate, pending = _upload_gate_offer(manifest)
+            choices = "[y] accept, [e] edit"
+            if can_generate:
+                choices += ", [g] generate suggestions"
+            if pending:
+                choices += ", [a] accept suggestions"
+            prompt_text = f"Accept the {gate} gate? {choices}, [q] stop"
+        else:
+            prompt_text = f"Accept the {gate} gate? [y] accept, [e] edit, [q] stop"
+        choice = _prompt_choice(prompt_text)
         if choice in {"y", "yes"}:
             _accept_gate(service, manifest, gate)
             return True
@@ -1048,6 +1380,18 @@ def _interactive_review(service, manifest: JobManifest, gate: str,
             _apply_edits(service, manifest, gate, edit_values)
             manifest = service.get_job(manifest.job_id)
             continue
+        if gate == "upload" and choice in {"g", "generate"}:
+            service.suggest_upload_metadata(manifest.job_id)
+            manifest = service.get_job(manifest.job_id)
+            continue
+        if gate == "upload" and choice in {"a", "accept"}:
+            accept_for = _prompt_choice(
+                "Accept suggestions for [all] or a comma-separated platform list")
+            platforms = None if accept_for in {"", "all"} else [
+                name.strip() for name in accept_for.split(",") if name.strip()]
+            service.accept_suggestions(manifest.job_id, platforms)
+            manifest = service.get_job(manifest.job_id)
+            continue
 
 
 @job_app.command("run")
@@ -1057,10 +1401,15 @@ def job_run_command(
         yes: Annotated[bool, typer.Option(
             "--yes", help="Accept every review gate without prompting; the "
             "upload gate submits its attempts immediately.")] = False,
+        set_overrides: Annotated[Optional[list[str]], typer.Option(
+            "--set", help="Inline configuration override as dotted.path=value; "
+            "repeatable, applied before the run starts.")] = None,
         json_output: JsonOption = False,
         data_dir: DataDirOption = None,
         app_config: AppConfigOption = None) -> None:
     """Run the job, reviewing each acceptance gate interactively."""
+    from clipmorph.configuration import parse_config_overrides
+    from clipmorph.configuration import validate_config_overlay
     from clipmorph.service import JobService
     from clipmorph.workflow import execute_job
 
@@ -1068,6 +1417,12 @@ def job_run_command(
     jobs_dir = Path(selected_data_dir) / "jobs"
     with closing(JobService(selected_data_dir,
                             app_config_path=selected_config)) as service:
+        if set_overrides:
+            overlay = parse_config_overrides(set_overrides)
+            validate_config_overlay(overlay)
+            manifest = service.get_job(job_id)
+            service.update_job_configuration(
+                job_id, overlay, manifest.current_configuration_hash, True)
         runner = lambda job, token: execute_job(
             job, token, service.jobs_dir, service.app_config_path)
         fingerprint = None
@@ -1111,211 +1466,6 @@ def job_run_command(
         raise typer.Exit(1)
 
 
-
-@job_app.command("render")
-def job_render_command(
-        ctx: typer.Context,
-        job_id: Annotated[str, typer.Argument(help="Job ID.")],
-        group: Annotated[Optional[str], typer.Option(
-            "--group", help="Rerender only this conversion group id.")] = None,
-        data_dir: DataDirOption = None,
-        app_config: AppConfigOption = None) -> None:
-    """Rerender the accepted composition as a new immutable artifact."""
-    from clipmorph.service import JobService
-    from clipmorph.workflow import execute_job
-
-    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
-    with closing(JobService(selected_data_dir,
-                           app_config_path=selected_config)) as service:
-        service.rerender_job(job_id, group)
-        service.resume_job(job_id, lambda job, token: execute_job(
-            job, token, service.jobs_dir, service.app_config_path))
-
-
-@job_app.command("upload")
-def job_upload_command(
-        ctx: typer.Context,
-        upload_args: Annotated[Optional[list[str]], typer.Argument(
-            metavar="ID | RETRY ID PLATFORM",
-            help="Job ID, or retry with a job ID and platform.")] = None,
-        platform: Annotated[Optional[list[str]], typer.Option(
-            "--platform", help="Limit the submission to this platform; repeatable."
-        )] = None,
-        attempt_id: Annotated[Optional[str], typer.Option(
-            "--attempt-id", help="Failed attempt ID to retry.")] = None,
-        artifact_id: Annotated[Optional[str], typer.Option(
-            "--artifact-id", help="Artifact ID for a historical retry.")] = None,
-        confirm_historical_artifact: Annotated[bool, typer.Option(
-            "--confirm-historical-artifact",
-            help="Confirm retrying an artifact other than the current one.")] = False,
-        json_output: JsonOption = False,
-        data_dir: DataDirOption = None,
-        app_config: AppConfigOption = None) -> None:
-    """Submit the accepted upload draft, or retry one failed attempt."""
-    from clipmorph.service import JobService
-
-    if not upload_args:
-        raise ValueError("syntax: job upload ID")
-    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
-    with closing(JobService(selected_data_dir,
-                           app_config_path=selected_config)) as service:
-        if upload_args[0] == "retry":
-            if len(upload_args) != 3:
-                raise ValueError("syntax: job upload retry ID PLATFORM")
-            _, job_id, retry_platform = upload_args
-            manifest = service.get_job(job_id)
-            selected_attempt = attempt_id
-            if selected_attempt is None:
-                attempt = next((item for item in reversed(manifest.upload_attempts)
-                                if item["platform"] == retry_platform
-                                and item["status"] == "failed"), None)
-                if attempt is None:
-                    raise ValueError("no failed upload attempt for that platform")
-                selected_attempt = attempt["attempt_id"]
-            result = service.retry_upload(
-                job_id, retry_platform, selected_attempt, artifact_id,
-                confirm_historical_artifact)
-        else:
-            if len(upload_args) != 1:
-                raise ValueError("syntax: job upload ID")
-            result = service.submit_upload(
-                upload_args[0], platform, artifact_id,
-                confirm_historical_artifact)
-    _print_upload_result(result, json_output)
-
-
-@job_app.command("uploads")
-def job_uploads_command(
-        ctx: typer.Context,
-        job_id: Annotated[str, typer.Argument(help="Job ID.")],
-        status: Annotated[Optional[str], typer.Option(
-            "--status", help="Keep only attempts in this status.")] = None,
-        platform: Annotated[Optional[str], typer.Option(
-            "--platform", help="Keep only attempts for this platform.")] = None,
-        since: Annotated[Optional[str], typer.Option(
-            "--since", help="Keep only attempts created at or after this "
-            "ISO-8601 instant.")] = None,
-        json_output: JsonOption = False,
-        data_dir: DataDirOption = None,
-        app_config: AppConfigOption = None) -> None:
-    """List a job's upload attempt history with optional filters."""
-    from clipmorph.service import JobService
-
-    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
-    with closing(JobService(selected_data_dir,
-                           app_config_path=selected_config)) as service:
-        attempts = service.list_upload_attempts(job_id, status, platform, since)
-    if json_output:
-        _print_json(attempts)
-        return
-    _print_table(f"Upload attempts for job {job_id}", [{
-        "platform": attempt.get("platform"),
-        "attempt_id": attempt.get("attempt_id"),
-        "status": _status(attempt.get("status")),
-        "scheduled_publish_at": attempt.get("scheduled_publish_at"),
-    } for attempt in attempts],
-        ["platform", "attempt_id", "status", "scheduled_publish_at"],
-        nowrap=("attempt_id",))
-
-
-@job_app.command("metrics")
-def job_metrics_command(
-        ctx: typer.Context,
-        job_id: Annotated[str, typer.Argument(help="Job ID.")],
-        pull: Annotated[bool, typer.Option(
-            "--pull", help="Pull fresh metrics from platforms before listing.")] = False,
-        dimensions: Annotated[bool, typer.Option(
-            "--dimensions",
-            help="Join each snapshot to its manifest dimensions.")] = False,
-        json_output: JsonOption = False,
-        data_dir: DataDirOption = None,
-        app_config: AppConfigOption = None) -> None:
-    """List a job's metric snapshots, optionally pulling fresh data first."""
-    from clipmorph.metrics import join_dimensions
-    from clipmorph.service import JobService
-
-    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
-    with closing(JobService(selected_data_dir,
-                           app_config_path=selected_config)) as service:
-        if pull:
-            service.pull_metrics(job_id)
-        snapshots = service.list_metrics(job_id)
-        if dimensions:
-            manifest = service.get_job(job_id)
-            snapshots = [{**record, **join_dimensions(record, manifest)}
-                         for record in snapshots]
-    if json_output:
-        _print_json(snapshots)
-        return
-    columns = ["platform", "captured_at", "unavailable", "metrics"]
-    if dimensions:
-        columns = columns + ["duration_seconds", "title", "layout_id",
-                             "subtitles_renderer"]
-    _print_table(f"Metrics for job {job_id}", [{
-        "platform": record.get("platform"),
-        "captured_at": record.get("captured_at"),
-        "unavailable": record.get("unavailable"),
-        "metrics": record.get("metrics"),
-    } for record in snapshots], columns)
-
-
-@job_app.command("suggest")
-def job_suggest_command(
-        ctx: typer.Context,
-        job_id: Annotated[str, typer.Argument(help="Job ID.")],
-        platform: Annotated[Optional[list[str]], typer.Option(
-            "--platform", help="Limit generation to this platform; repeatable."
-        )] = None,
-        provider: Annotated[Optional[str], typer.Option(
-            "--provider", help="Provider override (template | hugging_face)."
-        )] = None,
-        force: Annotated[bool, typer.Option(
-            "--force", help="Regenerate even when the content hash is unchanged."
-        )] = False,
-        json_output: JsonOption = False,
-        data_dir: DataDirOption = None,
-        app_config: AppConfigOption = None) -> None:
-    """Generate platform-aware metadata suggestions for the upload draft."""
-    from clipmorph.service import JobService
-
-    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
-    with closing(JobService(selected_data_dir,
-                           app_config_path=selected_config)) as service:
-        result = service.suggest_upload_metadata(
-            job_id, platform, provider, force)
-    if json_output:
-        _print_json(result)
-        return
-    _print_fields(f"Suggestions for job {job_id}",
-                  [("upload", result.get("upload")),
-                   ("checkpoint", result.get("checkpoint"))])
-
-
-@job_app.command("accept-suggestions")
-def job_accept_suggestions_command(
-        ctx: typer.Context,
-        job_id: Annotated[str, typer.Argument(help="Job ID.")],
-        platform: Annotated[Optional[list[str]], typer.Option(
-            "--platform", help="Accept suggestions for this platform; repeatable."
-        )] = None,
-        json_output: JsonOption = False,
-        data_dir: DataDirOption = None,
-        app_config: AppConfigOption = None) -> None:
-    """Copy chosen suggestion rows into the upload content and clear them."""
-    from clipmorph.service import JobService
-
-    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
-    with closing(JobService(selected_data_dir,
-                           app_config_path=selected_config)) as service:
-        result = service.accept_suggestions(job_id, platform)
-    if json_output:
-        _print_json(result)
-        return
-    _print_fields(f"Accepted suggestions for job {job_id}",
-                  [("upload", result.get("upload")),
-                   ("checkpoint", result.get("checkpoint"))])
-
-
 @metrics_app.command("compare")
 def metrics_compare_command(
         ctx: typer.Context,
@@ -1346,30 +1496,6 @@ def metrics_compare_command(
                   "views", "likes", "comments", "views_delta", "likes_delta"])
 
 
-@job_app.command("cancel-scheduled")
-def job_cancel_scheduled_command(
-        ctx: typer.Context,
-        job_id: Annotated[str, typer.Argument(help="Job ID.")],
-        attempt_id: Annotated[str, typer.Argument(
-            help="Scheduled upload attempt ID to cancel.")],
-        json_output: JsonOption = False,
-        data_dir: DataDirOption = None,
-        app_config: AppConfigOption = None) -> None:
-    """Cancel one scheduled upload attempt before its publication."""
-    from clipmorph.service import JobService
-
-    selected_data_dir, selected_config = _resolve_paths(ctx, data_dir, app_config)
-    with closing(JobService(selected_data_dir,
-                           app_config_path=selected_config)) as service:
-        result = service.cancel_scheduled_upload(job_id, attempt_id)
-    if json_output:
-        _print_json(result)
-        return
-    _print_table(f"Cancelled upload attempt {result['attempt_id']}", [result],
-                 ["job_id", "attempt_id", "platform", "scheduled_via", "status"],
-                 nowrap=("attempt_id",))
-
-
 @artifact_app.command("list")
 def artifacts_list_command(
         ctx: typer.Context,
@@ -1388,17 +1514,8 @@ def artifacts_list_command(
     if json_output:
         _print_json(records)
         return
-    _print_table(f"Artifacts for job {job_id}", [{
-        "artifact_id": item.get("id"),
-        "revision": item.get("revision"),
-        "kind": item.get("kind"),
-        "display_name": item.get("display_name"),
-        "state": _status(item.get("state")),
-        "created_at": item.get("created_at"),
-        "sha256": _short_hash(item.get("sha256")),
-    } for item in records],
-        ["artifact_id", "revision", "kind", "display_name", "state", "created_at",
-         "sha256"], nowrap=("artifact_id",))
+    _print_table(f"Artifacts for job {job_id}", _artifact_rows(records),
+                 _ARTIFACT_COLUMNS, nowrap=("artifact_id",))
 
 
 @artifact_app.command("preview")

@@ -23,29 +23,29 @@ clipmorph web
 `app.yml` defaults to the ClipMorph data directory. Configure `source_dir`,
 `output_dir`, `job_defaults`, `retention`, `storage`, and named layouts there. The file
 carries a `config_version` stamp; a missing or mismatched stamp is rejected with
-one actionable error, and `clipmorph init` run beside an existing `app.yml`
-regenerates a template to copy your settings back into. Job configuration is
+one actionable error. `clipmorph init` writes the `app.yml` and `auth.yaml`
+templates; run beside existing files it leaves them alone unless you pass
+`--app-config`/`--auth-config`, which rewrite only the chosen template and back
+the old file up to `<name>.bak`. Job configuration is
 resolved from `app.yml:job_defaults` plus one per-job override object; finalized
 jobs live in `jobs/<job_id>/job.yml` with state in `manifest.json`. A source must
 be an immediate file under `source_dir`.
 
 ## Commands
 
-- `clipmorph init [--config-path PATH]` — write `app.yml` and an adjacent `auth.yaml` template.
+- `clipmorph init [--config-path PATH] [--app-config] [--auth-config]` — write `app.yml` and an adjacent `auth.yaml` template; each optional flag regenerates only that template, backing up an existing file to `<name>.bak`.
 - `clipmorph web [--host HOST] [--port PORT]` — start the local API and dashboard.
 - `clipmorph auth status|set PLATFORM|twitter` — credential status, prompt-based updates, and the X OAuth flow.
 - `clipmorph layout list|create CONFIG|get ID|delete ID` — manage the global layout registry.
-- `clipmorph job create SOURCE [--job-configs FILE] [--config-dir DIR] [--dry-run]` — create jobs from one source file or fan out over `source_dir`; per-source records are JSONL/YAML job objects.
-- `clipmorph job list|get ID|update ID --patch FILE [--reopen]|delete ID --yes|cancel ID --yes` — inspect and manage the job lifecycle.
-- `clipmorph job run ID [--yes] [--json]` — the only pipeline-running command: processes checkpoints, and at each review gate shows the checkpoint content and prompts an accept/edit/stop decision interactively (an edit object is a YAML/JSON file path for the checkpoint; a conversion gate accept addresses every awaiting group). `--yes` accepts every gate without prompting and submits the upload attempts immediately; a future `schedule.publish_at` still defers to its timer. Exits `1` when the run failed.
-- `clipmorph job render ID` — create a new immutable artifact revision from the accepted composition.
-- `clipmorph job upload ID [--platform NAME]`, `clipmorph job upload retry ID PLATFORM [--attempt-id ID]` — submit the accepted draft or retry a failed attempt. A draft carrying `upload.schedule.publish_at` in the future defers every selected platform to that time; a retry always uploads immediately.
+- `clipmorph job create SOURCE [--job-configs FILE] [--config-dir DIR] [--set PATH=VALUE ...] [--dry-run]` — create jobs from one source file or fan out over `source_dir`; per-source records are JSONL/YAML job objects. Repeatable `--set` paths overlay inline dotted-path values onto each created job's configuration.
+- `clipmorph job list [--status STATUS]`, `clipmorph job get ID [--uploads|--metrics|--artifacts]`, `clipmorph job update ID [--patch FILE [--reopen] | --cancel [--attempt-id ID] [--yes] | --metrics-pull | --render [--group GID] | --upload [--platform PLATFORM] [--attempt-id ID]]`, `clipmorph job delete ID --yes` — inspect and manage the job lifecycle. `job get --uploads|--metrics|--artifacts` shows one aspect (with `--status`/`--platform`/`--since` filters and `--dimensions`); exactly one action flag per `job update`; `--set` overlays inline values onto `--patch` or `--upload` (rejected with the remaining actions and with retries).
+- `clipmorph job run ID [--set PATH=VALUE ...] [--yes] [--json]` — the only pipeline-running command: processes checkpoints, and at each review gate shows the checkpoint content and prompts an accept/edit/stop decision interactively (an edit object is a YAML/JSON file path for the checkpoint; a conversion gate accept addresses every awaiting group). The upload gate offers `[g] generate suggestions` when the suggestions block is absent or its rows are stale (content-hash mismatch), and `[a] accept suggestions` for all rows or a chosen platform subset, driving the review draft inline. `--yes` accepts every gate without prompting and submits the upload attempts immediately; a future `schedule.publish_at` still defers to its timer. Exits `1` when the run failed.
 - `clipmorph job artifacts list|preview|download|rename|delete|prune ...` — manage registered artifact revisions; `prune` applies the `app.yml:retention` policy.
 
 A directory `job create` scans the root of `app.yml:source_dir` only; unsupported or missing sources are skipped and reported per source, while valid jobs still proceed (no group manifest is persisted). The web API exposes the same lifecycle at `/api/v1/`; see `docs/CLI_WEB_PARITY.md` for the contract.
 
 Commands that report records — `auth status`, `job create`, `job list`, `job get`,
-`job run`, `job update`, `job cancel`, `job upload`, `job artifacts list`,
+`job run`, `job update`, `job artifacts list`,
 `job artifacts prune`, and `layout list|create|get` — render a formatted table
 for humans and print the machine-readable JSON payload when `--json` is passed.
 Colour is dropped automatically when output is redirected. `--data-dir` and
@@ -63,7 +63,8 @@ service with `Ctrl+C`.
 
 Running `clipmorph init` creates both `app.yml` and an adjacent `auth.yaml`.
 Use `--data-dir <path>` to choose a custom local data directory, or
-`--app-config <path>` to select an app configuration file. See
+`--config-path <path>` to write the template at a chosen path;
+`--app-config`/`--auth-config` regenerate an existing template. See
 [Authentication Setup](docs/AUTHENTICATION.md) for instructions on obtaining
 every value and filling in the provider sections. For example:
 

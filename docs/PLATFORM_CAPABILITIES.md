@@ -126,12 +126,12 @@ than a permanent no.
 
 YouTube accepts a scheduled publication only on a private video, so a
 scheduled insert forces `privacyStatus=private` regardless of the configured
-`upload.platforms.youtube.privacy_status`; an unscheduled insert is unchanged.
+`platforms.youtube.privacy_status`; an unscheduled insert is unchanged.
 A successful platform-scheduled attempt is recorded as `scheduled`, not
 `published`: the platform still holds the publication, and only the platform
 knows when it became visible, so the terminal flip belongs to the metrics pull
 rather than to a local guess. Because the platform holds the post, cancelling
-it is a remote action — `job cancel-scheduled` (web
+it is a remote action — `job update ID --cancel --attempt-id A` (web
 `DELETE /api/v1/jobs/{id}/scheduled/{attempt_id}`) calls the adapter hook
 instead of a local timer, and a rerender that supersedes an armed schedule
 deletes the held post on a best-effort basis.

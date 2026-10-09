@@ -28,7 +28,10 @@ WIDE_TERMINAL = {"COLUMNS": "200", "TERM": "dumb", "NO_COLOR": "1"}
 # Global options are declared once in clipmorph.cli, on the root callback and
 # on every leaf command, so they are accepted before a group and after a leaf
 # command but not between a group and its subcommand. Every leaf manifest entry
-# therefore ends with them; group entries carry their own options only.
+# therefore ends with them; group entries carry their own options only. `init`
+# is the one exception: it does not re-register the global --app-config path
+# option because that name is its --app-config regeneration mode flag (#239),
+# so its manifest lists --data-dir alone after the local flags.
 GLOBAL_OPTIONS = ("--data-dir", "--app-config")
 
 # One entry per command: command path -> (options, subcommands, arguments).
@@ -38,7 +41,8 @@ COMMANDS: dict[tuple[str, ...], tuple[tuple[str, ...], tuple[str, ...],
                                      tuple[tuple[str, bool], ...]]] = {
     (): (GLOBAL_OPTIONS, ("init", "web", "doctor", "auth", "job", "layout",
                            "metrics"), ()),
-    ("init",): (("--config-path",) + GLOBAL_OPTIONS, (), ()),
+    ("init",): (("--config-path", "--app-config", "--auth-config", "--data-dir"),
+            (), ()),
     ("web",): (("--host", "--port") + GLOBAL_OPTIONS, (), ()),
     ("doctor",): (("--json", "--source") + GLOBAL_OPTIONS, (), ()),
     ("auth",): ((), ("status", "set", "twitter"), ()),
@@ -47,38 +51,22 @@ COMMANDS: dict[tuple[str, ...], tuple[tuple[str, ...], tuple[str, ...],
     ("auth", "set"): (GLOBAL_OPTIONS, (), (("platform", True),)),
     ("auth", "twitter"): (GLOBAL_OPTIONS, (), ()),
     ("job",): ((), ("create", "list", "get", "update", "delete",
-                    "run", "cancel", "cancel-scheduled", "render",
-                    "upload", "uploads", "metrics", "suggest", "accept-suggestions",
-                    "artifacts"), ()),
+                    "run", "artifacts"), ()),
     ("job", "create"): (("--job-configs", "--config-dir", "--dry-run", "--yes",
-                         "--json") + GLOBAL_OPTIONS, (),
+                         "--set", "--json") + GLOBAL_OPTIONS, (),
                         (("source", True),)),
     ("job", "list"): (("--status", "--json") + GLOBAL_OPTIONS, (), ()),
-    ("job", "get"): (("--json",) + GLOBAL_OPTIONS, (), (("job_id", True),)),
-    ("job", "update"): (("--patch", "--reopen", "--json") + GLOBAL_OPTIONS, (),
-                        (("job_id", True),)),
+    ("job", "get"): (("--uploads", "--metrics", "--artifacts", "--status",
+                      "--platform", "--since", "--dimensions", "--json")
+                     + GLOBAL_OPTIONS, (), (("job_id", True),)),
+    ("job", "update"): (("--patch", "--cancel", "--metrics-pull", "--render",
+                         "--upload", "--reopen", "--group", "--platform",
+                         "--attempt-id", "--artifact-id",
+                         "--confirm-historical-artifact", "--set", "--yes",
+                         "--json") + GLOBAL_OPTIONS, (), (("job_id", True),)),
     ("job", "delete"): (("--yes",) + GLOBAL_OPTIONS, (), (("job_id", True),)),
-    ("job", "run"): (("--yes", "--json") + GLOBAL_OPTIONS, (),
+    ("job", "run"): (("--yes", "--set", "--json") + GLOBAL_OPTIONS, (),
                      (("job_id", True),)),
-    ("job", "cancel"): (("--yes", "--json") + GLOBAL_OPTIONS, (),
-                        (("job_id", True),)),
-    ("job", "render"): (("--group",) + GLOBAL_OPTIONS, (), (("job_id", True),)),
-    ("job", "upload"): (("--platform", "--attempt-id", "--artifact-id",
-                         "--confirm-historical-artifact", "--json")
-                        + GLOBAL_OPTIONS, (), (("upload_args", False),)),
-    ("job", "uploads"): (("--status", "--platform", "--since", "--json")
-                         + GLOBAL_OPTIONS, (), (("job_id", True),)),
-    ("job", "metrics"): (("--pull", "--dimensions", "--json") + GLOBAL_OPTIONS,
-                          (),
-                         (("job_id", True),)),
-    ("job", "suggest"): (("--platform", "--provider", "--force", "--json")
-                         + GLOBAL_OPTIONS, (),
-                         (("job_id", True),)),
-    ("job", "accept-suggestions"): (("--platform", "--json") + GLOBAL_OPTIONS,
-                                    (),
-                                    (("job_id", True),)),
-    ("job", "cancel-scheduled"): (("--json",) + GLOBAL_OPTIONS, (),
-                                  (("job_id", True), ("attempt_id", True))),
     ("job", "artifacts",): ((), ("list", "preview", "download",
                                  "rename", "delete", "prune"), ()),
     ("job", "artifacts", "list"): (("--json",) + GLOBAL_OPTIONS, (),
@@ -104,12 +92,11 @@ COMMANDS: dict[tuple[str, ...], tuple[tuple[str, ...], tuple[str, ...],
                              (), ()),
 }
 
-# typer 0.27 renders the upload argument's metavar in the Arguments panel where
-# older typer renders the parameter name; accept either display.
+# The variadic upload argument that used to live on `job upload` is gone; no
+# command renders a custom metavar, so the alias table stays empty and the
+# parsed-argument display is always the declared parameter name.
 ARGUMENT_DISPLAY_ALIASES: dict[tuple[str, ...],
-                              set[tuple[tuple[str, bool], ...]]] = {
-    ("job", "upload"): {(("ID | RETRY ID PLATFORM", False),)},
-}
+                              set[tuple[tuple[str, bool], ...]]] = {}
 
 # rich downgrades rounded corners to square on legacy Windows consoles, so
 # accept both families; the side border is the same glyph either way.

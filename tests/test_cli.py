@@ -33,6 +33,21 @@ def invoke(argv):
     return code, output.getvalue()
 
 
+def invoke_capture(argv):
+    """Run one command, returning ``(exit code, stdout, stderr)``.
+
+    Usage/configuration errors are printed to stderr, so message assertions
+    read both streams.
+    """
+    output = io.StringIO()
+    error = io.StringIO()
+    with patch.dict(os.environ, WIDE_TERMINAL), \
+            contextlib.redirect_stdout(output), \
+            contextlib.redirect_stderr(error):
+        code = run_cli(list(argv))
+    return code, output.getvalue(), error.getvalue()
+
+
 def invoke_json(argv):
     """Run one command and parse its ``--json`` payload."""
     code, output = invoke([*argv, "--json"])
@@ -146,6 +161,89 @@ class CliInitializationTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertEqual(config_path.read_text(encoding="utf-8"), "existing: true\n")
 
+    def test_init_app_config_flag_backs_up_and_regenerates_only_the_app_config(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            app_path = data_dir / "app.yml"
+            app_path.parent.mkdir(parents=True)
+            app_path.write_text("existing: true\n", encoding="utf-8")
+            auth_path = data_dir / "auth.yaml"
+            auth_path.write_text("existing auth\n", encoding="utf-8")
+
+            result, output = invoke(
+                ["--data-dir", str(data_dir), "init", "--app-config"])
+
+            self.assertEqual(result, 0)
+            self.assertIn("Regenerated", output)
+            self.assertIn("Backed up", output)
+            self.assertEqual((data_dir / "app.yml.bak").read_text(encoding="utf-8"),
+                             "existing: true\n")
+            self.assertIn("general:", app_path.read_text(encoding="utf-8"))
+            # Selective regeneration never touches the other template.
+            self.assertEqual(auth_path.read_text(encoding="utf-8"),
+                             "existing auth\n")
+            self.assertFalse((data_dir / "auth.yaml.bak").exists())
+
+    def test_init_auth_config_flag_backs_up_and_regenerates_only_the_auth_config(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            app_path = data_dir / "app.yml"
+            app_path.parent.mkdir(parents=True)
+            app_path.write_text("existing app\n", encoding="utf-8")
+            auth_path = data_dir / "auth.yaml"
+            auth_path.write_text("old auth\n", encoding="utf-8")
+
+            result, output = invoke(
+                ["--data-dir", str(data_dir), "init", "--auth-config"])
+
+            self.assertEqual(result, 0)
+            self.assertIn("Regenerated", output)
+            self.assertEqual((data_dir / "auth.yaml.bak").read_text(encoding="utf-8"),
+                             "old auth\n")
+            self.assertIn("auth_schema_version",
+                          auth_path.read_text(encoding="utf-8"))
+            self.assertEqual(app_path.read_text(encoding="utf-8"),
+                             "existing app\n")
+            self.assertFalse((data_dir / "app.yml.bak").exists())
+
+    def test_init_both_regen_flags_backup_and_regenerate_both_templates(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            app_path = data_dir / "app.yml"
+            app_path.parent.mkdir(parents=True)
+            app_path.write_text("existing app\n", encoding="utf-8")
+            auth_path = data_dir / "auth.yaml"
+            auth_path.write_text("existing auth\n", encoding="utf-8")
+
+            result, output = invoke(
+                ["--data-dir", str(data_dir), "init",
+                 "--app-config", "--auth-config"])
+
+            self.assertEqual(result, 0)
+            self.assertEqual((data_dir / "app.yml.bak").read_text(encoding="utf-8"),
+                             "existing app\n")
+            self.assertEqual((data_dir / "auth.yaml.bak").read_text(encoding="utf-8"),
+                             "existing auth\n")
+            self.assertIn("general:", app_path.read_text(encoding="utf-8"))
+            self.assertIn("auth_schema_version",
+                          auth_path.read_text(encoding="utf-8"))
+
+    def test_init_regen_backup_overwrites_a_stale_backup(self):
+        """A regeneration replaces the previous ``.bak`` instead of keeping it."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            app_path = data_dir / "app.yml"
+            app_path.parent.mkdir(parents=True)
+            app_path.write_text("current app\n", encoding="utf-8")
+            backup_path = data_dir / "app.yml.bak"
+            backup_path.write_text("stale backup\n", encoding="utf-8")
+
+            invoke(["--data-dir", str(data_dir), "init", "--app-config"])
+
+            self.assertEqual(backup_path.read_text(encoding="utf-8"),
+                             "current app\n")
+            self.assertIn("general:", app_path.read_text(encoding="utf-8"))
+
 
 class CliDataDirectoryTests(unittest.TestCase):
     def test_data_dir_is_accepted_before_and_after_the_subcommand(self):
@@ -231,14 +329,23 @@ class CliExitCodeTests(unittest.TestCase):
             self.assertEqual(result, 2)
             self.assertTrue(JobManifest.load(manifest.job_id, data_dir / "jobs"))
 
-    def test_upload_without_a_job_id_is_a_usage_error(self):
+    def test_consolidated_job_commands_no_longer_parse(self):
+        """The eight subcommands removed by #240 are usage errors, not aliases."""
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
             (data_dir / "sources").mkdir(parents=True)
 
-            result, _ = invoke(["--data-dir", str(data_dir), "job", "upload"])
-
-            self.assertEqual(result, 2)
+            for argv in (["job", "cancel", "job-id"],
+                         ["job", "cancel-scheduled", "job-id", "attempt-id"],
+                         ["job", "render", "job-id"],
+                         ["job", "upload"],
+                         ["job", "uploads", "job-id"],
+                         ["job", "metrics", "job-id"],
+                         ["job", "suggest", "job-id"],
+                         ["job", "accept-suggestions", "job-id"]):
+                with self.subTest(argv=argv):
+                    result, _ = invoke(["--data-dir", str(data_dir), *argv])
+                    self.assertEqual(result, 2)
 
 
 class CliHumanOutputTests(unittest.TestCase):
@@ -423,33 +530,85 @@ class CliHumanOutputTests(unittest.TestCase):
             self.assertIn("[red]watch out[/]", output)
             self.assertIn("boom [bold]now[/]", output)
 
-    def test_job_suggest_and_accept_suggestions_shapes(self):
+    def test_upload_gate_generates_and_accepts_suggestions(self):
+        """[g] and [a] at the upload gate drive the suggestion flow (#240)."""
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
-            source_dir = data_dir / "sources"
-            source_dir.mkdir(parents=True)
-            (source_dir / "clip.mp4").write_bytes(b"video")
-            service = JobService(data_dir)
-            manifest = service.create_job("clip.mp4", {
-                "conversion": {"skip": True, "subtitles": {"skip": True}}})
-            manifest.transition_checkpoint(
-                "upload", "awaiting_review",
-                manifest.checkpoints["upload"]["revision"], service.jobs_dir)
-            service.close()
+            manifest, _source = _seed_review_at_upload(data_dir)
 
-            code, result = invoke_json([
-                "--data-dir", str(data_dir), "job", "suggest", manifest.job_id])
-            self.assertEqual(code, 0)
-            self.assertIn("upload", result)
-            self.assertIn("suggestions", result["upload"])
-            self.assertIn("youtube", result["upload"]["suggestions"])
+            with patch("clipmorph.cli.sys.stdin.isatty", return_value=True), \
+                    patch("clipmorph.cli._prompt_choice",
+                          side_effect=["g", "a", "all", "y"]), \
+                    patch("clipmorph.upload_attempts.execute_upload_pipeline",
+                          side_effect=_run_success):
+                result, _ = invoke(["--data-dir", str(data_dir), "job", "run",
+                                    manifest.job_id])
 
-            code, result = invoke_json([
-                "--data-dir", str(data_dir), "job", "accept-suggestions",
-                manifest.job_id, "--platform", "youtube"])
-            self.assertEqual(code, 0)
-            self.assertIn("upload", result)
-            self.assertIn("content", result["upload"])
+            self.assertEqual(result, 0)
+            saved = JobManifest.load(manifest.job_id, data_dir / "jobs")
+            content = saved.configuration["upload"]["content"]
+            # The template provider copied its rows into the draft on [a].
+            self.assertTrue(content["title"])
+            self.assertEqual(content["description"], "clip.mp4")
+            # Accepted rows are cleared; only the provider scalars survive.
+            self.assertEqual(saved.configuration["upload"]["suggestions"],
+                             {"provider": "template", "model": None})
+            self.assertEqual(saved.status, "completed")
+
+    def test_upload_gate_accepts_a_chosen_platform_subset(self):
+        """[a] with a platform list accepts only those rows (#240)."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest, _source = _seed_review_at_upload(data_dir)
+
+            with patch("clipmorph.cli.sys.stdin.isatty", return_value=True), \
+                    patch("clipmorph.cli._prompt_choice", side_effect=[
+                        "g", "a", "youtube", "y"]), \
+                    patch("clipmorph.upload_attempts.execute_upload_pipeline",
+                          side_effect=_run_success):
+                result, _ = invoke(["--data-dir", str(data_dir), "job", "run",
+                                    manifest.job_id])
+
+            self.assertEqual(result, 0)
+            saved = JobManifest.load(manifest.job_id, data_dir / "jobs")
+            # youtube's row landed in the draft; the other platforms' rows
+            # stay pending for a later selective accept.
+            self.assertTrue(saved.configuration["upload"]["content"]["title"])
+            remaining = {
+                name for name in saved.configuration["upload"]["suggestions"]
+                if name not in {"provider", "model"}}
+            self.assertTrue(remaining)
+            self.assertNotIn("youtube", remaining)
+
+    def test_upload_gate_offers_generation_only_when_absent_or_stale(self):
+        """[g] disappears once the rows match the draft; [a] appears then."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest, _source = _seed_review_at_upload(data_dir)
+            prompts = []
+            answers = ["g", "y"]
+
+            def record_choice(text):
+                prompts.append(text)
+                return answers.pop(0)
+
+            with patch("clipmorph.cli.sys.stdin.isatty", return_value=True), \
+                    patch("clipmorph.cli._prompt_choice",
+                          side_effect=record_choice), \
+                    patch("clipmorph.upload_attempts.execute_upload_pipeline",
+                          side_effect=_run_success):
+                result, _ = invoke(["--data-dir", str(data_dir), "job", "run",
+                                    manifest.job_id])
+
+            self.assertEqual(result, 0)
+            # First prompt: no rows yet, so generation is offered but there
+            # is nothing to accept.
+            self.assertIn("[g] generate suggestions", prompts[0])
+            self.assertNotIn("[a] accept suggestions", prompts[0])
+            # Second prompt: the rows now carry the current content hash, so
+            # regeneration is not offered but acceptance is.
+            self.assertNotIn("[g] generate suggestions", prompts[1])
+            self.assertIn("[a] accept suggestions", prompts[1])
 
     def test_human_output_survives_a_locale_that_cannot_encode_the_data(self):
         """Non-encodable titles become escapes instead of a codec crash.
@@ -763,7 +922,7 @@ class JobCommandTests(unittest.TestCase):
                  if record["status"] == "skipped"},
                 {gid for gid in groups if gid != group_id})
 
-    def test_job_render_group_flag_stales_only_that_group(self):
+    def test_update_render_group_flag_stales_only_that_group(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
             manifest = seed_job(data_dir, configuration={
@@ -788,8 +947,8 @@ class JobCommandTests(unittest.TestCase):
 
             with patch("clipmorph.workflow.execute_job") as runner:
                 result, _ = invoke([
-                    "--data-dir", str(data_dir), "job", "render",
-                    manifest.job_id, "--group", group_id])
+                    "--data-dir", str(data_dir), "job", "update",
+                    manifest.job_id, "--render", "--group", group_id])
                 self.assertEqual(result, 0, "render must not fail on --group")
                 self.assertTrue(runner.called)
 
@@ -834,6 +993,451 @@ class JobCommandTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(result, {"pruned": [obsolete_id], "bytes_freed": 12})
             self.assertFalse(obsolete_path.exists())
+
+
+class JobCommandConsolidationTests(unittest.TestCase):
+    """#240 command consolidation and the `--set` overlay contract."""
+
+    def _created_job(self, data_dir):
+        source_dir = data_dir / "sources"
+        source_dir.mkdir(parents=True)
+        (source_dir / "clip.mp4").write_bytes(b"video")
+        return seed_job(data_dir)
+
+    def test_update_requires_exactly_one_action_flag(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest = self._created_job(data_dir)
+
+            code, _, error = invoke_capture(["--data-dir", str(data_dir), "job",
+                                             "update", manifest.job_id])
+
+            self.assertEqual(code, 2)
+            self.assertIn("requires one action flag", error)
+
+    def test_update_rejects_conflicting_action_flags(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest = self._created_job(data_dir)
+            patch_path = Path(temp_dir) / "patch.yml"
+            patch_path.write_text("general:\n  no_confirm: true\n",
+                                  encoding="utf-8")
+
+            code, _, error = invoke_capture(["--data-dir", str(data_dir), "job",
+                                             "update", manifest.job_id,
+                                             "--patch", str(patch_path),
+                                             "--cancel", "--yes"])
+
+            self.assertEqual(code, 2)
+            self.assertIn("at most one action flag", error)
+
+    def test_update_cancel_without_yes_is_a_configuration_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest = self._created_job(data_dir)
+
+            code, _ = invoke(["--data-dir", str(data_dir), "job", "update",
+                              manifest.job_id, "--cancel"])
+
+            self.assertEqual(code, 2)
+
+    def test_update_cancel_with_attempt_id_needs_no_confirmation(self):
+        """`--cancel --attempt-id` is the old cancel-scheduled; no --yes."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest = self._created_job(data_dir)
+            payload = {"job_id": manifest.job_id, "attempt_id": "sched-1",
+                       "platform": "youtube", "scheduled_via": "local",
+                       "status": "cancelled"}
+
+            with patch("clipmorph.service.JobService.cancel_scheduled_upload",
+                       return_value=payload) as cancel:
+                code, output = invoke(["--data-dir", str(data_dir), "job",
+                                       "update", manifest.job_id, "--cancel",
+                                       "--attempt-id", "sched-1"])
+
+            self.assertEqual(code, 0)
+            cancel.assert_called_once_with(manifest.job_id, "sched-1")
+            self.assertIn("sched-1", output)
+
+    def test_update_rejects_attempt_id_with_patch(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest = self._created_job(data_dir)
+            patch_path = Path(temp_dir) / "patch.yml"
+            patch_path.write_text("general:\n  no_confirm: true\n",
+                                  encoding="utf-8")
+
+            code, _ = invoke(["--data-dir", str(data_dir), "job", "update",
+                              manifest.job_id, "--patch", str(patch_path),
+                              "--attempt-id", "attempt-1"])
+
+            self.assertEqual(code, 2)
+
+    def test_update_rejects_set_with_non_draft_actions(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest = self._created_job(data_dir)
+
+            for extra in (["--cancel", "--yes"], ["--metrics-pull"],
+                          ["--render"]):
+                with self.subTest(action=extra[0]):
+                    code, _ = invoke(["--data-dir", str(data_dir), "job",
+                                      "update", manifest.job_id, *extra,
+                                      "--set", "general.no_confirm=true"])
+                    self.assertEqual(code, 2)
+
+    def test_update_upload_rejects_set_with_attempt_id(self):
+        """A retry uses the failed attempt's frozen settings (#240)."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest = self._created_job(data_dir)
+
+            code, _, error = invoke_capture(["--data-dir", str(data_dir), "job",
+                                             "update", manifest.job_id, "--upload",
+                                             "--attempt-id", "attempt-1",
+                                             "--platform", "youtube",
+                                             "--set", "upload.content.title=X"])
+
+            self.assertEqual(code, 2)
+            self.assertIn("frozen settings", error)
+
+    def test_get_rejects_multiple_aspect_flags(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest = self._created_job(data_dir)
+
+            code, _ = invoke(["--data-dir", str(data_dir), "job", "get",
+                              manifest.job_id, "--uploads", "--metrics"])
+
+            self.assertEqual(code, 2)
+
+    def test_get_aspect_filters_require_their_aspect(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest = self._created_job(data_dir)
+
+            code, _ = invoke(["--data-dir", str(data_dir), "job", "get",
+                              manifest.job_id, "--status", "created"])
+            self.assertEqual(code, 2)
+
+            code, _ = invoke(["--data-dir", str(data_dir), "job", "get",
+                              manifest.job_id, "--dimensions"])
+            self.assertEqual(code, 2)
+
+    def test_create_set_coerces_scalars_and_accepts_a_config_prefix(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            source_dir = data_dir / "sources"
+            source_dir.mkdir(parents=True)
+            (source_dir / "clip.mp4").write_bytes(b"video")
+
+            code, _ = invoke(["--data-dir", str(data_dir), "job", "create",
+                              str(source_dir),
+                              "--set", "config.general.no_confirm=true",
+                              "--set", "conversion.skip=false",
+                              "--set", "upload.content.tags=[\"#a\",\"#b\"]"])
+            self.assertEqual(code, 0)
+
+            manifest = JobManifest.load(
+                next((data_dir / "jobs").glob("*")).name, data_dir / "jobs")
+            self.assertTrue(manifest.configuration["general"]["no_confirm"])
+            self.assertFalse(manifest.configuration["conversion"]["skip"])
+            self.assertEqual(manifest.configuration["upload"]["content"]["tags"],
+                             ["#a", "#b"])
+
+    def test_create_set_applies_the_same_path_last_wins(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            source_dir = data_dir / "sources"
+            source_dir.mkdir(parents=True)
+            (source_dir / "clip.mp4").write_bytes(b"video")
+
+            code, _ = invoke(["--data-dir", str(data_dir), "job", "create",
+                              str(source_dir),
+                              "--set", "upload.content.title=First",
+                              "--set", "upload.content.title=Second"])
+            self.assertEqual(code, 0)
+
+            manifest = JobManifest.load(
+                next((data_dir / "jobs").glob("*")).name, data_dir / "jobs")
+            self.assertEqual(manifest.configuration["upload"]["content"]["title"],
+                             "Second")
+
+    def test_create_set_platform_flat_key_lands_in_the_manifest(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            source_dir = data_dir / "sources"
+            source_dir.mkdir(parents=True)
+            (source_dir / "clip.mp4").write_bytes(b"video")
+
+            code, _ = invoke(["--data-dir", str(data_dir), "job", "create",
+                              str(source_dir),
+                              "--set", "platforms.instagram.is_ai_generated=true"])
+            self.assertEqual(code, 0)
+
+            manifest = JobManifest.load(
+                next((data_dir / "jobs").glob("*")).name, data_dir / "jobs")
+            self.assertTrue(
+                manifest.configuration["platforms"]["instagram"]
+                ["is_ai_generated"])
+
+    def test_set_unknown_key_reports_closest_valid(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            source_dir = data_dir / "sources"
+            source_dir.mkdir(parents=True)
+            (source_dir / "clip.mp4").write_bytes(b"video")
+
+            code, _, error = invoke_capture(["--data-dir", str(data_dir), "job",
+                                             "create", str(source_dir),
+                                             "--set", "general.nope=true"])
+            self.assertEqual(code, 2)
+            self.assertIn("Unknown general field(s): nope", error)
+            self.assertIn("closest valid", error)
+
+    def test_set_unknown_platform_leaf_reports_closest_valid(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            source_dir = data_dir / "sources"
+            source_dir.mkdir(parents=True)
+            (source_dir / "clip.mp4").write_bytes(b"video")
+
+            code, _, error = invoke_capture(["--data-dir", str(data_dir), "job",
+                                             "create", str(source_dir),
+                                             "--set", "platforms.instagram.bogus=1"])
+            self.assertEqual(code, 2)
+            self.assertIn("Unknown platforms.instagram field(s): bogus", error)
+
+    def test_set_type_mismatch_names_expected_type(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            source_dir = data_dir / "sources"
+            source_dir.mkdir(parents=True)
+            (source_dir / "clip.mp4").write_bytes(b"video")
+
+            code, _, error = invoke_capture(["--data-dir", str(data_dir), "job",
+                                             "create", str(source_dir),
+                                             "--set", "general.no_confirm=maybe"])
+            self.assertEqual(code, 2)
+            self.assertIn("general.no_confirm must be a boolean", error)
+
+    def test_update_upload_set_overrides_the_draft_before_submitting(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest, _source = _seed_review_at_upload(data_dir)
+
+            with patch("clipmorph.upload_attempts.execute_upload_pipeline",
+                       side_effect=_run_success):
+                code, output = invoke(["--data-dir", str(data_dir), "job",
+                                       "update", manifest.job_id, "--upload",
+                                       "--set", "upload.content.title=Draft title"])
+
+            self.assertEqual(code, 0)
+            self.assertIn("Upload attempts", output)
+            saved = JobManifest.load(manifest.job_id, data_dir / "jobs")
+            self.assertEqual(
+                saved.configuration["upload"]["content"]["title"], "Draft title")
+            self.assertEqual(saved.status, "completed")
+
+    def test_update_upload_set_platform_flat_key_reaches_the_draft(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest, _source = _seed_review_at_upload(data_dir)
+
+            with patch("clipmorph.upload_attempts.execute_upload_pipeline",
+                       side_effect=_run_success):
+                code, _ = invoke(["--data-dir", str(data_dir), "job", "update",
+                                  manifest.job_id, "--upload",
+                                  "--set", "platforms.instagram.is_ai_generated=true"])
+
+            self.assertEqual(code, 0)
+            saved = JobManifest.load(manifest.job_id, data_dir / "jobs")
+            self.assertTrue(
+                saved.configuration["platforms"]["instagram"]
+                ["is_ai_generated"])
+
+    def test_run_set_applies_the_overlay_before_running(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest = self._created_job(data_dir)
+
+            with patch("clipmorph.workflow.execute_job") as runner:
+                code, _ = invoke(["--data-dir", str(data_dir), "job", "run",
+                                  manifest.job_id,
+                                  "--set", "general.no_confirm=true"])
+
+            self.assertEqual(code, 0)
+            runner.assert_called_once()
+            saved = JobManifest.load(manifest.job_id, data_dir / "jobs")
+            self.assertTrue(saved.configuration["general"]["no_confirm"])
+
+    def test_update_upload_with_attempt_id_retries_the_frozen_attempt(self):
+        """`--upload --attempt-id` is the old upload retry path (#240)."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest = self._created_job(data_dir)
+            result = {
+                "job_id": manifest.job_id,
+                "attempts": [{
+                    "platform": "youtube",
+                    "attempt_id": "attempt-1",
+                    "status": "published",
+                    "scheduled_publish_at": None,
+                    "result": {
+                        "platform_post_id": "retry-post",
+                        "platform_url": "https://youtu.be/retry-post",
+                        "published_at": "2026-10-01T00:00:00+00:00",
+                    },
+                }],
+                "scheduled": False,
+                "status_url": None,
+                "detection": {},
+            }
+
+            with patch("clipmorph.service.JobService.retry_upload",
+                       return_value=result) as retry:
+                code, output = invoke(["--data-dir", str(data_dir), "job",
+                                       "update", manifest.job_id, "--upload",
+                                       "--attempt-id", "attempt-1",
+                                       "--platform", "youtube"])
+
+            self.assertEqual(code, 0)
+            retry.assert_called_once_with(
+                manifest.job_id, "youtube", "attempt-1", None, False)
+            self.assertIn("attempt-1", output)
+
+            # The human table prints the summary columns; the result fields
+            # ride in the --json payload, unchanged from the old command.
+            with patch("clipmorph.service.JobService.retry_upload",
+                       return_value=result):
+                code, payload = invoke_json(["--data-dir", str(data_dir),
+                                             "job", "update",
+                                             manifest.job_id, "--upload",
+                                             "--attempt-id", "attempt-1",
+                                             "--platform", "youtube"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(
+                payload["attempts"][0]["result"]["platform_post_id"],
+                "retry-post")
+
+    def test_update_upload_retry_requires_exactly_one_platform(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest = self._created_job(data_dir)
+
+            code, _, error = invoke_capture(["--data-dir", str(data_dir), "job",
+                                             "update", manifest.job_id,
+                                             "--upload", "--attempt-id",
+                                             "attempt-1"])
+
+            self.assertEqual(code, 2)
+            self.assertIn("exactly one --platform", error)
+
+    def test_get_artifacts_renders_the_same_rows_as_artifacts_list(self):
+        """`job get --artifacts` reproduces `job artifacts list` output."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            source_dir = data_dir / "sources"
+            source_dir.mkdir()
+            (source_dir / "clip.mp4").write_bytes(b"video")
+            service = JobService(data_dir)
+            manifest = service.create_job("clip.mp4", {
+                "conversion": {"skip": True, "subtitles": {"skip": True}}})
+            artifact_dir = data_dir / "output" / manifest.job_id
+            artifact_dir.mkdir(parents=True)
+            (artifact_dir / "clip.mp4").write_bytes(b"0" * 4)
+            manifest.record_artifact("primary", artifact_dir / "clip.mp4",
+                                     service.jobs_dir)
+            manifest.save(service.jobs_dir)
+            service.close()
+
+            code_get, output_get = invoke(["--data-dir", str(data_dir), "job",
+                                           "get", manifest.job_id,
+                                           "--artifacts"])
+            code_list, output_list = invoke(["--data-dir", str(data_dir),
+                                             "job", "artifacts", "list",
+                                             manifest.job_id])
+
+            self.assertEqual(code_get, 0)
+            self.assertEqual(code_list, 0)
+            self.assertEqual(_normalize_box(output_get),
+                             _normalize_box(output_list))
+            self.assertIn("primary", output_get)
+
+    def test_get_uploads_json_includes_the_attempt_result_fields(self):
+        """`get --uploads --json` keeps the old attempt record shape (#240)."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest = self._created_job(data_dir)
+            attempts = [{
+                "platform": "youtube",
+                "attempt_id": "attempt-1",
+                "status": "published",
+                "scheduled_publish_at": None,
+                "result": {
+                    "platform_post_id": "post-1",
+                    "platform_url": "https://youtu.be/post-1",
+                    "published_at": "2026-10-01T00:00:00+00:00",
+                    "progress_percent": 100,
+                },
+            }]
+
+            with patch("clipmorph.service.JobService.list_upload_attempts",
+                       return_value=attempts) as listing:
+                code, records = invoke_json(["--data-dir", str(data_dir),
+                                             "job", "get", manifest.job_id,
+                                             "--uploads", "--status",
+                                             "published"])
+
+            self.assertEqual(code, 0)
+            listing.assert_called_once_with(
+                manifest.job_id, "published", None, None)
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["result"]["platform_post_id"], "post-1")
+            self.assertEqual(records[0]["result"]["platform_url"],
+                             "https://youtu.be/post-1")
+            self.assertEqual(records[0]["result"]["published_at"],
+                             "2026-10-01T00:00:00+00:00")
+
+    def test_get_uploads_table_pins_the_summary_columns(self):
+        """The table column set is unchanged from the old `job uploads`."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest = self._created_job(data_dir)
+            attempts = [{
+                "platform": "youtube",
+                "attempt_id": "attempt-1",
+                "status": "published",
+                "scheduled_publish_at": "2026-10-01T00:00:00+00:00",
+                "result": {"platform_post_id": "post-1"},
+            }]
+
+            with patch("clipmorph.service.JobService.list_upload_attempts",
+                       return_value=attempts):
+                code, output = invoke(["--data-dir", str(data_dir), "job",
+                                       "get", manifest.job_id, "--uploads"])
+
+            self.assertEqual(code, 0)
+            # rich renders the pinned column set in Title Case.
+            for header in ("Platform", "Attempt id", "Status",
+                           "Scheduled publish at"):
+                self.assertIn(header, output)
+            self.assertIn("attempt-1", output)
+
+    def test_upload_draft_key_value_positional_is_rejected(self):
+        """The removed KEY=VALUE mini-syntax is a usage error (#240)."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            manifest = self._created_job(data_dir)
+
+            code, _, error = invoke_capture(["--data-dir", str(data_dir), "job",
+                                             "update", manifest.job_id,
+                                             "--upload", 'title="x"'])
+
+            self.assertEqual(code, 2)
+            self.assertIn("extra argument", error)
 
 
 class AuthStatusProbeTests(unittest.TestCase):
@@ -942,42 +1546,45 @@ class AuthStatusProbeTests(unittest.TestCase):
 
 
 class CliMetricsTests(unittest.TestCase):
-    def test_job_metrics_list_empty_state(self):
+    def test_metrics_get_reads_stored_snapshots_without_pulling(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
             manifest = seed_job(data_dir)
 
-            code, output = invoke(["--data-dir", str(data_dir), "job",
-                                   "metrics", manifest.job_id])
+            with patch("clipmorph.service.JobService.pull_metrics") as pull:
+                code, output = invoke(["--data-dir", str(data_dir), "job",
+                                       "get", manifest.job_id, "--metrics"])
 
             self.assertEqual(code, 0)
             self.assertIn("Metrics", output)
+            pull.assert_not_called()
 
-    def test_job_metrics_list_json(self):
+    def test_metrics_get_json_empty_state(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
             manifest = seed_job(data_dir)
 
             code, records = invoke_json(["--data-dir", str(data_dir), "job",
-                                         "metrics", manifest.job_id])
+                                         "get", manifest.job_id, "--metrics"])
 
             self.assertEqual(code, 0)
             self.assertEqual(records, [])
 
-    def test_job_metrics_pull_triggers_pull(self):
+    def test_update_metrics_pull_triggers_pull(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
             manifest = seed_job(data_dir)
+            payload = {"job_id": manifest.job_id, "snapshots": [], "pulled": 0}
 
             with patch("clipmorph.service.JobService.pull_metrics",
-                       return_value={"job_id": manifest.job_id, "snapshots": [],
-                                     "pulled": 0}) as pull:
+                       return_value=payload) as pull:
                 code, records = invoke_json(["--data-dir", str(data_dir), "job",
-                                             "metrics", manifest.job_id, "--pull"])
+                                             "update", manifest.job_id,
+                                             "--metrics-pull"])
 
             self.assertEqual(code, 0)
             pull.assert_called_once_with(manifest.job_id)
-            self.assertEqual(records, [])
+            self.assertEqual(records, payload)
 
     def _seed_snapshot(self, data_dir, manifest, **overrides):
         record = {
@@ -991,7 +1598,7 @@ class CliMetricsTests(unittest.TestCase):
         record.update(overrides)
         append_snapshot(data_dir / "jobs" / manifest.job_id, record)
 
-    def test_job_metrics_dimensions_json(self):
+    def test_metrics_get_dimensions_json(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
             save_app_configuration(data_dir / "app.yml", {
@@ -1004,8 +1611,8 @@ class CliMetricsTests(unittest.TestCase):
             self._seed_snapshot(data_dir, manifest, duration_seconds=45)
 
             code, records = invoke_json([
-                "--data-dir", str(data_dir), "job", "metrics",
-                manifest.job_id, "--dimensions"])
+                "--data-dir", str(data_dir), "job", "get",
+                manifest.job_id, "--metrics", "--dimensions"])
 
             self.assertEqual(code, 0)
             self.assertEqual(len(records), 1)
@@ -1015,15 +1622,15 @@ class CliMetricsTests(unittest.TestCase):
             self.assertEqual(record["duration_seconds"], 45)
             self.assertIsNone(record["platform_overrides"])
 
-    def test_job_metrics_dimensions_table(self):
+    def test_metrics_get_dimensions_table(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
             manifest = seed_job(data_dir)
             self._seed_snapshot(data_dir, manifest)
 
             code, output = invoke([
-                "--data-dir", str(data_dir), "job", "metrics",
-                manifest.job_id, "--dimensions"])
+                "--data-dir", str(data_dir), "job", "get",
+                manifest.job_id, "--metrics", "--dimensions"])
 
             self.assertEqual(code, 0)
             self.assertIn("Metrics", output)
