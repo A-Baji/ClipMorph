@@ -244,6 +244,49 @@ class CliInitializationTests(unittest.TestCase):
                              "current app\n")
             self.assertIn("general:", app_path.read_text(encoding="utf-8"))
 
+    def test_init_app_config_flag_honors_config_path_targeting(self):
+        """``--app-config`` regenerates the ``--config-path`` target in place."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "custom" / "clipmorph.yaml"
+            target.parent.mkdir(parents=True)
+            target.write_text("existing: true\n", encoding="utf-8")
+
+            result, output = invoke(
+                ["init", "--config-path", str(target), "--app-config"])
+
+            self.assertEqual(result, 0)
+            self.assertIn(f"Regenerated {target}", output)
+            self.assertEqual(
+                (target.parent / "clipmorph.yaml.bak").read_text(encoding="utf-8"),
+                "existing: true\n")
+            self.assertIn("general:", target.read_text(encoding="utf-8"))
+            # Only the targeted file and its backup appear; nothing is written
+            # beside a default app.yml, and no auth sidecar is created.
+            self.assertEqual(
+                sorted(path.name for path in target.parent.iterdir()),
+                ["clipmorph.yaml", "clipmorph.yaml.bak"])
+
+    def test_init_auth_config_flag_honors_config_path_targeting(self):
+        """``--auth-config`` regenerates the auth sidecar beside ``--config-path``."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "custom" / "clipmorph.yaml"
+            target.parent.mkdir(parents=True)
+            auth_path = target.parent / "auth.yaml"
+            auth_path.write_text("old auth\n", encoding="utf-8")
+
+            result, output = invoke(
+                ["init", "--config-path", str(target), "--auth-config"])
+
+            self.assertEqual(result, 0)
+            self.assertIn(f"Regenerated {auth_path}", output)
+            self.assertEqual(
+                (target.parent / "auth.yaml.bak").read_text(encoding="utf-8"),
+                "old auth\n")
+            self.assertIn("auth_schema_version",
+                          auth_path.read_text(encoding="utf-8"))
+            # ``--auth-config`` never writes the app config target.
+            self.assertFalse(target.exists())
+
 
 class CliDataDirectoryTests(unittest.TestCase):
     def test_data_dir_is_accepted_before_and_after_the_subcommand(self):
