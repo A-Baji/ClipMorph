@@ -14,12 +14,9 @@ canonical reference (``storage.backend`` + ``storage.key``) and never a
 local ``path``. ``storage_key_for`` is the single place that derives a key
 from a local file and the artifact root.
 
-Phase 2 adds remote backends behind this same seam and must reuse the
-``google-cloud-storage`` client and ``GCS_BUCKET_NAME``/``GCP_*`` env naming
-already mirrored by
-``clipmorph/upload_pipeline/platforms/instagram.py`` rather than defining a
-second naming scheme; ``app.yml`` grows the backend-specific block beside
-``storage.backend``.
+Phase 2 adds remote backends behind this same seam and owns their credential
+env naming in the backend rather than in a platform adapter; ``app.yml``
+grows the backend-specific block beside ``storage.backend``.
 """
 
 from __future__ import annotations

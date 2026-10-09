@@ -19,7 +19,7 @@ field reappears.
 - [Where credentials live](#where-credentials-live)
 - [YouTube](#youtube-google_)
 - [Meta (shared `FACEBOOK_*`)](#meta-meta--the-shared-facebook_-app-and-user-token)
-  - [GCS hosting for Instagram](#gcs-hosting-for-instagram)
+  - [Instagram media hosting](#instagram-media-hosting)
 - [TikTok](#tiktok-tiktok_)
 - [Twitter / X](#twitter--x-twitter_)
 - [Hugging Face](#hugging-face-hugging_face_)
@@ -181,12 +181,16 @@ by hand-deriving a Page token.
 
 `clipmorph auth set facebook` prompts for the Meta fields (an empty prompt is
 skipped, so non-FL4B apps simply leave `config_id` unset), and
-`clipmorph auth set instagram` prompts for the Meta fields plus Instagram's
-`GCS_*`/`GCP_*` hosting block nested at `meta.instagram:`
-(below); both write the shared `meta:` section
+`clipmorph auth set instagram` prompts for the same shared Meta fields; both
+write the shared `meta:` section
 (schema version 2). A root `facebook:` or `instagram:` section
 is refused with an actionable error instead of migrated — move the values
-into `meta:` (and `meta.instagram:` for the hosting block).
+into `meta:`.
+
+Instagram publishes through Meta's resumable upload: the adapter creates a
+container with `upload_type=resumable` and streams the render bytes straight
+to Meta's upload host, so no Google Cloud Storage bucket, service account, or
+public URL is required.
 
 Permissions are attributed per adapter, not as one combined list. The
 Instagram adapter publishes through the **Instagram API with Facebook Login**
@@ -250,8 +254,8 @@ metrics adapter returns an `unavailable` snapshot with reason
    **Page settings → Connected accounts**, or Business Suite). That Page's
    numeric id is `page_id`.
 6. Generate the long-lived user access token (next section) and store it in
-   `access_token`.
-7. Configure GCS hosting as described below.
+   `access_token`. No remote staging is required: Meta's resumable upload
+   takes the render bytes directly.
 
 ### Credential generation and verification
 
@@ -332,118 +336,12 @@ listener, and it registers `https://localhost/` as the redirect URI:
   ([Page Publishing Authorization](https://www.facebook.com/business/m/one-sheeters/page-publishing-authorization)),
   then rerun the upload.
 
-## GCS hosting for Instagram
+## Instagram media hosting
 
-Instagram's container-publishing flow needs a publicly reachable video URL.
-ClipMorph meets that by uploading each render to a private Cloud Storage
-bucket, handing Meta a short-lived signed GET URL, and deleting the object
-afterwards. The bucket therefore has to be writable and deletable by a Google
-service account you control.
-
-### 1. Create the bucket
-
-1. Open the [Cloud Storage console](https://console.cloud.google.com/storage/browser)
-   and select the project that will own the bucket.
-2. Click **Create bucket**, set **Bucket name** (3–63 characters; lowercase
-   letters, numbers, dashes and underscores; globally unique, so prefix it with
-   something like `clipmorph-`), and pick a **Location**
-   ([create a bucket](https://cloud.google.com/storage/docs/creating-buckets)).
-   Choose a region near where your machine runs; Meta fetches the signed URL
-   from its own infrastructure, so a multi-region avoids cross-region latency.
-3. Choose the **default storage class**; Standard is right for short-lived
-   temporary media
-   ([storage classes](https://cloud.google.com/storage/docs/storage-classes)).
-4. Under **Advanced → Access control**, select **Uniform access** on a new
-   bucket. Uniform access disables per-object ACLs and is the recommended
-   default; it is also why the service account below needs an IAM role rather
-   than an object ACL
-   ([uniform bucket-level access](https://cloud.google.com/storage/docs/uniform-bucket-level-access)).
-5. Leave **Object public access prevention** on. The signed URL, not public
-   access, is what grants read access
-   ([public access prevention](https://cloud.google.com/storage/docs/public-access-prevention)).
-6. Leave **Retention** off — objects are deleted at the end of each upload, so
-   a lock would block that delete
-   ([retention policies](https://cloud.google.com/storage/docs/bucket-lock)).
-7. Create the bucket. Its name is the value of `gcs_bucket_name`; verify it in
-   the console's bucket list.
-
-### 2. Create the service account and grant the role
-
-1. Open **IAM & Admin → Service Accounts**
-   ([service accounts](https://cloud.google.com/iam/docs/service-accounts)),
-   click **Create service account**, name it something like
-   `clipmorph-instagram-uploader`, and continue without creating a key yet.
-2. On that service account's **IAM** page, click **Add users**. In the principal
-   picker select the service account itself, then grant the role below, bound
-   **on the bucket** rather than on the whole project — least privilege, and
-   the bucket is the only resource this identity touches.
-3. Grant `roles/storage.objectAdmin` on that one bucket
-   ([predefined storage roles](https://cloud.google.com/storage/docs/access-control/iam-roles)).
-   It is the narrowest predefined role covering all three operations the
-   adapter performs: `objects.create` for the upload and `objects.delete` for
-   the post-publish cleanup. The signed URL is produced locally with the
-   service account's own private key, so it needs no read permission on the
-   object.
-4. Tighter still, if you want a custom role: grant only `storage.objects.create`
-   and `storage.objects.delete` on `projects/_/buckets/<bucket>`
-   ([custom roles](https://cloud.google.com/iam/docs/creating-custom-roles)).
-5. Verify without exposing anything: the service account's **Permissions** tab
-   lists `roles/storage.objectAdmin` with the bucket as its resource, and
-   **Logging → Audit Logs** shows the role-binding event
-   ([audit logging](https://cloud.google.com/logging/docs/audit)).
-6. Back on the service account's **Keys** tab, click **Add key → Create new
-   key → JSON** and download the file
-   ([managing keys](https://cloud.google.com/iam/docs/keys-create-delete)).
-   That JSON is the source for the five `gcp_*` fields.
-
-### 3. Map the JSON key to `auth.yaml`
-
-The downloaded file has `"type": "service_account"` and a `project_id` matching
-the bucket's project. Copy each field across as follows:
-
-| JSON key in the downloaded file | `auth.yaml` field | Notes |
-| --- | --- | --- |
-| `private_key_id` | `gcp_private_key_id` | Key identifier; not secret on its own. |
-| `private_key` | `gcp_private_key` | **Multiline** — see below. |
-| `client_email` | `gcp_client_email` | The `…@….iam.gserviceaccount.com` identity that holds the role. |
-| `client_id` | `gcp_client_id` | OAuth client id of the service account. |
-| `project_id` | `gcp_project_id` | Must be the project that owns the bucket. |
-
-The private key is a PEM block spanning several lines. Because `auth.yaml` is a
-single YAML file, the value must stay on one line with literal `\n` escape
-sequences inside a **double-quoted** scalar — the adapter converts those escapes
-back to real newlines when it builds the credentials object, so a multi-line
-block scalar will not work:
-
-```yaml
-meta:
-    instagram:
-        gcs_bucket_name: "clipmorph-instagram-uploads"
-        gcp_project_id: "my-project-1234"
-        gcp_client_email: "clipmorph-uploader@my-project-1234.iam.gserviceaccount.com"
-        gcp_client_id: "109876543210987654321"
-        gcp_private_key_id: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
-        gcp_private_key: "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC...\n...\n-----END PRIVATE KEY-----\n"
-```
-When the key is supplied through an environment variable instead, use the same
-escaped form. On PowerShell:
-
-```powershell
-$env:GCP_PRIVATE_KEY = (Get-Content .\key.json -Raw | ConvertFrom-Json).private_key
-```
-
-A wrong or mis-escaped private key fails at the first upload with a signature
-error, not at configuration time.
-
-### Gotchas
-
-- A bucket in a project the service account's IAM binding does not cover yields
-  a `403` on the object create.
-- Turning public access prevention **off** plus a permissive `allUsers` ACL
-  publishes your renders; the signed-URL flow does not need it off.
-- Bucket-level Object Versioning keeps old versions of a deleted object, so the
-  cleanup delete does not reclaim space until those versions are deleted too
-  ([object versioning](https://cloud.google.com/storage/docs/object-versioning)).
+Instagram reels are published through Meta's resumable upload protocol, so
+ClipMorph streams the render bytes directly to Meta's upload host. No Google
+Cloud Storage bucket, service account, or signed URL is involved, and there is
+no remote staging to configure.
 
 ## TikTok (`TIKTOK_*`)
 
@@ -653,8 +551,6 @@ you have to echo. Replace placeholders with your own values.
 | TikTok refresh rejected | Token bound to a previous client key, or the app is not in production. | Recreate the app authorization and confirm audit approval. |
 | X access token expired with no refresh | `offline.access` was not granted. | Re-run `clipmorph auth twitter` after adding the scope. |
 | X `403` on media upload | App permissions are read-only. | Set **User authentication settings** to **Read and write**, then re-authorize. |
-| Cloud Storage `403` on upload | Service account lacks a role on that bucket, or the bucket is in another project. | Bind `roles/storage.objectAdmin` on the bucket to that service account. |
-| Signature error on the first Instagram upload | `gcp_private_key` was pasted as a real multi-line block instead of escaped `\n`. | Re-paste it as a double-quoted single-line scalar. |
 | `auth.yaml` fails to load | A value contains an unescaped `:`, `#`, or a tab. | Quote the value, or set the matching environment variable instead. |
 | `429` or provider-side throttling | The provider is rate limiting the app. | Wait for the window to reset; a retry reuses the frozen snapshot. |
 | A platform is reported unconfigured | `clipmorph auth status` shows `false` for it. | Run `clipmorph auth set PLATFORM`, or export the documented environment variable. |
@@ -703,13 +599,7 @@ reports `unavailable` there.
 
 - Google Cloud: [projects](https://cloud.google.com/resource-manager/docs/creating-managing-projects),
   [API library](https://console.cloud.google.com/apis/library),
-  [authentication overview](https://cloud.google.com/docs/authentication),
-  [creating buckets](https://cloud.google.com/storage/docs/creating-buckets),
-  [bucket IAM roles](https://cloud.google.com/storage/docs/access-control/iam-roles),
-  [uniform bucket-level access](https://cloud.google.com/storage/docs/uniform-bucket-level-access),
-  [service accounts](https://cloud.google.com/iam/docs/service-accounts),
-  [managing service account keys](https://cloud.google.com/iam/docs/keys-create-delete),
-  [audit logging](https://cloud.google.com/logging/docs/audit)
+  [authentication overview](https://cloud.google.com/docs/authentication)
 - Google OAuth: [OAuth 2.0](https://developers.google.com/identity/protocols/oauth2),
   [installed (desktop) apps](https://developers.google.com/identity/protocols/oauth2/native-app),
   [scopes](https://developers.google.com/identity/protocols/oauth2/scopes#youtube),

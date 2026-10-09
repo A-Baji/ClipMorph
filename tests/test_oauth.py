@@ -559,13 +559,7 @@ class InstagramLoginDialogTests(unittest.TestCase):
             facebook_app_secret="app-secret",
             facebook_page_id="page-id",
             facebook_access_token="page-token",
-            facebook_config_id=config_id,
-            gcp_project_id="project",
-            gcp_private_key_id="key-id",
-            gcp_private_key="private-key",
-            gcp_client_email="uploader@example.iam.gserviceaccount.com",
-            gcp_client_id="gcp-client-id",
-            gcs_bucket_name="bucket")
+            facebook_config_id=config_id)
 
     def _login_dialog_url(self, pipeline):
         """Drive the interactive flow with the network mocked out."""
