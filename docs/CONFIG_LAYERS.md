@@ -48,10 +48,10 @@ job_defaults:
   # registry.
   platforms:
     youtube: {category: '22', privacy_status: public}
-    instagram: {share_to_feed: true, thumb_offset: 0}
+    instagram: {share_to_feed: true, thumb_offset: 0, is_ai_generated: false}
     tiktok: {privacy_level: PUBLIC_TO_EVERYONE}
     twitter: {}
-    facebook: {content_kind: reel}
+    facebook: {content_kind: reel, is_ai_generated: false}
 layouts: []
 retention:
   artifacts:

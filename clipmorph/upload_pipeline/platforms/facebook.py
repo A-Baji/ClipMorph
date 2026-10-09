@@ -277,7 +277,7 @@ class FacebookUploadPipeline(BaseUploadPipeline):
 
     def _finish_reel(self, video_id: str, page_id: str, access_token: str,
                      description: str, video_state: str,
-                     content_tags) -> str:
+                     content_tags, is_ai_generated: bool = False) -> str:
         """Publish the uploaded reel and return its id."""
         url = (f"{self.FACEBOOK_GRAPH_BASE_URL}/{self.api_version}/"
                f"{page_id}/video_reels")
@@ -288,6 +288,10 @@ class FacebookUploadPipeline(BaseUploadPipeline):
             "description": description,
             "access_token": access_token,
         }
+        if is_ai_generated:
+            # Meta's AI-content self-disclosure flag on the finish phase.
+            # Omitted entirely when false, which is Meta's documented default.
+            data["is_ai_generated"] = "true"
         tags = self._format_content_tags(content_tags)
         if tags:
             data["content_tags"] = tags
@@ -331,7 +335,8 @@ class FacebookUploadPipeline(BaseUploadPipeline):
             page_id: str | None = None,
             access_token: str | None = None,
             content_tags=None,
-            video_state: str = "PUBLISHED"):
+            video_state: str = "PUBLISHED",
+            is_ai_generated: bool = False):
         """Upload one video to a Facebook Page as a Reel or a Page video.
 
         Args:
@@ -344,6 +349,9 @@ class FacebookUploadPipeline(BaseUploadPipeline):
             content_tags (list | str, optional): Tagged Page ids.
             video_state (str, optional): Reel finish state (default
                 ``PUBLISHED``; ``DRAFT`` is also accepted by the API).
+            is_ai_generated (bool, optional): Self-disclose on a Reel that the
+                video was created with AI. Defaults to False, which omits the
+                field; the Page-video (non-Reel) endpoint does not take it.
 
         Returns:
             str: The published video id.
@@ -376,7 +384,7 @@ class FacebookUploadPipeline(BaseUploadPipeline):
                                       file_size)
                     result_id = self._finish_reel(
                         video_id, page, page_token, description, video_state,
-                        content_tags)
+                        content_tags, is_ai_generated)
                 else:
                     session_id, video_id, start_offset, end_offset = (
                         self._initialize_video(page, page_token, file_size))

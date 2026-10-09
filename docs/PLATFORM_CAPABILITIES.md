@@ -38,8 +38,8 @@ characters, its keyword string to 500 characters, and its description to
 `combined` and `caption` compose title, hashtags, and description into one
 field, prioritized title > hashtags > description, truncated to `caption_limit`.
 Per-platform upload defaults (category, privacy status, share-to-feed,
-thumbnail offset) are plain values owned by `clipmorph/platforms.py`, not
-content rules.
+thumbnail offset, AI-content disclosure) are plain values owned by
+`clipmorph/platforms.py`, not content rules.
 
 ## Dynamic account rules
 

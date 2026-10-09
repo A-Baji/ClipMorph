@@ -152,6 +152,23 @@ class FacebookFinishTests(unittest.TestCase):
         self.assertEqual(data["description"], "caption")
         self.assertNotIn("content_tags", data)
 
+    def test_reel_finish_omits_ai_disclosure_by_default(self):
+        pipeline = _pipeline()
+        with patch(POST, return_value=_response({"success": True})) as post:
+            pipeline._finish_reel("v1", "page-1", "token", "caption",
+                                  "PUBLISHED", None)
+
+        self.assertNotIn("is_ai_generated", post.call_args.kwargs["data"])
+
+    def test_reel_finish_sends_ai_disclosure_when_enabled(self):
+        pipeline = _pipeline()
+        with patch(POST, return_value=_response({"success": True})) as post:
+            pipeline._finish_reel("v1", "page-1", "token", "caption",
+                                  "PUBLISHED", None, is_ai_generated=True)
+
+        self.assertEqual(post.call_args.kwargs["data"]["is_ai_generated"],
+                         "true")
+
 
 class FacebookRunTests(unittest.TestCase):
     def _video(self, temp_dir):

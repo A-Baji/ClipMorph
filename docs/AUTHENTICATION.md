@@ -188,10 +188,26 @@ skipped, so non-FL4B apps simply leave `config_id` unset), and
 is refused with an actionable error instead of migrated — move the values
 into `meta:` (and `meta.instagram:` for the hosting block).
 
-The scopes the adapter requests are `instagram_basic`, `pages_show_list`,
-`pages_read_engagement`, `pages_manage_posts`, and
-`instagram_content_publish`
-([content publishing](https://developers.facebook.com/docs/instagram-platform/instagram-api-with-instagram-login/content-publishing/)).
+Permissions are attributed per adapter, not as one combined list. The
+Instagram adapter publishes through the **Instagram API with Facebook Login**
+integration, whose permission set is `instagram_basic`,
+`instagram_content_publish`, and `pages_read_engagement`
+([content publishing](https://developers.facebook.com/documentation/instagram-platform/content-publishing)).
+The Facebook adapter's Reels and Page-video endpoints require
+`pages_manage_posts` on the derived Page token. The Instagram adapter's
+built-in login-dialog scope list is the combined set `instagram_basic`,
+`pages_show_list`, `pages_read_engagement`, `pages_manage_posts`, and
+`instagram_content_publish`, because one shared Meta app and login serve both
+adapters; `pages_show_list` supports the Page-listing flow. Do not read that
+list as Instagram's own requirement. Meta's permissions reference warns that
+requesting permissions an app does not exercise is a common App Review
+rejection cause, so request each permission for the adapter that needs it
+([permissions](https://developers.facebook.com/docs/permissions/)).
+
+If the app user's role on the Page connected to the Instagram professional
+account was granted through Business Manager, Instagram publishing additionally
+requires `ads_management` and `ads_read`; a Page role granted directly does not
+([content publishing](https://developers.facebook.com/documentation/instagram-platform/content-publishing)).
 
 For an app using Facebook Login for Business, the permissions instead come
 from a **Configuration**: in the Meta App Dashboard, create a Configuration
@@ -220,13 +236,15 @@ metrics adapter returns an `unavailable` snapshot with reason
    ([Graph API](https://developers.facebook.com/documentation/facebook-api)).
 2. Open **App settings → Basic**. This page holds the numeric **App ID** and the
    **App secret** (behind a **Show** button).
-3. Add the **Instagram** product (**Instagram API with Instagram Login**), then
-   connect the Instagram professional account you intend to publish to.
-   Professional accounts are required for reel publishing
-   ([Instagram API setup](https://developers.facebook.com/docs/instagram-platform/instagram-api-with-instagram-login/get-started/)).
-4. Open that product's **Permissions and features** and request
-   `instagram_basic`, `instagram_content_publish`, `pages_show_list`,
-   `pages_read_engagement`, and `pages_manage_posts`
+3. Add the **Instagram** product and connect the Instagram professional account
+   you intend to publish to. ClipMorph uses the **Instagram API with Facebook
+   Login** integration, so the Page-backed setup applies; professional accounts
+   are required for reel publishing
+   ([Instagram API with Facebook Login setup](https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-facebook-login/get-started)).
+4. Open that product's **Permissions and features** and request the Instagram
+   publishing set — `instagram_basic`, `instagram_content_publish`, and
+   `pages_read_engagement` — plus `pages_manage_posts` for the Facebook
+   adapter's Page endpoints
    ([permissions](https://developers.facebook.com/docs/permissions/)).
 5. Find the Facebook Page that owns the professional account (under
    **Page settings → Connected accounts**, or Business Suite). That Page's
@@ -306,6 +324,13 @@ listener, and it registers `https://localhost/` as the redirect URI:
   omits one of the scopes above, or the Page asset, yields a token that
   authenticates but cannot publish
   ([Facebook Login for Business](https://developers.facebook.com/docs/facebook-login/facebook-login-for-business/)).
+- **Page Publishing Authorization (PPA)**: an Instagram professional account
+  connected to a Page that requires PPA cannot be published to until PPA is
+  completed, and Meta exposes no API to detect PPA. There is no local preflight
+  check for it, so complete PPA preemptively in the Page's settings for any
+  account that might be affected
+  ([Page Publishing Authorization](https://www.facebook.com/business/m/one-sheeters/page-publishing-authorization)),
+  then rerun the upload.
 
 ## GCS hosting for Instagram
 
@@ -624,6 +649,7 @@ you have to echo. Replace placeholders with your own values.
 | `403 (#200)` on a Facebook Reels publish | A user token reached `video_reels` directly, or the stored token lacks `pages_manage_posts` scoped to the Page. | Confirm `GET /v23.0/{page_id}?fields=access_token` returns a token; if it does, publishing uses the derived Page token — rerun the OAuth walk-through if the scopes are missing. |
 | Empty `{"data": []}` from `GET /me/accounts` (Meta) | Facebook Login for Business delegates asset access via the Configuration instead of Page roles, so `/me/accounts` can be empty even with valid grants. | Do not gate on `/me/accounts`; verify with `GET /v23.0/{page_id}?fields=access_token` or `clipmorph auth status --probe facebook`. |
 | `403` on Instagram publish | The user token predates an approved permission. | Re-approve `instagram_content_publish`, then rerun the OAuth walk-through; the fresh user token derives a Page token with the new scopes. |
+| Instagram publish blocked with no credential error | The Instagram professional account's connected Page requires Page Publishing Authorization (PPA), which cannot be detected through the API. | Complete PPA for the Page in Meta Business Suite, then retry ([Page Publishing Authorization](https://www.facebook.com/business/m/one-sheeters/page-publishing-authorization)). |
 | TikTok refresh rejected | Token bound to a previous client key, or the app is not in production. | Recreate the app authorization and confirm audit approval. |
 | X access token expired with no refresh | `offline.access` was not granted. | Re-run `clipmorph auth twitter` after adding the scope. |
 | X `403` on media upload | App permissions are read-only. | Set **User authentication settings** to **Read and write**, then re-authorize. |
@@ -698,7 +724,7 @@ reports `unavailable` there.
   [access tokens](https://developers.facebook.com/docs/facebook-login/guides/access-tokens/),
   [permissions](https://developers.facebook.com/docs/permissions/),
   [Instagram platform overview](https://developers.facebook.com/docs/instagram-platform/overview),
-  [Instagram content publishing](https://developers.facebook.com/docs/instagram-platform/instagram-api-with-instagram-login/content-publishing/),
+  [Instagram content publishing](https://developers.facebook.com/documentation/instagram-platform/content-publishing),
   [Instagram app review](https://developers.facebook.com/docs/instagram-platform/app-review/),
   [Page Reels publishing](https://developers.facebook.com/docs/video-api/guides/reels-publishing/),
   [app modes](https://developers.facebook.com/docs/development/release/)

@@ -45,8 +45,10 @@ class UploadPipeline:
     - youtube_privacy_status: YouTube privacy ('public', 'unlisted', 'private')
     - instagram_share_to_feed: Instagram feed sharing (default: True)
     - instagram_thumb_offset: Instagram thumbnail offset (default: 0)
+    - instagram_is_ai_generated: Instagram AI-content disclosure (default: False)
     - tiktok_privacy_level: TikTok privacy ('PUBLIC_TO_EVERYONE', 'MUTUAL_FOLLOW_FRIENDS', 'SELF_ONLY')
     - facebook_content_kind: Facebook target ('reel' default, or 'video')
+    - facebook_is_ai_generated: Facebook Reels AI-content disclosure (default: False)
     """
 
     def __init__(self,
