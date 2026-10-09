@@ -1182,6 +1182,53 @@ class JobCommandConsolidationTests(unittest.TestCase):
                 manifest.configuration["platforms"]["instagram"]
                 ["is_ai_generated"])
 
+    def test_set_coerces_values_in_yaml_json_scalar_order(self):
+        """§2 scalar order: bool, int, float, null, tilde, JSON list, else str."""
+        from clipmorph.configuration import parse_config_overrides
+
+        overlay = parse_config_overrides([
+            "sample.flag=true",
+            "sample.off=false",
+            "sample.count=12",
+            "sample.negative=-3",
+            "sample.ratio=1.5",
+            "sample.nothing=null",
+            "sample.tilde=~",
+            "sample.tags=[\"a\",\"b\"]",
+            "sample.word=12abc",
+        ])
+
+        self.assertIs(overlay["sample"]["flag"], True)
+        self.assertIs(overlay["sample"]["off"], False)
+        self.assertEqual(overlay["sample"]["count"], 12)
+        self.assertNotIsInstance(overlay["sample"]["count"], bool)
+        self.assertEqual(overlay["sample"]["negative"], -3)
+        self.assertEqual(overlay["sample"]["ratio"], 1.5)
+        self.assertIsInstance(overlay["sample"]["ratio"], float)
+        self.assertIsNone(overlay["sample"]["nothing"])
+        self.assertIsNone(overlay["sample"]["tilde"])
+        self.assertEqual(overlay["sample"]["tags"], ["a", "b"])
+        self.assertEqual(overlay["sample"]["word"], "12abc")
+
+    def test_create_set_youtube_upload_skip_matches_the_guide_example(self):
+        """The §2 example path lands on the manifest end to end."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            source_dir = data_dir / "sources"
+            source_dir.mkdir(parents=True)
+            (source_dir / "clip.mp4").write_bytes(b"video")
+
+            code, _ = invoke(["--data-dir", str(data_dir), "job", "create",
+                              str(source_dir),
+                              "--set", "platforms.youtube.upload.skip=true"])
+            self.assertEqual(code, 0)
+
+            manifest = JobManifest.load(
+                next((data_dir / "jobs").glob("*")).name, data_dir / "jobs")
+            self.assertTrue(
+                manifest.configuration["platforms"]["youtube"]
+                ["upload"]["skip"])
+
     def test_set_unknown_key_reports_closest_valid(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
