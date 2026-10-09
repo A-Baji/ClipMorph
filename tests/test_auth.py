@@ -59,16 +59,19 @@ class AuthConfigTests(unittest.TestCase):
             content = path.read_text(encoding="utf-8")
             self.assertIn("youtube:", content)
             self.assertIn("refresh_token:", content)
-            self.assertIn("gcs_bucket_name:", content)
-            self.assertIn("gcp_private_key:", content)
             self.assertIn("client_key:", content)
             self.assertIn("client_id:", content)
             self.assertIn("hugging_face:", content)
             self.assertIn("twitter:", content)
+            # No remote Instagram hosting block remains: Meta's resumable
+            # upload needs no GCS/GCP credentials.
+            self.assertNotIn("gcs_bucket_name:", content)
+            self.assertNotIn("gcp_private_key:", content)
+            self.assertNotIn("instagram:", content)
             # The optional Facebook Login for Business field sits in the
             # shared meta block.
             self.assertIn("config_id:",
-                          content.split("meta:")[1].split("instagram:")[0])
+                          content.split("meta:")[1].split("tiktok:")[0])
             # Only consumed TikTok fields are offered.
             self.assertNotIn("open_id", content)
             self.assertNotIn("access_token", content.split("tiktok:")[1]
@@ -85,7 +88,7 @@ class AuthConfigTests(unittest.TestCase):
             self.assertEqual(
                 (Path(temp_dir) / "auth.yaml.backup").read_text(encoding="utf-8"),
                 original)
-            self.assertIn("instagram:", auth_path.read_text(encoding="utf-8"))
+            self.assertIn("meta:", auth_path.read_text(encoding="utf-8"))
 
     def test_existing_auth_file_generates_numbered_backup_when_needed(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -107,7 +110,7 @@ class AuthConfigTests(unittest.TestCase):
             self.assertEqual(
                 (Path(temp_dir) / "auth.yaml.backup2").read_text(encoding="utf-8"),
                 "older: backup\n")
-            self.assertIn("instagram:", auth_path.read_text(encoding="utf-8"))
+            self.assertIn("meta:", auth_path.read_text(encoding="utf-8"))
 
     def test_loads_nested_platform_credentials_from_data_directory(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -131,32 +134,6 @@ class AuthConfigTests(unittest.TestCase):
                                  "youtube-refresh")
                 self.assertEqual(os.environ["TIKTOK_CLIENT_KEY"], "tiktok-key")
             self.assertEqual(auth_file_path(data_dir), data_dir / "auth.yaml")
-
-    def test_loads_instagram_gcp_credentials(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            data_dir = Path(temp_dir)
-            (data_dir / "auth.yaml").write_text(
-                "auth_schema_version: 2\n"
-                "meta:\n"
-                "  instagram:\n"
-                "    gcs_bucket_name: bucket\n"
-                "    gcp_private_key_id: key-id\n"
-                "    gcp_private_key: private-key\n"
-                "    gcp_client_email: client@example.com\n"
-                "    gcp_client_id: client-id\n"
-                "    gcp_project_id: project-id\n",
-                encoding="utf-8")
-
-            with patch.dict(os.environ, {}, clear=True):
-                load_auth_config(data_dir)
-
-                self.assertEqual(os.environ["GCS_BUCKET_NAME"], "bucket")
-                self.assertEqual(os.environ["GCP_PRIVATE_KEY_ID"], "key-id")
-                self.assertEqual(os.environ["GCP_PRIVATE_KEY"], "private-key")
-                self.assertEqual(os.environ["GCP_CLIENT_EMAIL"],
-                                 "client@example.com")
-                self.assertEqual(os.environ["GCP_CLIENT_ID"], "client-id")
-                self.assertEqual(os.environ["GCP_PROJECT_ID"], "project-id")
 
     def test_loads_remaining_template_environment_credentials(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -272,9 +249,7 @@ class AuthConfigTests(unittest.TestCase):
                 "  app_id: meta-id\n"
                 "  app_secret: meta-secret\n"
                 "  page_id: page-id\n"
-                "  access_token: page-token\n"
-                "  instagram:\n"
-                "    gcs_bucket_name: bucket\n",
+                "  access_token: page-token\n",
                 encoding="utf-8")
 
             with patch.dict(os.environ, {}, clear=True):
@@ -286,7 +261,8 @@ class AuthConfigTests(unittest.TestCase):
                 self.assertEqual(os.environ["FACEBOOK_PAGE_ID"], "page-id")
                 self.assertEqual(os.environ["FACEBOOK_ACCESS_TOKEN"],
                                  "page-token")
-                self.assertEqual(os.environ["GCS_BUCKET_NAME"], "bucket")
+                # Instagram shares the same fields; no hosting keys exist.
+                self.assertNotIn("GCS_BUCKET_NAME", os.environ)
 
     def test_persisted_meta_credential_lands_in_the_meta_section(self):
         """A Facebook or Instagram token write goes to the shared `meta:`."""
@@ -301,14 +277,10 @@ class AuthConfigTests(unittest.TestCase):
                                      data_dir)
             persist_auth_credentials("instagram", {"access_token": "token-2"},
                                      data_dir)
-            persist_auth_credentials(
-                "instagram", {"gcs_bucket_name": "bucket"}, data_dir)
 
             persisted = yaml.safe_load(
                 (data_dir / "auth.yaml").read_text(encoding="utf-8"))
             self.assertEqual(persisted["meta"]["access_token"], "token-2")
-            self.assertEqual(
-                persisted["meta"]["instagram"]["gcs_bucket_name"], "bucket")
             self.assertNotIn("facebook", persisted)
             self.assertNotIn("instagram", persisted)
 
@@ -374,7 +346,7 @@ class AuthConfigTests(unittest.TestCase):
                 "meta:\n"
                 "  app_id: id\n"
                 "instagram:\n"
-                "  gcs_bucket_name: legacy\n",
+                "  page_id: legacy\n",
                 encoding="utf-8")
 
             with self.assertRaisesRegex(ValueError, "`instagram:`"):

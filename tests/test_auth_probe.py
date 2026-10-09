@@ -24,12 +24,6 @@ ALL_CREDENTIALS = {
     "FACEBOOK_APP_SECRET": "fb-app-secret",
     "FACEBOOK_PAGE_ID": "123456789",
     "FACEBOOK_ACCESS_TOKEN": FAKE_TOKEN,
-    "GCS_BUCKET_NAME": "clipmorph-test-bucket",
-    "GCP_PROJECT_ID": "gcp-project",
-    "GCP_PRIVATE_KEY_ID": "key-id",
-    "GCP_PRIVATE_KEY": "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n",
-    "GCP_CLIENT_EMAIL": "uploader@gcp-project.iam.gserviceaccount.com",
-    "GCP_CLIENT_ID": "gcp-client-id",
     "TIKTOK_CLIENT_KEY": "tiktok-key",
     "TIKTOK_CLIENT_SECRET": "tiktok-secret",
     "TIKTOK_REFRESH_TOKEN": FAKE_TOKEN,
@@ -100,53 +94,43 @@ class InstagramProbeTests(unittest.TestCase):
         pipeline.api_version = "v23.0"
         pipeline.page_id = "123456789"
         pipeline.access_token = FAKE_TOKEN
-        pipeline.gcs_bucket_name = "clipmorph-test-bucket"
-        pipeline.google_creds = MagicMock()
         return pipeline
 
-    def test_ok_merges_graph_and_gcs_subchecks(self):
+    def test_ok_reports_graph_access(self):
         with patch.dict(os.environ, ALL_CREDENTIALS, clear=True), \
                 patch("clipmorph.upload_pipeline.platforms.instagram."
                       "InstagramUploadPipeline") as pipeline_cls, \
-                patch("clipmorph.auth_probe.requests.get") as get, \
-                patch("google.cloud.storage.Client") as client_cls:
+                patch("clipmorph.auth_probe.requests.get") as get:
             self._pipeline(pipeline_cls)
             get.return_value.status_code = 200
             get.return_value.json.return_value = {"id": "123456789"}
-            client_cls.return_value.bucket.return_value.exists.return_value = True
             result = probe_credentials(["instagram"])
 
         self.assertEqual(result["instagram"]["probe"], "ok")
         self.assertIn("graph api ok", result["instagram"]["detail"])
-        self.assertIn("gcs bucket ok", result["instagram"]["detail"])
 
     def test_graph_failure_is_masked(self):
         with patch.dict(os.environ, ALL_CREDENTIALS, clear=True), \
                 patch("clipmorph.upload_pipeline.platforms.instagram."
                       "InstagramUploadPipeline") as pipeline_cls, \
-                patch("clipmorph.auth_probe.requests.get") as get, \
-                patch("google.cloud.storage.Client") as client_cls:
+                patch("clipmorph.auth_probe.requests.get") as get:
             self._pipeline(pipeline_cls)
             get.return_value.status_code = 403
             get.return_value.text = f"access_token={FAKE_TOKEN} rejected"
-            client_cls.return_value.bucket.return_value.exists.return_value = True
             result = probe_credentials(["instagram"])
 
         self.assertEqual(result["instagram"]["probe"], "failed")
         self.assertNotIn(FAKE_TOKEN, result["instagram"]["detail"])
         self.assertIn("[REDACTED]", result["instagram"]["detail"])
-        self.assertIn("gcs bucket ok", result["instagram"]["detail"])
 
-    def test_page_id_mismatch_fails_the_graph_subcheck(self):
+    def test_page_id_mismatch_fails_the_graph_check(self):
         with patch.dict(os.environ, ALL_CREDENTIALS, clear=True), \
                 patch("clipmorph.upload_pipeline.platforms.instagram."
                       "InstagramUploadPipeline") as pipeline_cls, \
-                patch("clipmorph.auth_probe.requests.get") as get, \
-                patch("google.cloud.storage.Client") as client_cls:
+                patch("clipmorph.auth_probe.requests.get") as get:
             self._pipeline(pipeline_cls)
             get.return_value.status_code = 200
             get.return_value.json.return_value = {"id": "a-different-page"}
-            client_cls.return_value.bucket.return_value.exists.return_value = True
             result = probe_credentials(["instagram"])
 
         self.assertEqual(result["instagram"]["probe"], "failed")

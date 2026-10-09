@@ -5,6 +5,10 @@ and the scheduling seam is the module's ``time`` binding, mirroring the
 Facebook adapter suite: every case patches the HTTP call (and, for the polling
 loop, a fake clock) and asserts the Graph API phase, payload, cadence, and
 returned identifier without touching the network or sleeping for real.
+
+Instagram publishes through Meta's resumable upload — a resumable container
+plus a raw-bytes ``rupload`` transfer — so there is no Google Cloud Storage
+staging surface to mock or clean up.
 """
 
 import os
@@ -14,6 +18,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import requests
+
 from clipmorph.upload_pipeline.platforms.instagram import (
     InstagramUploadPipeline,
 )
@@ -21,6 +27,8 @@ from clipmorph.upload_pipeline.platforms.instagram import (
 GET = "clipmorph.upload_pipeline.platforms.instagram.requests.get"
 POST = "clipmorph.upload_pipeline.platforms.instagram.requests.post"
 TIME = "clipmorph.upload_pipeline.platforms.instagram.time"
+GRAPH_BASE = "https://graph.facebook.com"
+RUPLOAD_BASE = "https://rupload.facebook.com/ig-api-upload"
 
 
 def _response(payload):
@@ -34,13 +42,13 @@ def _pipeline(**kwargs):
         facebook_app_secret="app-secret",
         facebook_page_id="page-1",
         facebook_access_token="page-token",
-        gcp_project_id="project",
-        gcp_private_key_id="key-id",
-        gcp_private_key="private-key",
-        gcp_client_email="uploader@example.iam.gserviceaccount.com",
-        gcp_client_id="gcp-client-id",
-        gcs_bucket_name="bucket",
         **kwargs)
+
+
+def _video(temp_dir, data=b"video-bytes"):
+    path = Path(temp_dir) / "clip.mp4"
+    path.write_bytes(data)
+    return path
 
 
 class _FakeClock:
@@ -91,14 +99,14 @@ class InstagramCredentialTests(unittest.TestCase):
                                         "Missing required Facebook credentials"):
                 InstagramUploadPipeline()
 
-    def test_missing_google_credentials_raise_a_clear_error(self):
-        with patch.dict(os.environ, {}, clear=True):
-            with self.assertRaisesRegex(
-                    ValueError, "Missing required Google Cloud credentials"):
-                InstagramUploadPipeline(
-                    facebook_app_id="app-id",
-                    facebook_app_secret="app-secret",
-                    facebook_page_id="page-1")
+    def test_only_meta_credentials_are_required(self):
+        """No GCS/GCP hosting surface survives on the adapter."""
+        pipeline = _pipeline()
+        for name in ("_authenticate_google", "_delete_video",
+                     "gcs_bucket_name", "gcp_private_key",
+                     "gcp_private_key_id", "gcp_client_email",
+                     "gcp_client_id", "gcp_project_id"):
+            self.assertFalse(hasattr(pipeline, name), name)
 
 
 class InstagramPollingTests(unittest.TestCase):
@@ -212,6 +220,97 @@ class InstagramErrorTests(unittest.TestCase):
         self.assertIn("Code: 352", message)
 
 
+class InstagramResumableUploadTests(unittest.TestCase):
+    """Meta's resumable path replaces the GCS staging round trip."""
+
+    def setUp(self):
+        self.pipeline = _pipeline()
+        self.pipeline.page_token = "page-token"
+        self.pipeline.ig_user_id = "ig-1"
+
+    def test_container_creation_requests_a_resumable_reel(self):
+        with patch(POST, return_value=_response({"id": "container-1"})) as post:
+            container_id = self.pipeline._create_reel_container(
+                "caption", share_to_feed=False, thumb_offset=1500,
+                is_ai_generated=True)
+
+        self.assertEqual(container_id, "container-1")
+        self.assertEqual(post.call_args.args[0],
+                         f"{GRAPH_BASE}/v23.0/ig-1/media")
+        data = post.call_args.kwargs["data"]
+        self.assertEqual(data["upload_type"], "resumable")
+        self.assertEqual(data["media_type"], "REELS")
+        self.assertEqual(data["access_token"], "page-token")
+        self.assertEqual(data["share_to_feed"], "false")
+        self.assertEqual(data["thumb_offset"], "1500")
+        self.assertEqual(data["is_ai_generated"], "true")
+        # The resumable path never hands Meta a public URL.
+        self.assertNotIn("video_url", data)
+
+    def test_upload_streams_bytes_to_the_meta_rupload_host(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video = _video(temp_dir)
+            size = video.stat().st_size
+            with patch(POST, return_value=_response({"success": True})) as post:
+                self.pipeline._upload_video("container-1", str(video))
+
+        self.assertEqual(
+            post.call_args.args[0],
+            f"{RUPLOAD_BASE}/v23.0/container-1")
+        headers = post.call_args.kwargs["headers"]
+        self.assertEqual(headers["Authorization"], "OAuth page-token")
+        self.assertEqual(headers["offset"], "0")
+        self.assertEqual(headers["file_size"], str(size))
+        request_data = post.call_args.kwargs["data"]
+        self.assertTrue(hasattr(request_data, "read"))
+
+    def test_missing_video_file_raises_before_any_request(self):
+        with patch(POST) as post:
+            with self.assertRaises(FileNotFoundError):
+                self.pipeline._upload_video("container-1", "missing.mp4")
+
+        post.assert_not_called()
+
+    def test_mid_transfer_failure_surfaces_after_exhausting_retries(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video = _video(temp_dir)
+            with patch(POST, side_effect=requests.exceptions.ConnectionError(
+                    "connection reset")) as post, patch("time.sleep"):
+                with self.assertRaises(requests.exceptions.ConnectionError):
+                    self.pipeline._upload_video("container-1", str(video))
+
+        self.assertEqual(post.call_count, self.pipeline.MAX_RETRIES)
+
+
+class InstagramRunFlowTests(unittest.TestCase):
+    """Success path still creates, uploads, polls, and publishes."""
+
+    def test_success_path_reaches_poll_and_publish(self):
+        pipeline = _pipeline()
+        pipeline.page_token = "page-token"
+        pipeline.ig_user_id = "ig-1"
+        posts = [
+            _response({"id": "container-1"}),  # create resumable container
+            _response({"success": True}),      # rupload binary transfer
+            _response({"id": "media-1"}),      # media_publish
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video = _video(temp_dir)
+            with patch(POST, side_effect=posts) as post, \
+                    patch(GET, return_value=_response(
+                        {"status_code": "FINISHED"})):
+                result = pipeline.run(str(video), "caption")
+
+        self.assertEqual(result, "media-1")
+        start, binary, publish = post.call_args_list
+        self.assertEqual(start.args[0], f"{GRAPH_BASE}/v23.0/ig-1/media")
+        self.assertEqual(start.kwargs["data"]["upload_type"], "resumable")
+        self.assertEqual(binary.args[0], f"{RUPLOAD_BASE}/v23.0/container-1")
+        self.assertEqual(binary.kwargs["headers"]["Authorization"],
+                         "OAuth page-token")
+        self.assertEqual(publish.kwargs["data"]["creation_id"], "container-1")
+
+
 class InstagramAiDisclosureTests(unittest.TestCase):
     """A5: ``is_ai_generated`` is opt-in and omitted by default."""
 
@@ -222,8 +321,7 @@ class InstagramAiDisclosureTests(unittest.TestCase):
 
     def _container_data(self, **kwargs):
         with patch(POST, return_value=_response({"id": "container-1"})) as post:
-            self.pipeline._create_reel_container("https://cdn/v.mp4",
-                                                 "caption", **kwargs)
+            self.pipeline._create_reel_container("caption", **kwargs)
         return post.call_args.kwargs["data"]
 
     def test_disclosure_is_omitted_by_default(self):
@@ -238,11 +336,8 @@ class InstagramAiDisclosureTests(unittest.TestCase):
 
     def test_run_forwards_the_disclosure_flag_to_the_container(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            video = Path(temp_dir) / "clip.mp4"
-            video.write_bytes(b"video")
-            with patch.object(self.pipeline, "_authenticate_google"), \
-                    patch.object(self.pipeline, "_upload_video",
-                                 return_value="https://cdn/v.mp4"), \
+            video = _video(temp_dir)
+            with patch.object(self.pipeline, "_upload_video"), \
                     patch.object(self.pipeline, "_get_page_access_token"), \
                     patch.object(self.pipeline, "_get_ig_user_id"), \
                     patch.object(self.pipeline, "_create_reel_container",
@@ -250,14 +345,13 @@ class InstagramAiDisclosureTests(unittest.TestCase):
                     patch.object(self.pipeline, "_wait_for_processing",
                                  return_value=True), \
                     patch.object(self.pipeline, "_publish_media",
-                                 return_value="media-1"), \
-                    patch.object(self.pipeline, "_delete_video"):
+                                 return_value="media-1"):
                 result = self.pipeline.run(str(video), "caption",
                                            is_ai_generated=True)
 
         self.assertEqual(result, "media-1")
         create.assert_called_once()
-        self.assertIs(create.call_args.args[4], True)
+        self.assertIs(create.call_args.args[3], True)
 
 
 if __name__ == "__main__":

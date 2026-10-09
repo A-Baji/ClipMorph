@@ -1,13 +1,9 @@
 import logging
+import mimetypes
 import os
 import time
-import urllib.parse
 import webbrowser
-from datetime import timedelta
-import uuid
 
-from google.cloud import storage
-from google.oauth2 import service_account
 import requests
 
 from .base import BaseUploadPipeline
@@ -15,16 +11,18 @@ from .base import BaseUploadPipeline
 
 class InstagramUploadPipeline(BaseUploadPipeline):
     """
-    A pipeline class for handling Instagram Reels uploads, including authentication,
-    temporary video hosting, and upload management.
+    A pipeline class for handling Instagram Reels uploads, including
+    authentication and Meta's resumable container upload.
     """
 
     # Constants
     FACEBOOK_GRAPH_BASE_URL = "https://graph.facebook.com"
     FACEBOOK_AUTH_BASE_URL = "https://www.facebook.com"
-    GOOGLE_AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
-    GOOGLE_TOKEN_URI = "https://oauth2.googleapis.com/token"
-    GOOGLE_CERTS_URL = "https://www.googleapis.com/oauth2/v1/certs"
+    # Meta's resumable video host. The container id returned by the Graph
+    # `/media` call forms the upload path, so a render is streamed straight
+    # from disk with no publicly reachable URL (and no external object
+    # storage) in between.
+    INSTAGRAM_RUPLOAD_BASE_URL = "https://rupload.facebook.com"
 
     # Video processing constants
     DEFAULT_PROCESSING_TIME_PER_MB = 20  # seconds
@@ -48,15 +46,10 @@ class InstagramUploadPipeline(BaseUploadPipeline):
                  facebook_page_id=os.getenv("FACEBOOK_PAGE_ID"),
                  facebook_access_token=os.getenv("FACEBOOK_ACCESS_TOKEN"),
                  facebook_config_id=os.getenv("FACEBOOK_CONFIG_ID"),
-                 gcp_project_id=os.getenv("GCP_PROJECT_ID"),
-                 gcp_private_key_id=os.getenv("GCP_PRIVATE_KEY_ID"),
-                 gcp_private_key=os.getenv("GCP_PRIVATE_KEY"),
-                 gcp_client_email=os.getenv("GCP_CLIENT_EMAIL"),
-                 gcp_client_id=os.getenv("GCP_CLIENT_ID"),
-                 gcs_bucket_name=os.getenv("GCS_BUCKET_NAME"),
                  redirect_uri='https://localhost/',
                  api_version='v23.0',
                  request_timeout=30,
+                 upload_timeout=600,
                  processing_timeout=480,
                  auth_scopes=[
                      'instagram_basic', 'pages_show_list',
@@ -64,9 +57,9 @@ class InstagramUploadPipeline(BaseUploadPipeline):
                      'instagram_content_publish'
                  ]):
         """Initialize the Instagram upload pipeline.
-        
+
         Args:
-            facebook_app_id (str, optional): Facebook App ID for authentication. 
+            facebook_app_id (str, optional): Facebook App ID for authentication.
                 Defaults to FACEBOOK_APP_ID environment variable.
             facebook_app_secret (str, optional): Facebook App Secret for authentication.
                 Defaults to FACEBOOK_APP_SECRET environment variable.
@@ -78,41 +71,26 @@ class InstagramUploadPipeline(BaseUploadPipeline):
                 Configuration ID. Defaults to FACEBOOK_CONFIG_ID environment
                 variable. When set it replaces the scope list in the login
                 dialog URL (docs/AUTHENTICATION.md, Meta FL4B).
-            gcp_project_id (str, optional): Google Cloud Project ID.
-                Defaults to GCP_PROJECT_ID environment variable.
-            gcp_private_key_id (str, optional): Google Cloud Private Key ID.
-                Defaults to GCP_PRIVATE_KEY_ID environment variable.
-            gcp_private_key (str, optional): Google Cloud Private Key.
-                Defaults to GCP_PRIVATE_KEY environment variable.
-            gcp_client_email (str, optional): Google Cloud Client Email.
-                Defaults to GCP_CLIENT_EMAIL environment variable.
-            gcp_client_id (str, optional): Google Cloud Client ID.
-                Defaults to GCP_CLIENT_ID environment variable.
-            gcs_bucket_name (str, optional): Google Cloud Storage Bucket Name.
-                Defaults to GCS_BUCKET_NAME environment variable.
             redirect_uri (str, optional): OAuth redirect URI.
                 Defaults to 'https://localhost/'.
+            api_version (str, optional): Graph API version. Defaults to
+                'v23.0'.
             request_timeout (int, optional): Timeout for HTTP requests in seconds.
                 Defaults to 30 seconds.
+            upload_timeout (int, optional): Timeout for the binary resumable
+                transfer in seconds. Defaults to 600 seconds, matching the
+                Facebook adapter's transfer bound.
             processing_timeout (int, optional): Timeout for video processing in seconds.
                 Defaults to 480 seconds.
             auth_scopes (list, optional): List of Facebook authentication scopes.
                 Defaults to basic Instagram and page management scopes.
         """
-        # Facebook/Instagram credentials
+        # Facebook/Instagram credentials (the shared Meta app and user token)
         self.app_id = facebook_app_id
         self.app_secret = facebook_app_secret
         self.page_id = facebook_page_id
         self.access_token = facebook_access_token
         self.config_id = facebook_config_id
-
-        # Google Cloud credentials
-        self.gcp_project_id = gcp_project_id
-        self.gcp_private_key_id = gcp_private_key_id
-        self.gcp_private_key = gcp_private_key
-        self.gcp_client_email = gcp_client_email
-        self.gcp_client_id = gcp_client_id
-        self.gcs_bucket_name = gcs_bucket_name
 
         # Authentication configuration
         self.redirect_uri = redirect_uri
@@ -121,24 +99,21 @@ class InstagramUploadPipeline(BaseUploadPipeline):
 
         # Timeout configuration
         self.request_timeout = request_timeout
+        self.upload_timeout = upload_timeout
         self.processing_timeout = processing_timeout
 
         # Runtime state
-        self.google_creds = None
         self.page_token = None
         self.ig_user_id = None
-        self._uploaded_blob_name = None
 
         # Progress bar configuration (redistributed for smoother UX)
         self.progress_allocations = {
-            "google_auth": 2,  # 2%
             "page_token": 3,  # 3%
             "ig_user_id": 3,  # 3%
-            "video_upload": 5,  # 5%
             "create_container": 7,  # 7%
+            "video_upload": 7,  # 7% - resumable binary transfer
             "video_processing": 70,  # 70% - spread over time
-            "publish_media": 8,  # 8% - reduced from 23%
-            "cleanup": 2  # 2%
+            "publish_media": 10,  # 10%
         }
         self.progress_bar = None
 
@@ -155,17 +130,6 @@ class InstagramUploadPipeline(BaseUploadPipeline):
                 "or set them as environment variables: FACEBOOK_APP_ID, "
                 "FACEBOOK_APP_SECRET, FACEBOOK_PAGE_ID")
 
-        if not all([
-                self.gcp_project_id, self.gcp_private_key_id,
-                self.gcp_private_key, self.gcp_client_email,
-                self.gcp_client_id, self.gcs_bucket_name
-        ]):
-            raise ValueError(
-                "Missing required Google Cloud credentials. Provide them as parameters "
-                "or set them as environment variables: GCP_PROJECT_ID, GCP_PRIVATE_KEY_ID, "
-                "GCP_PRIVATE_KEY, GCP_CLIENT_EMAIL, GCP_CLIENT_ID, GCS_BUCKET_NAME"
-            )
-
         # Validate base class requirements
         self._validate_required_attributes()
 
@@ -176,40 +140,8 @@ class InstagramUploadPipeline(BaseUploadPipeline):
             api_error = error_data.get('error', {}).get('message', '')
             if api_error:
                 response.reason = f"{response.reason}: {api_error}"
-        except:
+        except:  # noqa: E722 - preserve the original best-effort parsing
             pass
-
-    def _authenticate_google(self):
-        """
-        Authenticates with Google Cloud using the provided scopes.
-        Returns a credentials object.
-        """
-        credentials_info = {
-            "type":
-            "service_account",
-            "project_id":
-            self.gcp_project_id,
-            "private_key_id":
-            self.gcp_private_key_id,
-            "private_key":
-            self.gcp_private_key.replace('\\n', '\n'),
-            "client_email":
-            self.gcp_client_email,
-            "client_id":
-            self.gcp_client_id,
-            "auth_uri":
-            self.GOOGLE_AUTH_URI,
-            "token_uri":
-            self.GOOGLE_TOKEN_URI,
-            "auth_provider_x509_cert_url":
-            self.GOOGLE_CERTS_URL,
-            "client_x509_cert_url":
-            f"https://www.googleapis.com/robot/v1/metadata/x509/{urllib.parse.quote(self.gcp_client_email)}",
-        }
-        self.google_creds = service_account.Credentials.from_service_account_info(
-            credentials_info)
-        self._update_progress("google_auth", "Authenticated with Google Cloud")
-        return self.google_creds
 
     def get_user_access_token(self):
         """
@@ -289,56 +221,21 @@ class InstagramUploadPipeline(BaseUploadPipeline):
         self._update_progress("ig_user_id", "Got Instagram user ID")
         return self.ig_user_id
 
-    def _upload_video(self, video_path):
-        """
-        Uploads a video to Google Cloud Storage and makes it public.
-        Returns the public URL to the uploaded video.
-        """
-        if not os.path.exists(video_path):
-            raise FileNotFoundError(f"Video file not found: {video_path}")
-        if not self.google_creds:
-            self._authenticate_google()
-
-        destination_blob_name = (
-            f"clipmorph/{uuid.uuid4().hex}/{os.path.basename(video_path)}")
-        storage_client = storage.Client(credentials=self.google_creds)
-        bucket = storage_client.bucket(self.gcs_bucket_name)
-        blob = bucket.blob(destination_blob_name)
-        blob.upload_from_filename(video_path)
-        self._uploaded_blob_name = destination_blob_name
-        self._update_progress("video_upload",
-                              "Video uploaded to cloud storage")
-        return blob.generate_signed_url(
-            version="v4",
-            expiration=timedelta(hours=1),
-            method="GET")
-
-    def _delete_video(self, video_path):
-        """
-        Deletes a video from Google Cloud Storage.
-        """
-        if not self.google_creds:
-            self._authenticate_google()
-
-        blob_name = self._uploaded_blob_name
-        if not blob_name:
-            return False
-        storage_client = storage.Client(credentials=self.google_creds)
-        bucket = storage_client.bucket(self.gcs_bucket_name)
-        blob = bucket.blob(blob_name)
-        blob.delete()
-        self._uploaded_blob_name = None
-        self._update_progress("cleanup", "Cleaned up temporary files")
-        return True
+    @staticmethod
+    def _media_type(video_path: str) -> str:
+        return mimetypes.guess_type(video_path)[0] or "video/mp4"
 
     def _create_reel_container(self,
-                               video_url,
                                caption,
                                share_to_feed=True,
                                thumb_offset=None,
                                is_ai_generated=False):
-        """
-        Creates a media container for a Reel.
+        """Create a resumable Reels container and return its id.
+
+        ``upload_type=resumable`` is Meta's documented local-file path: the
+        response's container id forms the ``rupload`` URL the bytes are
+        streamed to in :meth:`_upload_video`, so no publicly reachable video
+        URL is required.
         """
         if not self.ig_user_id:
             self._get_ig_user_id()
@@ -346,7 +243,7 @@ class InstagramUploadPipeline(BaseUploadPipeline):
         url = f"{self.FACEBOOK_GRAPH_BASE_URL}/{self.api_version}/{self.ig_user_id}/media"
         payload = {
             'media_type': 'REELS',
-            'video_url': video_url,
+            'upload_type': 'resumable',
             'caption': caption,
             'access_token': self.page_token,
             'share_to_feed': 'true' if share_to_feed else 'false',
@@ -365,6 +262,39 @@ class InstagramUploadPipeline(BaseUploadPipeline):
         self._update_progress("create_container", "Created reel container")
         return resp.json()['id']
 
+    def _upload_video(self, container_id, video_path):
+        """Stream the local video bytes to Meta's resumable upload host.
+
+        Meta's resumable upload takes the raw bytes at
+        ``/ig-api-upload/<API_VERSION>/<CONTAINER_ID>`` with ``offset`` and
+        ``file_size`` headers, replacing the previous Cloud Storage staging
+        path. The stream is reopened per attempt so a retried transfer starts
+        at byte zero, matching the Facebook adapter's reel transfer.
+        """
+        if not os.path.exists(video_path):
+            raise FileNotFoundError(f"Video file not found: {video_path}")
+        file_size = os.path.getsize(video_path)
+        upload_url = (f"{self.INSTAGRAM_RUPLOAD_BASE_URL}/ig-api-upload/"
+                      f"{self.api_version}/{container_id}")
+        headers = {
+            "Authorization": f"OAuth {self.page_token}",
+            "offset": "0",
+            "file_size": str(file_size),
+            "Content-Type": self._media_type(video_path),
+        }
+
+        def upload_stream():
+            # Reopen the stream for each retry so a failed request starts at
+            # byte zero (the resumable upload is a single bounded transfer).
+            with open(video_path, "rb") as video_stream:
+                return requests.post(upload_url,
+                                     data=video_stream,
+                                     headers=headers,
+                                     timeout=self.upload_timeout)
+
+        self._retry_request(upload_stream)
+        self._update_progress("video_upload", "Video uploaded to Meta")
+
     def _publish_media(self, creation_id):
         """
         Publishes the media container to Instagram as a Reel.
@@ -382,9 +312,8 @@ class InstagramUploadPipeline(BaseUploadPipeline):
                                    data=payload,
                                    timeout=self.request_timeout)
 
-        # Update description to show completion
         if self.progress_bar:
-            self.progress_bar.set_description("[Instagram] Cleaning up...")
+            self.progress_bar.set_description("[Instagram] Published")
         return resp.json()['id']
 
     def _processing_error_message(self, media_status):
@@ -532,17 +461,17 @@ class InstagramUploadPipeline(BaseUploadPipeline):
             is_ai_generated: bool = False):
         """
         Main method to handle the complete Instagram Reels upload process.
-        
+
         Args:
             video_path (str): Path to the video file to upload
             caption (str): Caption for the Instagram Reel
-            share_to_feed (bool, optional): Whether to share the reel to the main feed. 
+            share_to_feed (bool, optional): Whether to share the reel to the main feed.
                 Defaults to True.
             thumb_offset (int, optional): Thumbnail offset in milliseconds.
                 Defaults to None (auto-generated).
             is_ai_generated (bool, optional): Self-disclose that the reel was
                 created with AI. Defaults to False, which omits the field.
-                
+
         Returns:
             str: Media ID of the uploaded reel
         """
@@ -558,14 +487,7 @@ class InstagramUploadPipeline(BaseUploadPipeline):
 
         with self._progress_context(total_progress, "Starting upload"):
             try:
-                # Initialize credentials if not already done
-                if not self.google_creds:
-                    self._authenticate_google()
-
-                # Upload to temporary storage
-                video_url = self._upload_video(video_path)
-
-                # Get necessary tokens and IDs
+                # Resolve the shared Meta token and the Instagram identity
                 if not self.access_token:
                     self._bar_write(
                         "[Instagram] No access token found. Starting OAuth flow..."
@@ -576,17 +498,17 @@ class InstagramUploadPipeline(BaseUploadPipeline):
                         "\nInstagram access token generated. Store it securely in "
                         "FACEBOOK_ACCESS_TOKEN; it is not displayed by ClipMorph.\n")
 
-                # Get necessary tokens and IDs
                 if not self.page_token:
                     self._get_page_access_token()
 
                 if not self.ig_user_id:
                     self._get_ig_user_id()
 
-                # Create and process the reel
+                # Create the resumable container, then stream the bytes to
+                # Meta's upload host (no public URL or object storage needed).
                 creation_id = self._create_reel_container(
-                    video_url, caption, share_to_feed, thumb_offset,
-                    is_ai_generated)
+                    caption, share_to_feed, thumb_offset, is_ai_generated)
+                self._upload_video(creation_id, video_path)
 
                 try:
                     self._wait_for_processing(creation_id, video_size_mb=video_size_mb)
@@ -596,8 +518,6 @@ class InstagramUploadPipeline(BaseUploadPipeline):
                     failure_reason = str(e)
                 except Exception as e:
                     failure_reason = f"Unexpected error during processing: {str(e)}"
-                finally:
-                    self._delete_video(video_path)
 
                 # Handle progress bar completion based on success/failure
                 if upload_success:

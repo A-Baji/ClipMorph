@@ -94,12 +94,12 @@ def _probe_youtube() -> tuple[str, str]:
 
 
 def _probe_instagram() -> tuple[str, str]:
-    """Check the Facebook token's Graph access and the GCS bucket.
+    """Check the Facebook token's Graph access.
 
-    The two sub-checks merge into one detail string so a partial failure
-    still reports the half that worked. The graph read uses the stored
-    token directly, mirroring the Instagram adapter's publish-time
-    identity read; the Page-token exchange is Facebook's probe's job.
+    The graph read uses the stored token directly, mirroring the Instagram
+    adapter's publish-time identity read; the Page-token exchange is
+    Facebook's probe's job. Instagram needs no hosting check: the adapter
+    uploads the render bytes straight to Meta's resumable host.
     """
     from clipmorph.upload_pipeline.platforms.instagram import InstagramUploadPipeline
 
@@ -108,9 +108,7 @@ def _probe_instagram() -> tuple[str, str]:
     except Exception:
         return "unavailable", "incomplete credentials"
     graph_ok, graph_detail = _instagram_graph_check(pipeline)
-    gcs_ok, gcs_detail = _instagram_gcs_check(pipeline)
-    detail = f"{graph_detail}; {gcs_detail}"
-    return ("ok" if graph_ok and gcs_ok else "failed"), detail
+    return ("ok" if graph_ok else "failed"), graph_detail
 
 
 def _instagram_graph_check(pipeline: Any) -> tuple[bool, str]:
@@ -127,19 +125,6 @@ def _instagram_graph_check(pipeline: Any) -> tuple[bool, str]:
     if payload.get("id") != pipeline.page_id:
         return False, "graph api failed: page id mismatch"
     return True, "graph api ok"
-
-
-def _instagram_gcs_check(pipeline: Any) -> tuple[bool, str]:
-    try:
-        pipeline._authenticate_google()
-        from google.cloud import storage
-        storage_client = storage.Client(credentials=pipeline.google_creds)
-        exists = storage_client.bucket(pipeline.gcs_bucket_name).exists()
-    except Exception as error:
-        return False, f"gcs bucket failed: {safe_error_message(str(error))}"
-    if not exists:
-        return False, "gcs bucket not found"
-    return True, "gcs bucket ok"
 
 
 def _probe_facebook() -> tuple[str, str]:

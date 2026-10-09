@@ -8,8 +8,7 @@ from typing import Any
 
 PLATFORM_CREDENTIALS = {
     "youtube": ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"),
-    "instagram": ("FACEBOOK_APP_ID", "FACEBOOK_APP_SECRET", "FACEBOOK_PAGE_ID",
-                  "GCS_BUCKET_NAME"),
+    "instagram": ("FACEBOOK_APP_ID", "FACEBOOK_APP_SECRET", "FACEBOOK_PAGE_ID"),
     "tiktok": ("TIKTOK_CLIENT_KEY", "TIKTOK_CLIENT_SECRET"),
     "twitter": ("TWITTER_CLIENT_ID", "TWITTER_CLIENT_SECRET",
                 "TWITTER_OAUTH2_ACCESS_TOKEN"),
