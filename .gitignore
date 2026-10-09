@@ -24,6 +24,11 @@ eggs/
 .eggs/
 lib/
 lib64/
+# The template's blanket `lib/` would also match the dashboard's app modules
+# under frontend/src/lib/, so re-include that directory explicitly; it is
+# application code, not a Python site-packages location.
+!frontend/src/lib/
+!frontend/src/lib/*
 parts/
 sdist/
 var/

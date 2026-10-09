@@ -78,9 +78,7 @@ class DashboardBrowserTests(unittest.TestCase):
                     page = browser.new_page(viewport=viewport)
                     page.goto(f"http://127.0.0.1:{self.port}/")
                     page.wait_for_load_state("networkidle")
-                    page.locator(
-                        'nav[aria-label="Primary navigation"] button'
-                    ).filter(has_text="New Job").click()
+                    # The create/upload surface is the default queue view.
                     page.locator(".source-option input").check()
                     page.get_by_role(
                         "button", name="Overrides: clip.mp4").click()
@@ -120,9 +118,9 @@ class DashboardBrowserTests(unittest.TestCase):
                 page = browser.new_page(viewport=DESKTOP_VIEWPORT)
                 page.goto(f"http://127.0.0.1:{self.port}/")
                 page.wait_for_load_state("networkidle")
-                page.locator(
-                    'nav[aria-label="Primary navigation"] button'
-                ).filter(has_text="Captions").click()
+                # Depth is one deliberate step: open the job, then its Review tab.
+                page.locator(".job-card").first.click()
+                page.get_by_role("tab", name="Review").click()
                 page.get_by_label("Segment 1 start time").fill("0.25")
                 page.get_by_label("Segment 1 end time").fill("1.5")
                 page.get_by_label("Transcript segment 1").fill("After")
@@ -148,9 +146,7 @@ class DashboardBrowserTests(unittest.TestCase):
                     page.get_by_role("button", name="Save job composition").click()
                 self.assertEqual(composition_response.value.status, 200)
 
-                page.locator(
-                    'nav[aria-label="Primary navigation"] button'
-                ).filter(has_text="Uploads").click()
+                page.get_by_role("tab", name="Publish").click()
                 page.get_by_label("Upload description").fill("Upload description")
                 page.get_by_label("Upload tags").fill("one, two")
                 page.get_by_label("Upload schedule for").fill("2027-03-04T05:06")
