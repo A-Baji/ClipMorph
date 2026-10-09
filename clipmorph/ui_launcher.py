@@ -1,9 +1,12 @@
 """Desktop launcher for the ClipMorph UI executable.
 
-Selects a free loopback port, starts the local API service in-process,
-waits for readiness, opens the default browser, and shuts down cleanly.
-Kept separate from ``clipmorph.web`` so the headless ``clipmorph web``
-command and CLI-only builds never require this module.
+The ``clipmorph-ui`` console script runs the native desktop shell on Windows
+(pywebview window + pystray tray, see ``clipmorph.desktop_app``) and falls back
+to the original browser launcher elsewhere. Both front ends start the same
+local API service in-process and serve the same built dashboard, so
+``clipmorph web`` (``clipmorph.web``) stays the headless service. Kept separate
+from ``clipmorph.web`` so the headless ``clipmorph web`` command and CLI-only
+builds never require this module.
 """
 
 from __future__ import annotations
@@ -48,12 +51,25 @@ def wait_for_health(url: str, timeout: float = 15.0, interval: float = 0.1,
     raise TimeoutError(f"Health check at {url} did not succeed: {last_error}")
 
 
-def run_ui(host: str = "127.0.0.1", port: int | None = None, data_dir=None,
-           open_browser: bool = True, health_timeout: float = 15.0,
-           uvicorn_module=None, create_app_fn=None, browser_opener=None,
-           health_check=None, run_forever: bool = True,
-           _force_import_error: bool = False) -> int:
-    """Start the local API, wait for readiness, open the browser, and block until shutdown."""
+class LocalUiServer:
+    """A running local UI service that can be shut down cleanly."""
+
+    def __init__(self, server, thread, url: str, port: int) -> None:
+        self.server = server
+        self.thread = thread
+        self.url = url
+        self.port = port
+
+    def stop(self) -> None:
+        self.server.should_exit = True
+        self.thread.join(timeout=5)
+
+
+def start_local_server(host: str = "127.0.0.1", port: int | None = None,
+                       data_dir=None, health_timeout: float = 15.0,
+                       uvicorn_module=None, create_app_fn=None,
+                       health_check=None) -> LocalUiServer:
+    """Start the local API in a background thread and wait for readiness."""
     if uvicorn_module is None:
         try:
             import uvicorn as uvicorn_module
@@ -62,10 +78,6 @@ def run_ui(host: str = "127.0.0.1", port: int | None = None, data_dir=None,
                 "The UI requires the optional 'web' dependencies. "
                 "Install them with: python -m pip install 'clipmorph[web]'"
             ) from error
-    if _force_import_error:
-        raise RuntimeError(
-            "The UI requires the optional 'web' dependencies. "
-            "Install them with: python -m pip install 'clipmorph[web]'")
 
     if create_app_fn is None:
         from clipmorph.web import create_app as create_app_fn
@@ -89,24 +101,41 @@ def run_ui(host: str = "127.0.0.1", port: int | None = None, data_dir=None,
         thread.join(timeout=5)
         raise
 
+    return LocalUiServer(server, thread, url, selected_port)
+
+
+def run_ui(host: str = "127.0.0.1", port: int | None = None, data_dir=None,
+           open_browser: bool = True, health_timeout: float = 15.0,
+           uvicorn_module=None, create_app_fn=None, browser_opener=None,
+           health_check=None, run_forever: bool = True,
+           _force_import_error: bool = False) -> int:
+    """Start the local API, wait for readiness, open the browser, and block until shutdown."""
+    if _force_import_error:
+        raise RuntimeError(
+            "The UI requires the optional 'web' dependencies. "
+            "Install them with: python -m pip install 'clipmorph[web]'")
+
+    server = start_local_server(
+        host=host, port=port, data_dir=data_dir, health_timeout=health_timeout,
+        uvicorn_module=uvicorn_module, create_app_fn=create_app_fn,
+        health_check=health_check)
+
     if open_browser:
         opener = browser_opener or webbrowser.open
-        opener(url)
+        opener(server.url)
 
     if run_forever:
         try:
-            while thread.is_alive():
-                thread.join(timeout=0.5)
+            while server.thread.is_alive():
+                server.thread.join(timeout=0.5)
         except KeyboardInterrupt:
             pass
         finally:
-            server.should_exit = True
-            thread.join(timeout=5)
+            server.stop()
     else:
-        server.should_exit = True
-        thread.join(timeout=5)
+        server.stop()
 
-    return selected_port
+    return server.port
 
 
 def main() -> None:
@@ -114,8 +143,20 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--data-dir", default=None)
-    parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--no-browser", action="store_true",
+                        help="Run the local service without a native window or "
+                             "browser (the headless service is `clipmorph web`).")
     args = parser.parse_args()
+
+    from clipmorph.desktop_app import desktop_available, run_desktop
+
+    if not args.no_browser and desktop_available():
+        try:
+            run_desktop(host=args.host, port=args.port, data_dir=args.data_dir)
+            return
+        except RuntimeError as error:
+            print(f"Failed to start ClipMorph desktop: {error}", file=sys.stderr)
+            sys.exit(1)
 
     try:
         run_ui(host=args.host, port=args.port, data_dir=args.data_dir,

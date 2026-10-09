@@ -242,8 +242,13 @@ jobs:
     - name: Create PyInstaller Spec
       run: |
         EXTRA_DATA=""
+        EXTRA_HIDDEN=""
         if [ "${{ matrix.variant }}" == "ui" ]; then
           EXTRA_DATA="('clipmorph/web_assets', 'clipmorph/web_assets'),"
+          # The desktop shell reaches pywebview/pystray only through
+          # importlib.import_module(<variable>), which PyInstaller's static
+          # analysis cannot resolve, so name them explicitly for the frozen build.
+          EXTRA_HIDDEN="'webview', 'pystray',"
         fi
         if [ "$RUNNER_OS" == "Windows" ] || [ "$RUNNER_OS" == "macOS" ]; then
           # Directory-based build avoids extracting the full ML runtime on every launch.
@@ -279,7 +284,7 @@ jobs:
                 *copy_metadata('clipmorph'),
                 $EXTRA_DATA
             ],
-            hiddenimports=['dotenv', 'whisper', 'whisperx', 'torch', 'torchaudio'],
+            hiddenimports=['dotenv', 'whisper', 'whisperx', 'torch', 'torchaudio', $EXTRA_HIDDEN],
             hookspath=[],
             hooksconfig={'matplotlib': {'backends': ['Agg']}},
             runtime_hooks=[],
@@ -357,7 +362,7 @@ jobs:
                 *copy_metadata('clipmorph'),
                 $EXTRA_DATA
             ],
-            hiddenimports=['dotenv', 'whisper', 'whisperx', 'torch', 'torchaudio'],
+            hiddenimports=['dotenv', 'whisper', 'whisperx', 'torch', 'torchaudio', $EXTRA_HIDDEN],
             hookspath=[],
             hooksconfig={'matplotlib': {'backends': ['Agg']}},
             runtime_hooks=[],
@@ -487,6 +492,35 @@ jobs:
         name: ${{ matrix.asset_name }}
         path: ${{ matrix.asset_name }}
 
+    - name: Build Windows installer (UI variant only)
+      if: matrix.variant == 'ui' && runner.os == 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ ! -f dist/clipmorph/clipmorph-ui.exe ]; then
+          echo "dist/clipmorph/clipmorph-ui.exe is missing; build the UI onedir first" >&2
+          exit 1
+        fi
+        # Inno Setup is no longer preinstalled on windows-latest (actions/runner-images#12947).
+        choco install innosetup -y --no-progress
+        curl -L --fail -o scripts/installer/MicrosoftEdgeWebview2Setup.exe \
+          "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+        VERSION=$(python -c 'import tomllib; from pathlib import Path; print(tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"])')
+        ISCC="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+        if [ ! -f "$ISCC" ]; then
+          ISCC="/c/Program Files/Inno Setup 6/ISCC.exe"
+        fi
+        "$ISCC" "/DAppVersion=$VERSION" "scripts/installer/clipmorph.iss"
+        test -f dist/installer/clipmorph-ui-windows-setup.exe
+        ls -lh dist/installer/clipmorph-ui-windows-setup.exe
+
+    - name: Upload Windows installer artifact (UI variant only)
+      if: matrix.variant == 'ui' && runner.os == 'Windows'
+      uses: actions/upload-artifact@v5
+      with:
+        name: clipmorph-ui-windows-setup.exe
+        path: dist/installer/clipmorph-ui-windows-setup.exe
+
   create_release:
     name: Create Release and Attach Artifacts
     runs-on: ubuntu-24.04
@@ -538,6 +572,12 @@ jobs:
           name: clipmorph-ui-linux
         continue-on-error: false
 
+      - name: Download Windows UI installer
+        uses: actions/download-artifact@v5
+        with:
+          name: clipmorph-ui-windows-setup.exe
+        continue-on-error: false
+
       - name: Verify release artifact matrix
         run: |
           set -euo pipefail
@@ -548,6 +588,7 @@ jobs:
             clipmorph-ui-windows.zip
             clipmorph-ui-macos.zip
             clipmorph-ui-linux
+            clipmorph-ui-windows-setup.exe
           )
           for asset in "${EXPECTED[@]}"; do
             if [ ! -e "$asset" ]; then
@@ -602,5 +643,6 @@ jobs:
             clipmorph-ui-windows.zip \
             clipmorph-ui-macos.zip \
             clipmorph-ui-linux \
+            clipmorph-ui-windows-setup.exe \
             CHANGELOG.md \
             --clobber

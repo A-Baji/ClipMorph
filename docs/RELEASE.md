@@ -57,9 +57,36 @@ Note: the PAT used to dispatch must have Actions/Workflows dispatch permission (
 
 ## Implementation notes
 
-- The pipeline produces six executable artifacts: `clipmorph-cli-{windows.zip,macos.zip,linux}` (CLI variant, no web dependencies or assets) and `clipmorph-ui-{windows.zip,macos.zip,linux}` (UI variant: bundles FastAPI/Uvicorn, the built Svelte dashboard, and a desktop launcher that selects a loopback port, waits for `/api/v1/health`, opens the default browser, and shuts down cleanly). Windows and macOS archives contain onedir builds so the large ML runtime is not extracted on every launch; Linux artifacts are self-extracting archives. A CI gate rejects a `cli` artifact that contains web assets and a `ui` artifact that is missing them.
+- The pipeline produces six executable artifacts: `clipmorph-cli-{windows.zip,macos.zip,linux}` (CLI variant, no web dependencies or assets) and `clipmorph-ui-{windows.zip,macos.zip,linux}` (UI variant: bundles FastAPI/Uvicorn, the built Svelte dashboard, and a desktop launcher). On Windows `clipmorph-ui` opens a native window with a system-tray icon (pywebview + pystray); on macOS/Linux it opens the default browser (the native shell is Windows-only in v1). It selects a loopback port, waits for `/api/v1/health`, and shuts down cleanly. The Windows UI leg additionally compiles `scripts/installer/clipmorph.iss` with Inno Setup into `clipmorph-ui-windows-setup.exe` and attaches it to the release. Windows and macOS archives contain onedir builds so the large ML runtime is not extracted on every launch; Linux artifacts are self-extracting archives. A CI gate rejects a `cli` artifact that contains web assets and a `ui` artifact that is missing them.
 - Python installation is sourced from the tagged GitHub repository rather than a package index. The base CLI install is `python -m pip install "clipmorph @ git+https://github.com/A-Baji/ClipMorph.git@vX.Y.Z"`; adding `[web]` installs FastAPI/Uvicorn and enables `clipmorph web` (headless) and the `clipmorph-ui` desktop launcher console script. There are no npm or PyPI publishing steps in this pipeline.
 - `pyproject.toml` is the only version source. The package exposes its installed distribution version through `clipmorph.__version__`; frozen builds include that package metadata. The release workflow verifies that the version matches the tag and tags the exact version/changelog commit built by the matrix.
+
+## Windows desktop installer
+
+`clipmorph-ui-windows-setup.exe` is built by the Windows UI matrix leg from
+`scripts/installer/clipmorph.iss` (Inno Setup 6, installed with
+`choco install innosetup` because the Windows 2025 runner image dropped it —
+actions/runner-images#12947). It packages the existing onedir `dist/clipmorph/`
+build and stages the ~1.8 MB WebView2 Evergreen bootstrapper, which runs
+silently and is idempotent (it installs the runtime only when it is missing;
+the Fixed Version distribution is never used). The installer is per-user
+(`PrivilegesRequired=lowest`) and adds a Start Menu entry, an optional
+"Start ClipMorph when I sign in" task, and an uninstaller that removes the
+`HKCU\...\Run\ClipMorph` value whether it was enabled by the install-time task
+or by the tray toggle. See `scripts/installer/README.md`.
+
+The Windows UI executable is a console application (`console=True` in the
+PyInstaller spec), so launching it from the Start Menu, the post-install run, or
+run-at-logon shows a console window alongside the tray app. A windowed build is
+deferred for v1 because the matrix artifact verification uses the executable's
+`--help` console output.
+
+Two things are deliberately out of scope for v1:
+
+- **Signing.** The installer is unsigned, so Windows SmartScreen shows a
+  warning; users choose **More info → Run anyway**. Code signing is deferred.
+- **Updates.** Update is manual: re-run a newer installer over the existing
+  install. There is no in-app or auto-update machinery.
 
 ## If your org forbids PATs
 

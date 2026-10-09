@@ -45,6 +45,10 @@ MANIFEST
 *.manifest
 *.spec
 
+# WebView2 Evergreen bootstrapper staged next to scripts/installer/clipmorph.iss
+# by the release workflow and the installer README (downloaded binary, not source).
+scripts/installer/MicrosoftEdgeWebview2Setup.exe
+
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt

@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 from clipmorph.ui_launcher import find_free_port
 from clipmorph.ui_launcher import run_ui
+from clipmorph.ui_launcher import start_local_server
 from clipmorph.ui_launcher import wait_for_health
 
 
@@ -120,6 +121,29 @@ class RunUiTests(unittest.TestCase):
                 run_forever=False)
 
         self.assertTrue(server.should_exit)
+
+
+class StartLocalServerTests(unittest.TestCase):
+    def test_returns_running_server_with_url_and_port(self):
+        server = MagicMock()
+        server.should_exit = False
+
+        uvicorn_module = MagicMock()
+        uvicorn_module.Config.return_value = "config"
+        uvicorn_module.Server.return_value = server
+
+        health_check = MagicMock(return_value=True)
+        create_app_fn = MagicMock(return_value="app")
+
+        result = start_local_server(
+            host="127.0.0.1", port=4321, uvicorn_module=uvicorn_module,
+            create_app_fn=create_app_fn, health_check=health_check)
+
+        self.assertEqual(result.url, "http://127.0.0.1:4321/")
+        self.assertEqual(result.port, 4321)
+        self.assertIs(result.server, server)
+        create_app_fn.assert_called_once_with(None)
+        uvicorn_module.Server.assert_called_once_with("config")
 
 
 if __name__ == "__main__":

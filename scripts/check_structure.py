@@ -67,6 +67,7 @@ REQUIRED_CLIPMORPH_ITEMS = {
     "__main__.py",
     "auth.py",
     "cli.py",
+    "desktop_app.py",
     "job.py",
     "layout.py",
     "preflight.py",
