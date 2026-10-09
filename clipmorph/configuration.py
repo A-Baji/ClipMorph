@@ -735,3 +735,287 @@ def resolve_platform_configuration(
                 if key in overrides}
     effective = merge_configuration(manifest_configuration, sections)
     return resolve_job_configuration(global_defaults, effective, layouts)
+
+
+# --set inline overrides (issue #238): one override implementation feeds the
+# CLI's repeatable ``--set DOT.PATH=VALUE`` flag wherever a job configuration
+# can be supplied. Paths are dotted keys relative to the app-config root
+# (a literal ``config.`` prefix is stripped); values parse in YAML/JSON scalar
+# order. The overlay is validated here so unknown leaves report their closest
+# valid sibling paths and type mismatches name the expected type, then it is
+# applied exactly like a partial configuration overlay (create overrides,
+# patch merge, upload draft edit). The section key sets mirror the shared
+# ``_validate_*_section`` validators above; the CLI-surface test suite pins
+# them together so a schema change that silences one side fails the other.
+_OVERLAY_ROOT_KEYS = frozenset({"general", "conversion", "upload", "platforms"})
+_OVERLAY_GENERAL_KEYS = frozenset({"source", "no_confirm", "clean"})
+_OVERLAY_CONVERSION_KEYS = frozenset({
+    "layout_id", "layout", "skip", "strict", "no_confirm", "clean", "subtitles",
+})
+_OVERLAY_SUBTITLES_KEYS = frozenset({
+    "skip", "renderer", "no_confirm", "clean", "transcription_language",
+    "transcription_model", "transcription_device", "transcription_compute_type",
+})
+_OVERLAY_UPLOAD_KEYS = frozenset(
+    {"skip", "no_confirm", "schedule", "content", "suggestions"})
+_OVERLAY_SCHEDULE_KEYS = frozenset({"publish_at", "timezone", "mode"})
+_OVERLAY_CONTENT_KEYS = frozenset({"title", "description", "tags"})
+_OVERLAY_SUGGESTIONS_KEYS = frozenset(
+    {"provider", "model", *SUPPORTED_PLATFORMS})
+_TRANSCRIPTION_KEYS = frozenset({
+    "transcription_language", "transcription_model",
+    "transcription_device", "transcription_compute_type",
+})
+
+
+def _parse_override_scalar(raw: str) -> Any:
+    """Coerce one ``--set`` value in YAML/JSON scalar order."""
+    text = raw.strip()
+    lowered = text.lower()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+    if lowered in {"null", "~"}:
+        return None
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                f"--set list value is not valid JSON: {error}") from error
+        if not isinstance(parsed, list):
+            raise ValueError("--set list value must decode to a JSON list")
+        return parsed
+    try:
+        return int(text, 10)
+    except ValueError:
+        pass
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    return text
+
+
+def _assign_overlay_path(overlay: dict[str, Any], segments: list[str],
+                         value: Any) -> None:
+    """Write one value into a nested overlay, creating parent objects."""
+    node = overlay
+    for segment in segments[:-1]:
+        child = node.get(segment)
+        if not isinstance(child, dict):
+            child = {}
+            node[segment] = child
+        node = child
+    node[segments[-1]] = value
+
+
+def parse_config_overrides(pairs: list[str]) -> dict[str, Any]:
+    """Parse repeatable ``--set dotted.path=value`` pairs into an overlay.
+
+    A literal ``config.`` prefix is accepted and stripped, and later
+    occurrences of the same path apply over earlier ones. The result is a
+    partial job configuration object that ``validate_config_overlay`` checks.
+    """
+    overlay: dict[str, Any] = {}
+    for pair in pairs:
+        key, separator, raw = pair.partition("=")
+        key = key.strip()
+        if not separator or not key or "." not in key:
+            raise ValueError(f"--set expects a dotted path and a value: {pair!r}")
+        if key.startswith("config."):
+            key = key[len("config."):]
+        segments = [segment.strip() for segment in key.split(".")]
+        if not all(segments):
+            raise ValueError(f"--set path has an empty segment: {key!r}")
+        _assign_overlay_path(overlay, segments, _parse_override_scalar(raw))
+    return overlay
+
+
+def _overlay_unknown(label: str, unknown: set[str], valid: set[str]) -> ValueError:
+    return ValueError(
+        f"Unknown {label} field(s): {', '.join(sorted(unknown))}; "
+        f"closest valid: {', '.join(sorted(valid))}")
+
+
+def _overlay_check_object(value: Any, label: str,
+                          allowed: frozenset[str]) -> dict[str, Any]:
+    """Require a dict with only allowed keys, reporting valid sibling paths."""
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be an object")
+    unknown = set(value) - set(allowed)
+    if unknown:
+        raise _overlay_unknown(label, unknown, set(allowed))
+    return value
+
+
+def _validate_overlay_general(general: Any, label: str) -> None:
+    general = _overlay_check_object(general, label, _OVERLAY_GENERAL_KEYS)
+    for key in ("no_confirm", "clean"):
+        if key in general and not isinstance(general[key], bool):
+            raise ValueError(f"{label}.{key} must be a boolean")
+    if general.get("source") is not None:
+        validate_source_name(general["source"])
+
+
+def _validate_overlay_conversion(conversion: Any, label: str,
+                                 per_platform: bool) -> None:
+    conversion = _overlay_check_object(
+        conversion, label, _OVERLAY_CONVERSION_KEYS)
+    for key in ("skip", "strict"):
+        if key in conversion and not isinstance(conversion[key], bool):
+            raise ValueError(f"{label}.{key} must be a boolean")
+    for key in ("no_confirm", "clean"):
+        if key in conversion and conversion[key] is not None and not isinstance(
+                conversion[key], bool):
+            raise ValueError(f"{label}.{key} must be a boolean or null")
+    if conversion.get("layout_id") is not None and not isinstance(
+            conversion["layout_id"], str):
+        raise ValueError(f"{label}.layout_id must be a string or null")
+    if "layout" in conversion and not isinstance(conversion["layout"], dict):
+        raise ValueError(f"{label}.layout must be an object")
+    subtitles = conversion.get("subtitles")
+    if subtitles is not None:
+        subtitles = _overlay_check_object(
+            subtitles, f"{label}.subtitles", _OVERLAY_SUBTITLES_KEYS)
+        if "skip" in subtitles and not isinstance(subtitles["skip"], bool):
+            raise ValueError(f"{label}.subtitles.skip must be a boolean")
+        for key in ("no_confirm", "clean"):
+            if key in subtitles and subtitles[key] is not None and not isinstance(
+                    subtitles[key], bool):
+                raise ValueError(f"{label}.subtitles.{key} must be a boolean or null")
+        for key in _TRANSCRIPTION_KEYS:
+            if key in subtitles and not isinstance(subtitles[key], str):
+                raise ValueError(f"{label}.subtitles.{key} must be a string")
+        if subtitles.get("renderer", "overlay") not in {"overlay", "stacked"}:
+            raise ValueError(f"{label}.subtitles.renderer must be overlay or stacked")
+        if per_platform:
+            protected = sorted(_TRANSCRIPTION_KEYS & set(subtitles))
+            if protected:
+                raise ValueError(
+                    f"{label}.subtitles.{protected[0]} is not allowed per "
+                    "platform; the job shares one transcript session")
+
+
+def _validate_overlay_upload(upload: Any, label: str) -> None:
+    upload = _overlay_check_object(upload, label, _OVERLAY_UPLOAD_KEYS)
+    if "skip" in upload and not isinstance(upload["skip"], bool):
+        raise ValueError(f"{label}.skip must be a boolean")
+    if "no_confirm" in upload and upload["no_confirm"] is not None and not isinstance(
+            upload["no_confirm"], bool):
+        raise ValueError(f"{label}.no_confirm must be a boolean or null")
+    schedule = upload.get("schedule")
+    if schedule is not None:
+        schedule = _overlay_check_object(
+            schedule, f"{label}.schedule", _OVERLAY_SCHEDULE_KEYS)
+        for key in ("publish_at", "timezone"):
+            if key in schedule and schedule[key] is not None and not isinstance(
+                    schedule[key], str):
+                raise ValueError(f"{label}.schedule.{key} must be a string or null")
+        publish_at = schedule.get("publish_at")
+        if publish_at is not None:
+            try:
+                parsed_publish_at = datetime.fromisoformat(publish_at)
+            except ValueError as error:
+                raise ValueError(
+                    f"{label}.schedule.publish_at is not an ISO-8601 "
+                    f"timestamp: {error}") from error
+            if parsed_publish_at.tzinfo is None:
+                raise ValueError(
+                    f"{label}.schedule.publish_at must include a UTC offset")
+        if schedule.get("mode") not in SCHEDULE_MODES:
+            raise ValueError(f"{label}.schedule.mode must be one of: local, platform")
+    content = upload.get("content")
+    if content is not None:
+        content = _overlay_check_object(
+            content, f"{label}.content", _OVERLAY_CONTENT_KEYS)
+        for key in ("title", "description"):
+            if key in content and content[key] is not None and not isinstance(
+                    content[key], str):
+                raise ValueError(f"{label}.content.{key} must be a string or null")
+        if "tags" in content and (not isinstance(content["tags"], list)
+                                  or any(not isinstance(tag, str)
+                                         for tag in content["tags"])):
+            raise ValueError(f"{label}.content.tags must be a list of strings")
+    suggestions = upload.get("suggestions")
+    if suggestions is not None:
+        suggestions = _overlay_check_object(
+            suggestions, f"{label}.suggestions", _OVERLAY_SUGGESTIONS_KEYS)
+        if "provider" in suggestions and (
+                not isinstance(suggestions["provider"], str)
+                or not suggestions["provider"].strip()):
+            raise ValueError(f"{label}.suggestions.provider must be a non-empty string")
+        if "model" in suggestions and suggestions["model"] is not None and not isinstance(
+                suggestions["model"], str):
+            raise ValueError(f"{label}.suggestions.model must be a string or null")
+        for platform in SUPPORTED_PLATFORMS:
+            if platform in suggestions and not isinstance(
+                    suggestions[platform], dict):
+                raise ValueError(f"{label}.suggestions.{platform} must be an object")
+
+
+def _validate_overlay_platforms(platforms: Any) -> None:
+    platforms = _overlay_check_object(
+        platforms, "platforms", frozenset(SUPPORTED_PLATFORMS))
+    defaults = build_platform_default_config()
+    for platform, entry in platforms.items():
+        label = f"platforms.{platform}"
+        if not isinstance(entry, dict):
+            raise ValueError(f"{label} must be an object")
+        flat_keys = set(defaults.get(platform, {}))
+        valid = {"general", "conversion", "upload"} | flat_keys
+        unknown = set(entry) - valid
+        if unknown:
+            raise _overlay_unknown(label, unknown, valid)
+        if "platforms" in entry:
+            raise ValueError(
+                f"{label}.platforms is not allowed; selection overrides are "
+                "not configured per platform")
+        if entry.get("general") is not None:
+            general = entry["general"]
+            if isinstance(general, dict) and "source" in general:
+                raise ValueError(
+                    f"{label}.general.source is not allowed; source identity "
+                    "is fixed per job")
+            _validate_overlay_general(general, f"{label}.general")
+        if entry.get("conversion") is not None:
+            _validate_overlay_conversion(
+                entry["conversion"], f"{label}.conversion", per_platform=True)
+        if entry.get("upload") is not None:
+            _validate_overlay_upload(entry["upload"], f"{label}.upload")
+        for key in sorted(flat_keys & set(entry)):
+            expected = defaults[platform][key]
+            actual = entry[key]
+            if expected is None:
+                continue
+            if isinstance(expected, bool):
+                if not isinstance(actual, bool):
+                    raise ValueError(f"{label}.{key} must be a boolean")
+            elif isinstance(expected, int):
+                if isinstance(actual, bool) or not isinstance(actual, int):
+                    raise ValueError(f"{label}.{key} must be an integer")
+            elif isinstance(expected, float):
+                if isinstance(actual, bool) or not isinstance(actual, (int, float)):
+                    raise ValueError(f"{label}.{key} must be a number")
+            elif isinstance(expected, str):
+                if not isinstance(actual, str):
+                    raise ValueError(f"{label}.{key} must be a string")
+
+
+def validate_config_overlay(overlay: dict[str, Any]) -> None:
+    """Validate one ``--set`` overlay against the job configuration schema.
+
+    Unknown leaves report their closest valid sibling paths and type
+    mismatches name the expected type (the CLI contract from the #240
+    implementation guide); nothing is silently ignored. Per-platform flat
+    adapter scalars are checked against the platform registry defaults.
+    """
+    root = _overlay_check_object(overlay, "job configuration", _OVERLAY_ROOT_KEYS)
+    if root.get("general") is not None:
+        _validate_overlay_general(root["general"], "general")
+    if root.get("conversion") is not None:
+        _validate_overlay_conversion(root["conversion"], "conversion",
+                                     per_platform=False)
+    if root.get("upload") is not None:
+        _validate_overlay_upload(root["upload"], "upload")
+    if root.get("platforms") is not None:
+        _validate_overlay_platforms(root["platforms"])

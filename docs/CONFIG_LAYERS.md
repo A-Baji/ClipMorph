@@ -132,7 +132,7 @@ endpoint that produced it), `unavailable` (bool), `unavailable_reason`
 Metric names are normalized to a stable lowercase set: `views`, `likes`,
 `comments`, `shares`, `saves`, `reach`, `total_interactions`.
 
-Pulls are explicit only: `clipmorph job metrics ID --pull` or
+Pulls are explicit only: `clipmorph job update ID --metrics-pull` or
 `POST /api/v1/jobs/{id}/metrics/pull`. There is no scheduler or background
 daemon.
 
@@ -231,14 +231,15 @@ per-platform override.
 `upload.suggestions` selects the AI-assisted metadata generator and holds its
 drafts. Its `provider` (`template`, the deterministic default, or
 `hugging_face`) and `model` (a provider-specific id override, `null` for the
-provider default) are the *configuration*; `clipmorph job suggest` or
-`POST /api/v1/jobs/{id}/checkpoints/upload/suggest` additionally writes one
-generated row per selected platform under the same key, each carrying
+provider default) are the *configuration*; a generation (`job run`'s `[g]` at
+the upload gate, or `POST /api/v1/jobs/{id}/checkpoints/upload/suggest`)
+additionally writes one generated row per selected platform under the same key,
+each carrying
 `{title, description, hashtags, generated_at, provider, model,
 configuration_hash}` and an optional `note` when the request degraded to the
 template provider. Suggestions are **draft-level only and never
 auto-publish**: they live inside the mutable upload draft, and accepting one
-(`clipmorph job accept-suggestions` or
+(`job run`'s `[a]` at the upload gate, or
 `POST /api/v1/jobs/{id}/checkpoints/upload/suggestions/accept`) is what copies
 its title, description, and hashtags into `upload.content`; only the existing
 review gate then submits that content. There is no "disabled" flag — the
@@ -263,7 +264,7 @@ Participation is normalized to `skip`, with no include/exclude lists:
 - Job `upload.skip: true` + `platforms.<p>.upload.skip: false` → that platform
   uploads anyway. A per-platform override wins over the job-level flag, the
   same precedence law as `conversion.skip`.
-- An explicit submission (`job upload --platform X`) targeting a skipped
+- An explicit submission (`job update ID --upload --platform X`) targeting a skipped
   platform fails `422` with the per-platform reason. Re-enabling the platform
   is a configuration edit, not a submission flag.
 

@@ -225,7 +225,7 @@ The Configuration also selects the token type and the designated assets, so
 FL4B access covers exactly what the login delegates; a non-FL4B app leaves
 `config_id` empty and keeps the scope flow.
 
-To pull engagement metrics (`clipmorph job metrics ID --pull`), the token also
+To pull engagement metrics (`clipmorph job update ID --metrics-pull`), the token also
 needs `instagram_manage_insights`. This is a re-consent step: add the scope in
 the Meta App Dashboard under **Instagram API with Instagram Login →
 Permissions and features**, then rerun the OAuth walk-through to mint a new
@@ -353,7 +353,7 @@ videos to the authorized TikTok account, requesting the scopes
 `user.info.basic,video.upload,video.publish`
 ([content posting](https://developers.tiktok.com/doc/content-posting-api-get-started)).
 
-To pull engagement metrics (`clipmorph job metrics ID --pull`), the app also
+To pull engagement metrics (`clipmorph job update ID --metrics-pull`), the app also
 needs the `video.list` scope. Add it in the TikTok Developer Portal under
 **Products → Video Upload → Scopes**, then re-authorize. Without it the
 metrics adapter returns an `unavailable` snapshot with reason
