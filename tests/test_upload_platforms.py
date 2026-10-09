@@ -130,10 +130,11 @@ class CommonParameterMappingTests(unittest.TestCase):
                                    description="No healing", tags=["gaming"])
 
         self.assertEqual(set(sent) - {"video_path"},
-                         {"description", "content_kind"})
+                         {"description", "content_kind", "is_ai_generated"})
         self.assertEqual(sent["description"],
                          "Boss fight\n\nNo healing\n\n#gaming")
         self.assertEqual(sent["content_kind"], "reel")
+        self.assertFalse(sent["is_ai_generated"])
 
     def test_facebook_content_kind_override_wins(self):
         sent = self._upload_kwargs("Facebook", "Boss fight",
@@ -156,7 +157,14 @@ class CommonParameterMappingTests(unittest.TestCase):
                                    tiktok_privacy_level="SELF_ONLY")
 
         self.assertEqual(set(sent) - {"video_path"},
-                         {"caption", "share_to_feed", "thumb_offset"})
+                         {"caption", "share_to_feed", "thumb_offset",
+                          "is_ai_generated"})
+
+    def test_instagram_ai_disclosure_override_reaches_the_adapter(self):
+        sent = self._upload_kwargs("Instagram", "Boss fight",
+                                   instagram_is_ai_generated=True)
+
+        self.assertIs(sent["is_ai_generated"], True)
 
 
 class YouTubeNativeSchedulingTests(unittest.TestCase):

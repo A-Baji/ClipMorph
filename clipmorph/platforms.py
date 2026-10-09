@@ -40,13 +40,16 @@ PLATFORM_TITLE = {
 # Per-platform upload defaults, consumed by the upload pipeline when it folds
 # them into composed metadata and by the CLI runtime summary. Facebook's
 # content kind selects the Reels or the regular Page video endpoint family;
-# both are published by the same adapter.
+# both are published by the same adapter. ``is_ai_generated`` is Meta's
+# AI-content self-disclosure flag; it defaults off and an adapter omits the
+# field entirely when it is false (Meta's documented default).
 PLATFORM_DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
     "youtube": {"category": "22", "privacy_status": "public"},
-    "instagram": {"share_to_feed": True, "thumb_offset": 0},
+    "instagram": {"share_to_feed": True, "thumb_offset": 0,
+                  "is_ai_generated": False},
     "tiktok": {"privacy_level": "PUBLIC_TO_EVERYONE"},
     "twitter": {},
-    "facebook": {"content_kind": "reel"},
+    "facebook": {"content_kind": "reel", "is_ai_generated": False},
 }
 
 # Whether each platform's own API can hold a future publication, which is what

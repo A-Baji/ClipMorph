@@ -30,8 +30,17 @@ class InstagramUploadPipeline(BaseUploadPipeline):
     DEFAULT_PROCESSING_TIME_PER_MB = 20  # seconds
     MIN_PROCESSING_TIME = 30  # seconds
     MAX_PROGRESS_DURING_PROCESSING = 80  # don't complete progress bar during processing
-    API_POLL_INTERVAL = 5  # seconds between status checks
+    # Tiered status polling: check immediately, again shortly after to catch a
+    # fast encode, then on Meta's recommended once-per-minute cadence.
+    API_FIRST_POLL_DELAY = 0  # first check fires immediately
+    API_SECOND_POLL_DELAY = 15  # seconds before the second check
+    API_POLL_INTERVAL = 60  # seconds between later checks
     MIN_PROGRESS_INCREMENT = 1.5
+    # Meta's error-codes reference, surfaced when a container fails without a
+    # usable detail instead of guessing a cause.
+    ERROR_CODES_REFERENCE = (
+        "https://developers.facebook.com/documentation/instagram-platform/"
+        "instagram-graph-api/reference/error-codes")
 
     def __init__(self,
                  facebook_app_id=os.getenv("FACEBOOK_APP_ID"),
@@ -48,7 +57,7 @@ class InstagramUploadPipeline(BaseUploadPipeline):
                  redirect_uri='https://localhost/',
                  api_version='v23.0',
                  request_timeout=30,
-                 processing_timeout=360,
+                 processing_timeout=480,
                  auth_scopes=[
                      'instagram_basic', 'pages_show_list',
                      'pages_read_engagement', 'pages_manage_posts',
@@ -86,7 +95,7 @@ class InstagramUploadPipeline(BaseUploadPipeline):
             request_timeout (int, optional): Timeout for HTTP requests in seconds.
                 Defaults to 30 seconds.
             processing_timeout (int, optional): Timeout for video processing in seconds.
-                Defaults to 120 seconds.
+                Defaults to 480 seconds.
             auth_scopes (list, optional): List of Facebook authentication scopes.
                 Defaults to basic Instagram and page management scopes.
         """
@@ -326,7 +335,8 @@ class InstagramUploadPipeline(BaseUploadPipeline):
                                video_url,
                                caption,
                                share_to_feed=True,
-                               thumb_offset=None):
+                               thumb_offset=None,
+                               is_ai_generated=False):
         """
         Creates a media container for a Reel.
         """
@@ -343,6 +353,11 @@ class InstagramUploadPipeline(BaseUploadPipeline):
         }
         if thumb_offset is not None:
             payload['thumb_offset'] = str(thumb_offset)
+        if is_ai_generated:
+            # Meta's AI-content self-disclosure flag. Omitted entirely when
+            # false, which is Meta's documented default; sent as the same
+            # form-encoded string the other boolean options use.
+            payload['is_ai_generated'] = 'true'
         resp = self._retry_request(requests.post,
                                    url,
                                    data=payload,
@@ -372,42 +387,90 @@ class InstagramUploadPipeline(BaseUploadPipeline):
             self.progress_bar.set_description("[Instagram] Cleaning up...")
         return resp.json()['id']
 
+    def _processing_error_message(self, media_status):
+        """Describe a failed container from the response, never a guess.
+
+        Meta returns structured error payloads, so a failed container is
+        reported from what the response actually contained. When it carried no
+        usable detail the raw response is surfaced verbatim and the reader is
+        pointed at Meta's error-codes reference instead of a speculative cause
+        list.
+        """
+        details = []
+        error_info = media_status.get('error')
+        if isinstance(error_info, dict):
+            if error_info.get('message'):
+                details.append(str(error_info['message']))
+            if error_info.get('code') is not None:
+                details.append(f"Code: {error_info['code']}")
+        elif error_info:
+            details.append(str(error_info))
+        if media_status.get('message'):
+            details.append(str(media_status['message']))
+        if media_status.get('error_type'):
+            details.append(f"Type: {media_status['error_type']}")
+
+        media_id = media_status.get('id', 'unknown')
+        if details:
+            return (f"Instagram video processing failed (ID: {media_id}): "
+                    f"{' | '.join(details)}")
+        return (f"Instagram video processing failed (ID: {media_id}). "
+                f"Response: {media_status}. See Meta's error codes reference: "
+                f"{self.ERROR_CODES_REFERENCE}")
+
     def _wait_for_processing(self, creation_id, video_size_mb=0):
         """
-        Polls the media container status until it's finished processing.
+        Polls the media container status until it reaches a terminal state.
+
+        The cadence follows Meta's guidance: the first check fires immediately,
+        the second after ``API_SECOND_POLL_DELAY`` seconds to catch a fast
+        encode, and every later check ``API_POLL_INTERVAL`` seconds apart. The
+        wait is bounded by ``processing_timeout``; a container that never leaves
+        ``IN_PROGRESS`` raises ``TimeoutError`` only after every terminal status
+        has been checked, so a container that finished on the last poll is
+        never misreported as a timeout.
         """
         url = f"{self.FACEBOOK_GRAPH_BASE_URL}/{self.api_version}/{creation_id}?fields=status_code&access_token={self.page_token}"
         start = time.time()
-        last_api_call = 0
+        next_poll_at = self.API_FIRST_POLL_DELAY
+        poll_count = 0
 
-        # Calculate increment per second based on expected processing time
+        # Progress rate (percent per second) derived from the expected
+        # processing time; the floor keeps the bar moving for small files. The
+        # elapsed-based target is bounded by MAX_PROGRESS_DURING_PROCESSING, so
+        # the pacing terminates with the loop under any cadence.
         estimated_time = max(
             self.MIN_PROCESSING_TIME,
             video_size_mb * self.DEFAULT_PROCESSING_TIME_PER_MB)
-        increment_per_check = max(
+        progress_per_second = max(
             self.MIN_PROGRESS_INCREMENT,
             self.MAX_PROGRESS_DURING_PROCESSING / estimated_time)
 
         current_progress = (self.progress_bar.n if self.progress_bar
                             else self._progress_seen)
         status = None
+        media_status = {}
 
-        while time.time() - start < self.processing_timeout:
+        while True:
             elapsed = time.time() - start
 
-            # Only fetch API status every few seconds
-            if elapsed - last_api_call >= self.API_POLL_INTERVAL:
+            # Fetch the API status only when the next tier is due.
+            if elapsed >= next_poll_at:
                 resp = self._retry_request(requests.get, url, timeout=10)
                 media_status = resp.json()
                 status = media_status.get('status_code')
-                last_api_call = elapsed
+                poll_count += 1
+                if poll_count == 1:
+                    next_poll_at = self.API_SECOND_POLL_DELAY
+                else:
+                    next_poll_at = elapsed + self.API_POLL_INTERVAL
 
             # Progressive updates based on video size and elapsed time
             target_progress = current_progress + min(
-                elapsed * increment_per_check,
+                elapsed * progress_per_second,
                 self.MAX_PROGRESS_DURING_PROCESSING)
 
-            # Update the timer description every second
+            # Update the timer description
             if self.progress_bar:
                 self.progress_bar.set_description(
                     f"[Instagram] Processing video... ({elapsed:.0f}s)")
@@ -415,7 +478,7 @@ class InstagramUploadPipeline(BaseUploadPipeline):
             # Only update progress if we haven't reached the cap
             if self.progress_bar and self.progress_bar.n < target_progress and self.progress_bar.n < self.MAX_PROGRESS_DURING_PROCESSING:
                 increment = min(
-                    increment_per_check, target_progress - self.progress_bar.n,
+                    target_progress - self.progress_bar.n,
                     self.MAX_PROGRESS_DURING_PROCESSING - self.progress_bar.n)
                 if increment > 0:
                     self.progress_bar.update(increment)
@@ -425,48 +488,48 @@ class InstagramUploadPipeline(BaseUploadPipeline):
                 # Instagram is processing the reel.
                 self._advance_progress(target_progress)
 
+            # Terminal states. FINISHED is ready to publish; PUBLISHED is
+            # already done; EXPIRED and ERROR are failures with their own
+            # messages. Only IN_PROGRESS (or an absent status) keeps polling.
             if status == 'FINISHED':
                 if self.progress_bar:
                     self.progress_bar.set_description(
                         "[Instagram] Publishing reel...")
                 return True
-            elif status == 'ERROR':
-                # Try to get more detailed error info from various possible locations
-                error_info = media_status.get('error', {})
-                error_msg = media_status.get('message', '')
-                error_type = media_status.get('error_type', '')
-                
-                if error_info or error_msg or error_type:
-                    # We have some error details
-                    details = []
-                    if error_msg:
-                        details.append(error_msg)
-                    if error_type:
-                        details.append(f"Type: {error_type}")
-                    if error_info and isinstance(error_info, dict):
-                        if 'message' in error_info:
-                            details.append(error_info['message'])
-                        if 'code' in error_info:
-                            details.append(f"Code: {error_info['code']}")
-                    
-                    raise RuntimeError(f"Instagram video processing failed: {' | '.join(details)}")
-                else:
-                    # No specific error details - provide common causes
-                    media_id = media_status.get('id', 'unknown')
-                    raise RuntimeError(
-                        f"Instagram video processing failed (ID: {media_id}). "
-                        "Common causes: unsupported video format, file too large, invalid aspect ratio, or temporary Instagram API issue."
-                    )
+            if status == 'PUBLISHED':
+                if self.progress_bar:
+                    self.progress_bar.set_description(
+                        "[Instagram] Reel already published")
+                return True
+            if status == 'EXPIRED':
+                media_id = media_status.get('id', 'unknown')
+                raise RuntimeError(
+                    f"Instagram container expired before it was published "
+                    f"(ID: {media_id}). A container must be published within "
+                    "24 hours of creation; create it again and publish "
+                    "promptly.")
+            if status == 'ERROR':
+                raise RuntimeError(self._processing_error_message(media_status))
 
-            time.sleep(1)
+            # Check the wait cap only after every terminal status above, so a
+            # container that finished on the last poll is never reported as a
+            # timeout.
+            if elapsed >= self.processing_timeout:
+                raise TimeoutError(
+                    "Timed out waiting for Instagram video processing.")
 
-        raise TimeoutError("Timed out waiting for video processing.")
+            # Sleep exactly until the next poll (or the cap, whichever comes
+            # first) instead of spinning every second between checks.
+            wait = min(next_poll_at, self.processing_timeout) - elapsed
+            if wait > 0:
+                time.sleep(wait)
 
     def run(self,
             video_path,
             caption: str,
             share_to_feed: bool = True,
-            thumb_offset: "int | None" = None):
+            thumb_offset: "int | None" = None,
+            is_ai_generated: bool = False):
         """
         Main method to handle the complete Instagram Reels upload process.
         
@@ -477,6 +540,8 @@ class InstagramUploadPipeline(BaseUploadPipeline):
                 Defaults to True.
             thumb_offset (int, optional): Thumbnail offset in milliseconds.
                 Defaults to None (auto-generated).
+            is_ai_generated (bool, optional): Self-disclose that the reel was
+                created with AI. Defaults to False, which omits the field.
                 
         Returns:
             str: Media ID of the uploaded reel
@@ -520,7 +585,8 @@ class InstagramUploadPipeline(BaseUploadPipeline):
 
                 # Create and process the reel
                 creation_id = self._create_reel_container(
-                    video_url, caption, share_to_feed, thumb_offset)
+                    video_url, caption, share_to_feed, thumb_offset,
+                    is_ai_generated)
 
                 try:
                     self._wait_for_processing(creation_id, video_size_mb=video_size_mb)
