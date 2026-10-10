@@ -27,7 +27,7 @@
     {#each items as item (item.id)}
       <button
         class="nav-item"
-        class:active={app.view === item.id || (app.view === 'job' && item.id === 'queue')}
+        class:active={app.view === item.id || (app.view === 'wizard' && item.id === 'queue')}
         onclick={() => { setView(item.id); onNavigate?.(); }}
       >
         <Icon name={item.icon} />

@@ -70,36 +70,44 @@ class DashboardBrowserTests(unittest.TestCase):
     def test_dashboard_loads_at_mobile_size(self):
         self._dashboard_loads(MOBILE_VIEWPORT)
 
-    def test_per_source_title_override_reaches_validation_on_desktop_and_mobile(self):
-        for viewport in (DESKTOP_VIEWPORT, MOBILE_VIEWPORT):
-            with self.subTest(viewport=viewport), sync_playwright() as playwright:
-                browser = playwright.chromium.launch()
-                try:
-                    page = browser.new_page(viewport=viewport)
-                    page.goto(f"http://127.0.0.1:{self.port}/")
-                    page.wait_for_load_state("networkidle")
-                    # The create/upload surface is the default queue view.
-                    page.locator(".source-option input").check()
-                    page.get_by_role(
-                        "button", name="Overrides: clip.mp4").click()
-                    page.get_by_label("Clip title").fill("Per-clip title")
-                    page.get_by_label("Validate only").check()
+    def test_wizard_reaches_live_validation_with_a_per_job_title(self):
+        # A dedicated source keeps this test independent of jobs other tests
+        # create from the shared clip.mp4.
+        wizard_source = self.source_dir / "wizard.mp4"
+        wizard_source.write_bytes(b"wizard source")
+        try:
+            for viewport in (DESKTOP_VIEWPORT, MOBILE_VIEWPORT):
+                with self.subTest(viewport=viewport), sync_playwright() as playwright:
+                    browser = playwright.chromium.launch()
+                    try:
+                        page = browser.new_page(viewport=viewport)
+                        page.goto(f"http://127.0.0.1:{self.port}/")
+                        page.wait_for_load_state("networkidle")
+                        # Step 1: clip selection only, from the board's New button.
+                        page.get_by_role("button", name="New").click()
+                        page.get_by_label("wizard.mp4").check()
+                        page.get_by_role("button", name="Next: Configure").click()
+                        # Step 2: the spec-driven detail form. Editing a field
+                        # triggers debounced live validation.
+                        job_form = page.locator(".detail .job-config")
+                        with page.expect_response(
+                                lambda response: response.url.endswith(
+                                    "/api/v1/jobs/validate")
+                                and response.request.method == "POST") as response_info:
+                            job_form.get_by_label("Title", exact=True).fill(
+                                "Per-clip title")
 
-                    with page.expect_response(
-                            lambda response: response.url.endswith(
-                                "/api/v1/jobs/validate")
-                            and response.request.method == "POST") as response_info:
-                        page.get_by_role("button", name="Validate").click()
-
-                    response = response_info.value
-                    self.assertEqual(response.status, 200)
-                    effective = response.json()["effective_configurations"]
-                    self.assertEqual(len(effective), 1)
-                    self.assertEqual(
-                        effective[0]["configuration"]["upload"]["content"]["title"],
-                        "Per-clip title")
-                finally:
-                    browser.close()
+                        response = response_info.value
+                        self.assertEqual(response.status, 200)
+                        effective = response.json()["effective_configurations"]
+                        self.assertEqual(len(effective), 1)
+                        self.assertEqual(
+                            effective[0]["configuration"]["upload"]["content"]["title"],
+                            "Per-clip title")
+                    finally:
+                        browser.close()
+        finally:
+            wizard_source.unlink(missing_ok=True)
 
     def test_review_ui_edits_transcript_composition_and_upload_draft(self):
         service = self.app.state.job_service
@@ -118,8 +126,8 @@ class DashboardBrowserTests(unittest.TestCase):
                 page = browser.new_page(viewport=DESKTOP_VIEWPORT)
                 page.goto(f"http://127.0.0.1:{self.port}/")
                 page.wait_for_load_state("networkidle")
-                # Depth is one deliberate step: open the job, then its Review tab.
-                page.locator(".job-card").first.click()
+                # Depth is one deliberate step: open the job card modal, then Review.
+                page.locator(".card-main").first.click()
                 page.get_by_role("tab", name="Review").click()
                 page.get_by_label("Segment 1 start time").fill("0.25")
                 page.get_by_label("Segment 1 end time").fill("1.5")

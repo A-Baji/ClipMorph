@@ -196,6 +196,62 @@ class WebApiTests(unittest.TestCase):
                 self.assertEqual(bulk.json()["skipped"][0]["code"], "duplicate_content")
                 self.assertEqual(client.post("/api/v1/batches", json={}).status_code, 404)
 
+    def test_form_spec_route_serves_the_generated_spec(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            with TestClient(create_app(data_dir)) as client:
+                response = client.get("/form-spec.json")
+                self.assertEqual(response.status_code, 200, response.text)
+                spec = response.json()
+                self.assertIn("sections", spec)
+                self.assertEqual(spec["source"], "clipmorph.configuration")
+
+    def test_bulk_validate_and_create_accept_out_of_folder_transient_sources(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            (data_dir / "sources" / "inside.mp4").write_bytes(b"inside")
+            outside_dir = Path(temp_dir) / "elsewhere"
+            outside_dir.mkdir(parents=True)
+            outside = outside_dir / "extra.mp4"
+            outside.write_bytes(b"outside")
+            (outside_dir / "note.txt").write_bytes(b"not a clip")
+            with TestClient(create_app(data_dir)) as client:
+                validation = client.post("/api/v1/jobs/validate", json={
+                    "source_names": [],
+                    "sources": [str(outside)],
+                    "job_configs": [],
+                    "overrides": {},
+                })
+                self.assertEqual(validation.status_code, 200, validation.text)
+                body = validation.json()
+                self.assertTrue(body["valid"])
+                self.assertEqual(
+                    body["effective_configurations"][0]["source"], "extra.mp4")
+
+                created = client.post("/api/v1/jobs/bulk", json={
+                    "source_names": [],
+                    "sources": [str(outside)],
+                    "job_configs": [],
+                    "overrides": {},
+                })
+                self.assertEqual(created.status_code, 202, created.text)
+                self.assertEqual(created.json()["created"][0]["source"], "extra.mp4")
+                job_id = created.json()["created"][0]["job_id"]
+                job = client.get(f"/api/v1/jobs/{job_id}").json()
+                self.assertEqual(job["configuration"]["general"]["source"], "extra.mp4")
+                self.assertTrue(Path(job["source_path"]).samefile(outside))
+
+                rejected = client.post("/api/v1/jobs/validate", json={
+                    "source_names": [],
+                    "sources": [str(outside_dir / "note.txt")],
+                    "job_configs": [],
+                    "overrides": {},
+                })
+                self.assertEqual(rejected.status_code, 200, rejected.text)
+                self.assertEqual(rejected.json()["skipped"][0]["code"],
+                                 "unsupported_extension")
+
     def test_source_upload_is_sanitized_and_checkpoint_transcript_is_versioned(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"

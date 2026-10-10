@@ -53,6 +53,15 @@
 
   let compositionJson = $state('{}');
   let loadedJobId = $state('');
+  let renderGroup = $state('');
+
+  const renderGroups = $derived(
+    [...new Set(
+      Object.values(app.platformSummaries || {})
+        .map((summary) => summary.group_id)
+        .filter(Boolean),
+    )],
+  );
 
   $effect(() => {
     if (job && job.job_id !== loadedJobId) {
@@ -273,7 +282,15 @@
               <button class="btn btn-primary" onclick={() => saveComposition(compositionJson)}>
                 Save job composition
               </button>
-              <button class="btn btn-secondary" onclick={() => jobAction('render')}>
+              {#if renderGroups.length}
+                <select aria-label="Conversion group" bind:value={renderGroup}>
+                  <option value="">All groups</option>
+                  {#each renderGroups as group (group)}
+                    <option value={group}>{group}</option>
+                  {/each}
+                </select>
+              {/if}
+              <button class="btn btn-secondary" onclick={() => jobAction('render', renderGroup)}>
                 <Icon name="refresh" /> Render
               </button>
               <button

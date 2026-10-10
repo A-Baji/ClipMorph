@@ -5,8 +5,9 @@
   import Notice from './components/Notice.svelte';
   import ErrorAlert from './components/ErrorAlert.svelte';
   import ConfirmDialog from './components/ConfirmDialog.svelte';
+  import JobDetailModal from './components/JobDetailModal.svelte';
   import QueueView from './views/QueueView.svelte';
-  import JobDetailView from './views/JobDetailView.svelte';
+  import WizardView from './views/WizardView.svelte';
   import MetricsView from './views/MetricsView.svelte';
   import LayoutsView from './views/LayoutsView.svelte';
   import SettingsView from './views/SettingsView.svelte';
@@ -16,6 +17,10 @@
     queue: {
       title: 'Your edit queue',
       subtitle: 'Select clips and upload — everything else has a sensible default.',
+    },
+    wizard: {
+      title: 'New batch',
+      subtitle: 'Pick clips, then configure. Complexity only when you ask for it.',
     },
     metrics: { title: 'Metrics', subtitle: 'Cross-job comparison of published clips.' },
     layouts: { title: 'Layouts', subtitle: 'Reusable conversion presets.' },
@@ -38,12 +43,12 @@
   <Sidebar />
 
   <main class="main">
-    {#if app.view === 'job'}
+    {#if app.view === 'wizard'}
       <div class="alert-slot">
         <Notice />
         <ErrorAlert />
       </div>
-      <JobDetailView />
+      <WizardView />
     {:else}
       <Topbar title={page.title} subtitle={page.subtitle}>
         {#if !app.online}
@@ -69,6 +74,7 @@
   </main>
 </div>
 
+<JobDetailModal />
 <ConfirmDialog />
 
 <style>
