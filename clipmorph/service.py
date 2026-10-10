@@ -63,6 +63,15 @@ PLATFORM_URL_TEMPLATES = {
 }
 
 
+def _is_relative_to(path: Path, root: Path) -> bool:
+    """True when ``path`` is ``root`` or lives beneath it."""
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
 class UnknownUploadAttempt(LookupError):
     """No upload attempt with the requested id exists in the job."""
 
@@ -758,9 +767,11 @@ class JobService:
 
     def create_job(self, source_path: str, configuration: dict[str, Any],
                    runner: Callable[[JobManifest, CancellationToken], None] | None = None,
-                   confirmed: bool = False) -> JobManifest:
+                   confirmed: bool = False,
+                   allow_outside_root: bool = False) -> JobManifest:
         source, effective, global_defaults = self.resolve_job(
-            source_path, configuration, confirmed=confirmed)
+            source_path, configuration, confirmed=confirmed,
+            allow_outside_root=allow_outside_root)
         manifest = JobManifest.create(
             str(source), effective, self.jobs_dir,
             global_defaults=global_defaults)
@@ -776,7 +787,8 @@ class JobService:
 
     def resolve_job(self, source_path: str, configuration: dict[str, Any],
                     config_dir: str | Path | None = None,
-                    confirmed: bool = False
+                    confirmed: bool = False,
+                    allow_outside_root: bool = False
                     ) -> tuple[Path, dict[str, Any], dict[str, Any]]:
         """Normalize a source and job override object without writing state.
 
@@ -784,6 +796,11 @@ class JobService:
         ``general.no_confirm = true`` above every merge tier, so the finalized
         configuration (stored as the job's ``job.yml``) is confirmed regardless
         of sidecars or job records.
+
+        ``allow_outside_root`` admits an explicit source path that lives outside
+        ``app.yml:source_dir`` (issue #257 transient wizard extras). The path is
+        referenced in place; no copy is made, and sidecars are not merged
+        because they are keyed to the source root.
         """
         app_configuration = load_app_configuration(self.app_config_path)
         source_root = Path(app_configuration["source_dir"])
@@ -792,12 +809,15 @@ class JobService:
         source_root = source_root.resolve()
 
         requested_source = Path(source_path)
-        if requested_source.is_absolute():
+        explicit_path = requested_source.is_absolute() or any(
+            separator in source_path for separator in ("/", "\\"))
+        if explicit_path:
             source = requested_source.resolve()
-            try:
-                source.relative_to(source_root)
-            except ValueError as error:
-                raise ValueError("source is outside app.yml source_dir") from error
+            if not allow_outside_root:
+                try:
+                    source.relative_to(source_root)
+                except ValueError as error:
+                    raise ValueError("source is outside app.yml source_dir") from error
             source_name = validate_source_name(source.name)
         else:
             source_name = validate_source_name(source_path)
@@ -815,7 +835,9 @@ class JobService:
 
         if not isinstance(configuration, dict):
             raise ValueError("job configuration must be an object")
-        sidecars = merge_source_configurations(source_name, [], config_dir, source_root)
+        inside_root = _is_relative_to(source, source_root)
+        sidecars = (merge_source_configurations(source_name, [], config_dir, source_root)
+                    if inside_root else {})
         overrides = merge_configuration(sidecars, configuration)
         general = overrides.get("general", {})
         if not isinstance(general, dict):
@@ -839,8 +861,15 @@ class JobService:
                     overrides: dict[str, Any] | None = None,
                     runner: Callable[[JobManifest, CancellationToken], None] | None = None,
                     dry_run: bool = False,
-                    confirmed: bool = False) -> dict[str, Any]:
-        """Fan out a source selection into independent jobs with partial results."""
+                    confirmed: bool = False,
+                    sources: list[str] | None = None) -> dict[str, Any]:
+        """Fan out a source selection into independent jobs with partial results.
+
+        ``sources`` carries explicit paths for transient wizard extras (issue
+        #257): each is referenced in place and may live outside
+        ``app.yml:source_dir``. They are processed beside the root-level
+        ``source_names`` selection.
+        """
         app_configuration = load_app_configuration(self.app_config_path)
         source_root = Path(app_configuration["source_dir"])
         if not source_root.is_absolute():
@@ -884,7 +913,19 @@ class JobService:
                     not isinstance(name, str) for name in source_names):
                 raise ValueError("source_names must be a list of filenames")
             candidates = list(source_names)
-        ordered_names = candidates
+        if sources is not None:
+            if not isinstance(sources, list) or any(
+                    not isinstance(path, str) for path in sources):
+                raise ValueError("sources must be a list of paths")
+        explicit_sources = list(sources or [])
+
+        # ``work`` is (display name, resolved source path, explicit) so the
+        # loop treats root-level names and transient paths uniformly.
+        work: list[tuple[str, Path, bool]] = [
+            (name, (source_root / name).resolve(), False) for name in candidates]
+        for raw in explicit_sources:
+            resolved = Path(raw).resolve()
+            work.append((resolved.name, resolved, True))
 
         created: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = duplicate_records
@@ -893,7 +934,7 @@ class JobService:
         seen_hashes = {job.source_sha256 for job in self.list_jobs()}
         seen_names: set[str] = set()
         shared = overrides or {}
-        for source_name in ordered_names:
+        for source_name, source_path, explicit in work:
             record_indexes = [index for index, record in enumerate(records, 1)
                               if isinstance(record, dict)
                               and isinstance(record.get("general"), dict)
@@ -911,28 +952,29 @@ class JobService:
                     "Source was already included"))
                 continue
             seen_names.add(safe_name)
-            if Path(safe_name).suffix.lower() not in {
+            if source_path.suffix.lower() not in {
                     ".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm"}:
                 skipped.append(self._source_outcome(
                     safe_name, record_index, "skipped", "unsupported_extension",
                     "Source extension is not supported"))
                 continue
-            source_path = (source_root / safe_name).resolve()
-            try:
-                source_path.relative_to(source_root)
-            except ValueError:
-                failed.append(self._source_outcome(
-                    safe_name, record_index, "failed", "source_outside_root",
-                    "Source resolves outside app.yml source_dir"))
-                continue
+            if not explicit:
+                try:
+                    source_path.relative_to(source_root)
+                except ValueError:
+                    failed.append(self._source_outcome(
+                        safe_name, record_index, "failed", "source_outside_root",
+                        "Source resolves outside app.yml source_dir"))
+                    continue
             if not source_path.is_file():
                 skipped.append(self._source_outcome(
                     safe_name, record_index, "skipped", "source_missing",
                     "Source file was not found"))
                 continue
             try:
-                sidecars = merge_source_configurations(
-                    safe_name, [], config_dir, source_root)
+                sidecars = (
+                    merge_source_configurations(safe_name, [], config_dir, source_root)
+                    if _is_relative_to(source_path, source_root) else {})
                 per_source = merge_configuration(sidecars, shared)
                 if record_index is not None:
                     per_source = merge_configuration(per_source, records[record_index - 1])
@@ -957,8 +999,9 @@ class JobService:
                         "Configuration is valid"))
                     seen_hashes.add(digest)
                     continue
-                manifest = self.create_job(safe_name, per_source, runner,
-                                           confirmed=confirmed)
+                manifest = self.create_job(
+                    str(source_path) if explicit else safe_name, per_source,
+                    runner, confirmed=confirmed, allow_outside_root=explicit)
                 created.append(self._source_outcome(
                     safe_name, record_index, "created", "created",
                     "Job created", manifest.job_id,

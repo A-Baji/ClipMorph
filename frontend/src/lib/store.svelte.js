@@ -2,8 +2,9 @@
  * Global dashboard state and actions (Svelte 5 runes module).
  *
  * Views read from ``app`` and call the exported actions; no view talks to the
- * API directly. Derived values are computed in the components with
- * ``$derived`` so the store stays a plain, testable state container.
+ * API directly. The creation flow is a two-step wizard whose in-progress state
+ * is a localStorage draft (issue #257): the wizard draft survives refreshes and
+ * tab switches and is discarded explicitly or on a successful create.
  */
 
 import { api } from './api.js';
@@ -18,31 +19,23 @@ const FALLBACK_CONFIGURATION = {
 
 const FALLBACK_PLATFORMS = ['youtube', 'instagram', 'tiktok', 'twitter', 'facebook'];
 
+const DRAFT_KEY = 'clipmorph.wizard.draft.v1';
+
 function emptyDraft() {
   return { title: '', description: '', tags: '', publishAt: '' };
 }
 
-function emptyCreate() {
+function emptyWizard() {
   return {
-    selectedSources: [],
-    expandedSource: '',
-    perSource: {},
-    title: '',
-    description: '',
-    tags: '',
-    renderer: 'overlay',
-    layoutId: '',
-    validateOnly: false,
-    include: [],
-    advanced: {
-      noConfirm: false,
-      clean: false,
-      conversionSkip: false,
-      subtitlesSkip: false,
-      strict: false,
-      uploadSkip: false,
-    },
-    result: null,
+    active: false,
+    step: 1,
+    selected: [],
+    extras: [], // [{ name, path }] transient out-of-folder clips
+    batch: { values: {}, overrides: [] },
+    jobs: {}, // source -> { values, overrides }
+    activeJob: '',
+    validation: null,
+    validating: false,
   };
 }
 
@@ -60,6 +53,7 @@ export const app = $state({
   credentials: {},
   probeResults: {},
   platforms: [...FALLBACK_PLATFORMS],
+  formSpec: null,
   artifacts: [],
   attempts: [],
   metrics: [],
@@ -68,7 +62,7 @@ export const app = $state({
   platformSummaries: {},
   uploadProgress: {},
   transcript: null,
-  create: emptyCreate(),
+  wizard: emptyWizard(),
   publish: {
     draft: emptyDraft(),
     contentKind: 'reel',
@@ -84,6 +78,7 @@ export const app = $state({
 
 let noticeTimer = null;
 let progressStream = null;
+let validationTimer = null;
 
 export function notify(message) {
   app.notice = message;
@@ -118,6 +113,8 @@ export function setView(view) {
   clearErrors();
   app.mobileNav = false;
   app.view = view;
+  if (view !== 'wizard') app.wizard.active = false;
+  if (view !== 'queue') app.selectedJobId = '';
   if (view === 'metrics') loadMetrics();
   if (view === 'layouts') {
     api.listLayouts().then((items) => (app.layouts = items)).catch(report);
@@ -127,15 +124,35 @@ export function setView(view) {
 export function openJob(jobId) {
   app.selectedJobId = jobId;
   app.detailTab = 'overview';
-  app.view = 'job';
   loadJobDetails().catch(report);
 }
 
 export function closeJob() {
   closeProgressStream();
-  app.view = 'queue';
   app.selectedJobId = '';
   app.transcript = null;
+}
+
+/* --- Path helpers (tri-state config resolution) -------------------------- */
+
+function getPath(object, path) {
+  return path
+    .split('.')
+    .reduce((node, key) => (node == null ? undefined : node[key]), object);
+}
+
+function setPath(object, path, value) {
+  const keys = path.split('.');
+  let node = object;
+  for (const key of keys.slice(0, -1)) {
+    if (typeof node[key] !== 'object' || node[key] === null) node[key] = {};
+    node = node[key];
+  }
+  node[keys[keys.length - 1]] = value;
+}
+
+function clone(value) {
+  return JSON.parse(JSON.stringify(value));
 }
 
 /* --- Loaders ------------------------------------------------------------- */
@@ -147,11 +164,12 @@ function platformsFromConfiguration(configuration) {
 
 export async function loadWorkspace() {
   try {
-    const [jobs, sources, layouts, settings] = await Promise.all([
+    const [jobs, sources, layouts, settings, formSpec] = await Promise.all([
       api.listJobs(),
       api.listSources(),
       api.listLayouts(),
       api.getConfiguration(),
+      api.getFormSpec().catch(() => null),
     ]);
     app.jobs = jobs;
     app.sources = sources;
@@ -159,9 +177,10 @@ export async function loadWorkspace() {
     app.configuration = settings.configuration || { ...FALLBACK_CONFIGURATION };
     app.credentials = settings.credentials || {};
     app.platforms = platformsFromConfiguration(app.configuration);
-    if (!app.create.include.length) app.create.include = [...app.platforms];
+    if (formSpec) app.formSpec = formSpec;
     app.online = true;
     app.ready = true;
+    restoreWizardDraft();
   } catch (error) {
     app.online = false;
     app.ready = true;
@@ -262,101 +281,280 @@ function openProgressStream(jobId) {
   progressStream = source;
 }
 
-/* --- Creation flow ------------------------------------------------------- */
+/* --- Wizard: selection --------------------------------------------------- */
 
-export function resetCreate() {
-  const include = [...app.platforms];
-  app.create = { ...emptyCreate(), include };
+export function startWizard() {
+  app.wizard.active = true;
+  app.view = 'wizard';
+  if (app.wizard.step !== 2) app.wizard.step = 1;
+  persistWizardDraft();
 }
 
-function buildCreatePayload() {
-  const form = app.create;
-  const selected = form.selectedSources.length
-    ? form.selectedSources
-    : app.sources.map((source) => source.name);
-  const jobConfigs = selected.map((source) => {
-    const perSource = form.perSource[source] || {};
-    const content = {};
-    for (const key of ['title', 'description', 'tags']) {
-      const value = perSource[key];
-      if (typeof value === 'string' && value.trim()) {
-        content[key] =
-          key === 'tags'
-            ? value.split(',').map((tag) => tag.trim()).filter(Boolean)
-            : value;
-      }
-    }
-    return {
-      general: { source },
-      ...(Object.keys(content).length ? { upload: { content } } : {}),
-    };
-  });
-  const advanced = form.advanced;
-  const platformOverrides = {};
-  for (const platform of app.platforms) {
-    platformOverrides[platform] = {
-      upload: { skip: !form.include.includes(platform) },
-    };
+export function discardWizard() {
+  clearWizardDraft();
+  app.wizard.active = false;
+  app.view = 'queue';
+}
+
+/** Leave the wizard for the board while preserving the in-progress draft. */
+export function leaveWizard() {
+  persistWizardDraft();
+  app.wizard.active = false;
+  app.view = 'queue';
+}
+
+export function wizardGoStep(step) {
+  if (step === 2 && !wizardSelected().length) {
+    report(new Error('Select at least one clip first'));
+    return;
   }
-  const overrides = {
-    general: { no_confirm: advanced.noConfirm, clean: advanced.clean },
-    conversion: {
-      skip: advanced.conversionSkip,
-      strict: advanced.strict,
-      subtitles: { skip: advanced.subtitlesSkip, renderer: form.renderer },
-      ...(form.layoutId ? { layout_id: form.layoutId } : {}),
-    },
-    upload: {
-      skip: advanced.uploadSkip,
-      content: {
-        title: form.title,
-        description: form.description,
-        tags: form.tags
-          ? form.tags.split(',').map((tag) => tag.trim()).filter(Boolean)
-          : [],
-      },
-    },
-    platforms: platformOverrides,
-  };
-  return { source_names: form.selectedSources.length ? selected : null, job_configs: jobConfigs, overrides };
+  app.wizard.step = step;
+  if (step === 2 && !app.wizard.activeJob) {
+    app.wizard.activeJob = wizardSelected()[0] || '';
+  }
+  persistWizardDraft();
 }
 
-export async function submitCreate() {
-  const form = app.create;
+export function wizardToggleSource(name, checked) {
+  app.wizard.selected = checked
+    ? [...new Set([...app.wizard.selected, name])]
+    : app.wizard.selected.filter((item) => item !== name);
+  syncWizardJobs();
+  persistWizardDraft();
+}
+
+export function wizardSelectAll(names) {
+  app.wizard.selected = [...names];
+  syncWizardJobs();
+  persistWizardDraft();
+}
+
+export function wizardClearSelection() {
+  app.wizard.selected = [];
+  syncWizardJobs();
+  persistWizardDraft();
+}
+
+export function wizardAddExtra(path) {
+  const trimmed = String(path || '').trim();
+  if (!trimmed) return;
+  const name = trimmed.split(/[\\/]/).pop();
+  if (!name) return;
+  if (app.wizard.extras.some((extra) => extra.path === trimmed)) return;
+  app.wizard.extras = [...app.wizard.extras, { name, path: trimmed }];
+  syncWizardJobs();
+  persistWizardDraft();
+}
+
+export function wizardRemoveExtra(path) {
+  app.wizard.extras = app.wizard.extras.filter((extra) => extra.path !== path);
+  syncWizardJobs();
+  persistWizardDraft();
+}
+
+/** The ordered union of selected root clips and transient extras. */
+export function wizardSelected() {
+  const extras = app.wizard.extras.map((extra) => extra.name);
+  return [...app.wizard.selected, ...extras.filter((name) => !app.wizard.selected.includes(name))];
+}
+
+export function wizardSetActiveJob(source) {
+  app.wizard.activeJob = source;
+  persistWizardDraft();
+}
+
+function syncWizardJobs() {
+  const keep = new Set(wizardSelected());
+  for (const source of Object.keys(app.wizard.jobs)) {
+    if (!keep.has(source)) delete app.wizard.jobs[source];
+  }
+  for (const source of keep) {
+    if (!app.wizard.jobs[source]) app.wizard.jobs[source] = { values: {}, overrides: [] };
+  }
+  if (!keep.has(app.wizard.activeJob)) app.wizard.activeJob = wizardSelected()[0] || '';
+}
+
+/* --- Wizard: tri-state configuration ------------------------------------- */
+
+export function globalDefault(path) {
+  return getPath(app.configuration.job_defaults || {}, path);
+}
+
+export function batchHasOverride(path) {
+  return app.wizard.batch.overrides.includes(path);
+}
+
+export function batchValue(path) {
+  return batchHasOverride(path)
+    ? getPath(app.wizard.batch.values, path)
+    : globalDefault(path);
+}
+
+export function jobHasOverride(source, path) {
+  return (app.wizard.jobs[source]?.overrides || []).includes(path);
+}
+
+export function jobValue(source, path) {
+  return jobHasOverride(source, path)
+    ? getPath(app.wizard.jobs[source].values, path)
+    : batchValue(path);
+}
+
+function upsert(target, path, value) {
+  setPath(target.values, path, value);
+  if (!target.overrides.includes(path)) target.overrides = [...target.overrides, path];
+}
+
+function removeOverride(target, path) {
+  target.overrides = target.overrides.filter((item) => item !== path);
+  const keys = path.split('.');
+  let node = target.values;
+  for (const key of keys.slice(0, -1)) {
+    if (typeof node?.[key] !== 'object' || node[key] === null) return;
+    node = node[key];
+  }
+  delete node[keys[keys.length - 1]];
+}
+
+export function setBatchField(path, value) {
+  upsert(app.wizard.batch, path, value);
+  persistWizardDraft();
+  scheduleValidation();
+}
+
+export function clearBatchField(path) {
+  removeOverride(app.wizard.batch, path);
+  persistWizardDraft();
+  scheduleValidation();
+}
+
+export function setJobField(source, path, value) {
+  if (!app.wizard.jobs[source]) app.wizard.jobs[source] = { values: {}, overrides: [] };
+  upsert(app.wizard.jobs[source], path, value);
+  persistWizardDraft();
+  scheduleValidation();
+}
+
+export function clearJobField(source, path) {
+  if (!app.wizard.jobs[source]) return;
+  removeOverride(app.wizard.jobs[source], path);
+  persistWizardDraft();
+  scheduleValidation();
+}
+
+/** Materialize one job's effective config from global + batch + job overrides. */
+export function materializeJobConfig(source) {
+  const config = clone(app.configuration.job_defaults || {});
+  for (const path of app.wizard.batch.overrides) {
+    setPath(config, path, getPath(app.wizard.batch.values, path));
+  }
+  const job = app.wizard.jobs[source];
+  for (const path of job?.overrides || []) {
+    setPath(config, path, getPath(job.values, path));
+  }
+  config.general = { ...(config.general || {}), source };
+  return config;
+}
+
+export function buildWizardPayload() {
+  const selected = wizardSelected();
+  return {
+    source_names: [...app.wizard.selected],
+    sources: app.wizard.extras.map((extra) => extra.path),
+    job_configs: selected.map((source) => materializeJobConfig(source)),
+    overrides: {},
+  };
+}
+
+/* --- Wizard: live validation + create ------------------------------------ */
+
+function scheduleValidation() {
+  if (!app.wizard.active || app.wizard.step !== 2) return;
+  if (validationTimer) clearTimeout(validationTimer);
+  validationTimer = setTimeout(() => {
+    validationTimer = null;
+    validateWizard().catch(report);
+  }, 500);
+}
+
+export async function validateWizard() {
+  if (!wizardSelected().length) {
+    app.wizard.validation = null;
+    return null;
+  }
+  app.wizard.validating = true;
+  try {
+    const result = await api.validateJobs(buildWizardPayload());
+    app.wizard.validation = {
+      at: Date.now(),
+      perSource: Object.fromEntries(
+        (result.failed || []).map((item) => [item.source, item.message]),
+      ),
+    };
+    return result;
+  } catch (error) {
+    report(error);
+    return null;
+  } finally {
+    app.wizard.validating = false;
+  }
+}
+
+export function wizardJobError(source) {
+  return app.wizard.validation?.perSource?.[source] || '';
+}
+
+export async function createFromWizard() {
   app.busy = true;
   clearErrors();
   try {
-    if (form.uploadFile) {
-      const uploaded = await api.uploadSource(form.uploadFile);
-      form.selectedSources = [...new Set([...form.selectedSources, uploaded.name])];
-      form.uploadFile = null;
-    }
-    const payload = buildCreatePayload();
-    if (form.validateOnly) {
-      const validation = await api.validateJobs(payload);
-      if (!validation.valid) {
-        app.errors = validation.failed.map(
-          (item) => `${item.source || 'record'}: ${item.message}`,
-        );
-        return;
-      }
-      notify(`Validation passed for ${validation.summary.created} source(s)`);
-      return;
-    }
-    const result = await api.createJobs(payload);
-    app.create.result = result;
-    await loadWorkspace();
-    if (result.created.length) {
-      notify(
-        `${result.summary.created} created · ${result.summary.skipped} skipped · ` +
-          `${result.summary.failed} failed`,
-      );
-    }
-    if (result.failed.length) {
-      app.errors = result.failed.map(
+    const payload = buildWizardPayload();
+    const validation = await api.validateJobs(payload);
+    const invalid = new Set((validation.failed || []).map((item) => item.source));
+    app.wizard.validation = {
+      at: Date.now(),
+      perSource: Object.fromEntries(
+        (validation.failed || []).map((item) => [item.source, item.message]),
+      ),
+    };
+    if (invalid.size) {
+      app.errors = (validation.failed || []).map(
         (item) => `${item.source || 'record'}: ${item.message}`,
       );
     }
+    const validSources = new Set(
+      payload.job_configs
+        .map((config) => config.general?.source)
+        .filter((source) => !invalid.has(source)),
+    );
+    const filtered = {
+      source_names: payload.source_names.filter((name) => validSources.has(name)),
+      sources: app.wizard.extras
+        .filter((extra) => validSources.has(extra.name))
+        .map((extra) => extra.path),
+      job_configs: payload.job_configs.filter(
+        (config) => validSources.has(config.general?.source),
+      ),
+      overrides: {},
+    };
+    if (!filtered.job_configs.length && !filtered.sources.length) {
+      app.busy = false;
+      return;
+    }
+    const result = await api.createJobs(filtered);
+    if (result.failed?.length) {
+      app.errors = result.failed.map((item) => `${item.source || 'record'}: ${item.message}`);
+      app.busy = false;
+      return;
+    }
+    clearWizardDraft();
+    app.wizard = emptyWizard();
+    app.view = 'queue';
+    await loadWorkspace();
+    notify(
+      `${result.summary?.created ?? result.created.length} created · ` +
+        `${result.summary?.skipped ?? 0} skipped`,
+    );
   } catch (error) {
     report(error);
   } finally {
@@ -364,33 +562,99 @@ export async function submitCreate() {
   }
 }
 
+/* --- Wizard: draft persistence ------------------------------------------- */
+
+export function persistWizardDraft() {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    localStorage.setItem(DRAFT_KEY, JSON.stringify($state.snapshot(app.wizard)));
+  } catch {
+    /* storage full or unavailable: the draft stays in memory only */
+  }
+}
+
+export function restoreWizardDraft() {
+  if (typeof localStorage === 'undefined') return;
+  let raw;
+  try {
+    raw = localStorage.getItem(DRAFT_KEY);
+  } catch {
+    return;
+  }
+  if (!raw) return;
+  try {
+    const draft = JSON.parse(raw);
+    if (!draft || typeof draft !== 'object') return;
+    const hasWork =
+      (draft.selected?.length || 0) > 0 ||
+      (draft.extras?.length || 0) > 0 ||
+      (draft.batch?.overrides?.length || 0) > 0;
+    if (!hasWork) return;
+    app.wizard = { ...emptyWizard(), ...draft, active: false, validating: false };
+    syncWizardJobs();
+  } catch {
+    /* ignore a malformed draft */
+  }
+}
+
+export function clearWizardDraft() {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    localStorage.removeItem(DRAFT_KEY);
+  } catch {
+    /* nothing to clear */
+  }
+}
+
 /* --- Job actions --------------------------------------------------------- */
 
-export async function jobAction(action) {
-  const job = selectedJob();
+async function performJobAction(job, action, arg) {
   if (!job) return;
   try {
     if (action === 'delete') {
       await api.deleteJob(job.job_id);
-      closeJob();
+      if (app.selectedJobId === job.job_id) closeJob();
       await loadWorkspace();
       notify('Job moved to trash');
     } else if (action === 'cancel') {
       await api.cancelJob(job.job_id);
-      await refreshSelected();
+      await refreshJob(job.job_id);
       notify('Cancellation requested');
     } else if (action === 'resume') {
       await api.resumeJob(job.job_id);
-      await refreshSelected();
+      await refreshJob(job.job_id);
       notify('Resume requested');
     } else if (action === 'render') {
-      await api.renderJob(job.job_id);
-      await refreshSelected();
-      notify('Render requested');
+      await api.renderJob(job.job_id, arg || undefined);
+      await refreshJob(job.job_id);
+      notify(arg ? `Render requested for group ${arg}` : 'Render requested');
     }
   } catch (error) {
     report(error);
   }
+}
+
+export async function jobAction(action, arg) {
+  await performJobAction(selectedJob(), action, arg);
+}
+
+export async function cardAction(job, action) {
+  await performJobAction(job, action);
+}
+
+export async function cancelScheduledAttempt(job, attemptId) {
+  try {
+    await api.cancelScheduledAttempt(job.job_id, attemptId);
+    await refreshJob(job.job_id);
+    notify('Scheduled attempt cancelled');
+  } catch (error) {
+    report(error);
+  }
+}
+
+async function refreshJob(jobId) {
+  if (app.selectedJobId === jobId) await loadJobDetails();
+  else await loadWorkspace();
 }
 
 export async function retryCheckpoint(stage) {
@@ -398,7 +662,7 @@ export async function retryCheckpoint(stage) {
   if (!job) return;
   try {
     await api.retryCheckpoint(job.job_id, stage, job.checkpoints[stage].revision);
-    await refreshSelected();
+    await refreshJob(job.job_id);
     notify(`${stage} retry requested`);
   } catch (error) {
     report(error);
@@ -410,16 +674,11 @@ export async function acceptCheckpoint(stage, group) {
   if (!job) return;
   try {
     await api.acceptCheckpoint(job.job_id, stage, job.checkpoints[stage].revision, group);
-    await refreshSelected();
+    await refreshJob(job.job_id);
     notify(`${stage} review accepted`);
   } catch (error) {
     report(error);
   }
-}
-
-async function refreshSelected() {
-  if (app.selectedJobId) await loadJobDetails();
-  else await loadWorkspace();
 }
 
 /* --- Transcript / composition ------------------------------------------- */
@@ -479,7 +738,7 @@ export async function saveComposition(composition) {
         job.current_configuration_hash,
         job.status === 'completed',
       );
-      await refreshSelected();
+      await refreshJob(job.job_id);
       notify('Job composition saved · render to apply');
       return true;
     } catch (error) {
@@ -653,7 +912,7 @@ export async function submitUpload() {
     const submitted = await api.submitUpload(job.job_id, {
       platforms: app.publish.selectedPlatforms,
     });
-    await refreshSelected();
+    await refreshJob(job.job_id);
     notify(
       submitted.scheduled
         ? 'Upload attempts scheduled for the chosen time'
@@ -671,7 +930,7 @@ export async function retryUpload(attempt) {
     await api.retryUpload(job.job_id, attempt.platform, {
       attempt_id: attempt.attempt_id,
     });
-    await refreshSelected();
+    await refreshJob(job.job_id);
     notify(`${attempt.platform} retry started`);
   } catch (error) {
     report(error);
@@ -700,7 +959,7 @@ export async function renameArtifact(artifact, displayName) {
   if (!job || !displayName) return;
   try {
     await api.patchArtifact(job.job_id, artifact.id, displayName);
-    await refreshSelected();
+    await refreshJob(job.job_id);
     notify('Artifact renamed');
   } catch (error) {
     report(error);
@@ -712,7 +971,7 @@ export async function deleteArtifact(artifact) {
   if (!job) return;
   try {
     await api.deleteArtifact(job.job_id, artifact.id);
-    await refreshSelected();
+    await refreshJob(job.job_id);
     notify('Artifact moved to trash');
   } catch (error) {
     report(error);
@@ -724,7 +983,7 @@ export async function pruneArtifacts() {
   if (!job) return;
   try {
     const result = await api.pruneArtifacts(job.job_id);
-    await refreshSelected();
+    await refreshJob(job.job_id);
     notify(`Pruned ${(result.pruned || []).length} artifact(s)`);
   } catch (error) {
     report(error);

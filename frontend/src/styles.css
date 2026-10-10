@@ -1180,7 +1180,7 @@ details.advanced .advanced-body {
 .scrim {
   position: fixed;
   inset: 0;
-  background: rgba(5, 8, 11, 0.7);
+  background: var(--color-scrim);
   display: grid;
   place-items: center;
   z-index: 50;

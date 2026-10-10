@@ -48,6 +48,10 @@ async function request(path, { method = 'GET', body, form } = {}) {
 export const api = {
   // Configuration / credentials
   getConfiguration: () => request('/configuration'),
+  getFormSpec: () => fetch('/form-spec.json').then((response) => {
+    if (!response.ok) throw new Error(`Form spec unavailable (${response.status})`);
+    return response.json();
+  }),
   saveConfiguration: (configuration) =>
     request('/configuration', { method: 'PUT', body: { configuration } }),
   probeCredential: (platform) =>
@@ -121,6 +125,8 @@ export const api = {
     request(`/jobs/${id}/upload`, { method: 'POST', body: payload }),
   retryUpload: (id, platform, payload) =>
     request(`/jobs/${id}/uploads/${platform}/retry`, { method: 'POST', body: payload }),
+  cancelScheduledAttempt: (id, attemptId) =>
+    request(`/jobs/${id}/scheduled/${attemptId}`, { method: 'DELETE' }),
 
   // Artifacts
   listArtifacts: (id) => request(`/jobs/${id}/artifacts`),

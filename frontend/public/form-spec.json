@@ -1,0 +1,571 @@
+{
+  "schema_version": 1,
+  "source": "clipmorph.configuration",
+  "sections": [
+    {
+      "id": "general",
+      "label": "General",
+      "fields": [
+        {
+          "path": "general.no_confirm",
+          "key": "no_confirm",
+          "label": "Skip confirmations",
+          "type": "boolean",
+          "default": false
+        },
+        {
+          "path": "general.clean",
+          "key": "clean",
+          "label": "Clean generated files",
+          "type": "boolean",
+          "default": false,
+          "hint": "Remove intermediate conversion files once a job finishes."
+        }
+      ]
+    },
+    {
+      "id": "conversion",
+      "label": "Conversion",
+      "fields": [
+        {
+          "path": "conversion.layout_id",
+          "key": "layout_id",
+          "label": "Layout preset",
+          "type": "string",
+          "default": null,
+          "hint": "Materialize a saved layout preset over the inline layout."
+        },
+        {
+          "path": "conversion.skip",
+          "key": "skip",
+          "label": "Skip conversion",
+          "type": "boolean",
+          "default": false
+        },
+        {
+          "path": "conversion.strict",
+          "key": "strict",
+          "label": "Strict validation",
+          "type": "boolean",
+          "default": false
+        },
+        {
+          "path": "conversion.no_confirm",
+          "key": "no_confirm",
+          "label": "Skip conversion confirmations",
+          "type": "boolean",
+          "default": null
+        },
+        {
+          "path": "conversion.clean",
+          "key": "clean",
+          "label": "Clean conversion files",
+          "type": "boolean",
+          "default": null
+        },
+        {
+          "path": "conversion.layout",
+          "key": "layout",
+          "label": "Inline layout",
+          "type": "object",
+          "default": null
+        }
+      ],
+      "sections": [
+        {
+          "id": "conversion.subtitles",
+          "label": "Subtitles & transcription",
+          "fields": [
+            {
+              "path": "conversion.subtitles.skip",
+              "key": "skip",
+              "label": "Skip transcript",
+              "type": "boolean",
+              "default": false
+            },
+            {
+              "path": "conversion.subtitles.renderer",
+              "key": "renderer",
+              "label": "Caption renderer",
+              "type": "enum",
+              "default": "overlay",
+              "options": [
+                "overlay",
+                "stacked"
+              ]
+            },
+            {
+              "path": "conversion.subtitles.no_confirm",
+              "key": "no_confirm",
+              "label": "Skip subtitle confirmations",
+              "type": "boolean",
+              "default": null
+            },
+            {
+              "path": "conversion.subtitles.clean",
+              "key": "clean",
+              "label": "Clean subtitle files",
+              "type": "boolean",
+              "default": null
+            },
+            {
+              "path": "conversion.subtitles.transcription_language",
+              "key": "transcription_language",
+              "label": "Transcription language",
+              "type": "string",
+              "default": "en"
+            },
+            {
+              "path": "conversion.subtitles.transcription_model",
+              "key": "transcription_model",
+              "label": "Transcription model",
+              "type": "string",
+              "default": "tiny"
+            },
+            {
+              "path": "conversion.subtitles.transcription_device",
+              "key": "transcription_device",
+              "label": "Transcription device",
+              "type": "string",
+              "default": "cpu"
+            },
+            {
+              "path": "conversion.subtitles.transcription_compute_type",
+              "key": "transcription_compute_type",
+              "label": "Transcription compute type",
+              "type": "string",
+              "default": "int8"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "upload",
+      "label": "Upload",
+      "fields": [
+        {
+          "path": "upload.skip",
+          "key": "skip",
+          "label": "Skip upload",
+          "type": "boolean",
+          "default": false
+        },
+        {
+          "path": "upload.no_confirm",
+          "key": "no_confirm",
+          "label": "Skip upload confirmations",
+          "type": "boolean",
+          "default": null
+        }
+      ],
+      "sections": [
+        {
+          "id": "upload.content",
+          "label": "Content",
+          "fields": [
+            {
+              "path": "upload.content.title",
+              "key": "title",
+              "label": "Title",
+              "type": "string",
+              "default": ""
+            },
+            {
+              "path": "upload.content.description",
+              "key": "description",
+              "label": "Description",
+              "type": "text",
+              "default": ""
+            },
+            {
+              "path": "upload.content.tags",
+              "key": "tags",
+              "label": "Tags",
+              "type": "string_list",
+              "default": [],
+              "hint": "Comma-separated list of tags."
+            }
+          ]
+        },
+        {
+          "id": "upload.suggestions",
+          "label": "Suggestions",
+          "fields": [
+            {
+              "path": "upload.suggestions.provider",
+              "key": "provider",
+              "label": "Suggestion provider",
+              "type": "string",
+              "default": "template"
+            },
+            {
+              "path": "upload.suggestions.model",
+              "key": "model",
+              "label": "Suggestion model",
+              "type": "string",
+              "default": null
+            }
+          ]
+        },
+        {
+          "id": "upload.schedule",
+          "label": "Schedule",
+          "fields": [
+            {
+              "path": "upload.schedule.publish_at",
+              "key": "publish_at",
+              "label": "Publish at",
+              "type": "datetime",
+              "default": null,
+              "hint": "UTC ISO-8601 timestamp; a future instant defers publication."
+            },
+            {
+              "path": "upload.schedule.timezone",
+              "key": "timezone",
+              "label": "Timezone",
+              "type": "string",
+              "default": null
+            },
+            {
+              "path": "upload.schedule.mode",
+              "key": "mode",
+              "label": "Schedule mode",
+              "type": "enum",
+              "default": "local",
+              "options": [
+                "local",
+                "platform"
+              ],
+              "hint": "Who holds a future publication: ClipMorph or the platform."
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "platforms": {
+    "label": "Platforms",
+    "order": [
+      "youtube",
+      "instagram",
+      "tiktok",
+      "twitter",
+      "facebook"
+    ],
+    "sections": [
+      {
+        "id": "general",
+        "label": "General",
+        "fields": [
+          {
+            "path": "general.no_confirm",
+            "key": "no_confirm",
+            "label": "Skip confirmations",
+            "type": "boolean",
+            "default": false
+          },
+          {
+            "path": "general.clean",
+            "key": "clean",
+            "label": "Clean generated files",
+            "type": "boolean",
+            "default": false,
+            "hint": "Remove intermediate conversion files once a job finishes."
+          }
+        ]
+      },
+      {
+        "id": "conversion",
+        "label": "Conversion",
+        "fields": [
+          {
+            "path": "conversion.layout_id",
+            "key": "layout_id",
+            "label": "Layout preset",
+            "type": "string",
+            "default": null,
+            "hint": "Materialize a saved layout preset over the inline layout."
+          },
+          {
+            "path": "conversion.skip",
+            "key": "skip",
+            "label": "Skip conversion",
+            "type": "boolean",
+            "default": false
+          },
+          {
+            "path": "conversion.strict",
+            "key": "strict",
+            "label": "Strict validation",
+            "type": "boolean",
+            "default": false
+          },
+          {
+            "path": "conversion.no_confirm",
+            "key": "no_confirm",
+            "label": "Skip conversion confirmations",
+            "type": "boolean",
+            "default": null
+          },
+          {
+            "path": "conversion.clean",
+            "key": "clean",
+            "label": "Clean conversion files",
+            "type": "boolean",
+            "default": null
+          },
+          {
+            "path": "conversion.layout",
+            "key": "layout",
+            "label": "Inline layout",
+            "type": "object",
+            "default": null
+          }
+        ],
+        "sections": [
+          {
+            "id": "conversion.subtitles",
+            "label": "Subtitles & transcription",
+            "fields": [
+              {
+                "path": "conversion.subtitles.skip",
+                "key": "skip",
+                "label": "Skip transcript",
+                "type": "boolean",
+                "default": false
+              },
+              {
+                "path": "conversion.subtitles.renderer",
+                "key": "renderer",
+                "label": "Caption renderer",
+                "type": "enum",
+                "default": "overlay",
+                "options": [
+                  "overlay",
+                  "stacked"
+                ]
+              },
+              {
+                "path": "conversion.subtitles.no_confirm",
+                "key": "no_confirm",
+                "label": "Skip subtitle confirmations",
+                "type": "boolean",
+                "default": null
+              },
+              {
+                "path": "conversion.subtitles.clean",
+                "key": "clean",
+                "label": "Clean subtitle files",
+                "type": "boolean",
+                "default": null
+              },
+              {
+                "path": "conversion.subtitles.transcription_language",
+                "key": "transcription_language",
+                "label": "Transcription language",
+                "type": "string",
+                "default": "en",
+                "protected": true
+              },
+              {
+                "path": "conversion.subtitles.transcription_model",
+                "key": "transcription_model",
+                "label": "Transcription model",
+                "type": "string",
+                "default": "tiny",
+                "protected": true
+              },
+              {
+                "path": "conversion.subtitles.transcription_device",
+                "key": "transcription_device",
+                "label": "Transcription device",
+                "type": "string",
+                "default": "cpu",
+                "protected": true
+              },
+              {
+                "path": "conversion.subtitles.transcription_compute_type",
+                "key": "transcription_compute_type",
+                "label": "Transcription compute type",
+                "type": "string",
+                "default": "int8",
+                "protected": true
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "upload",
+        "label": "Upload",
+        "fields": [
+          {
+            "path": "upload.skip",
+            "key": "skip",
+            "label": "Skip upload",
+            "type": "boolean",
+            "default": false
+          },
+          {
+            "path": "upload.no_confirm",
+            "key": "no_confirm",
+            "label": "Skip upload confirmations",
+            "type": "boolean",
+            "default": null
+          }
+        ],
+        "sections": [
+          {
+            "id": "upload.content",
+            "label": "Content",
+            "fields": [
+              {
+                "path": "upload.content.title",
+                "key": "title",
+                "label": "Title",
+                "type": "string",
+                "default": ""
+              },
+              {
+                "path": "upload.content.description",
+                "key": "description",
+                "label": "Description",
+                "type": "text",
+                "default": ""
+              },
+              {
+                "path": "upload.content.tags",
+                "key": "tags",
+                "label": "Tags",
+                "type": "string_list",
+                "default": [],
+                "hint": "Comma-separated list of tags."
+              }
+            ]
+          },
+          {
+            "id": "upload.suggestions",
+            "label": "Suggestions",
+            "fields": [
+              {
+                "path": "upload.suggestions.provider",
+                "key": "provider",
+                "label": "Suggestion provider",
+                "type": "string",
+                "default": "template"
+              },
+              {
+                "path": "upload.suggestions.model",
+                "key": "model",
+                "label": "Suggestion model",
+                "type": "string",
+                "default": null
+              }
+            ]
+          },
+          {
+            "id": "upload.schedule",
+            "label": "Schedule",
+            "fields": [
+              {
+                "path": "upload.schedule.publish_at",
+                "key": "publish_at",
+                "label": "Publish at",
+                "type": "datetime",
+                "default": null,
+                "hint": "UTC ISO-8601 timestamp; a future instant defers publication."
+              },
+              {
+                "path": "upload.schedule.timezone",
+                "key": "timezone",
+                "label": "Timezone",
+                "type": "string",
+                "default": null
+              },
+              {
+                "path": "upload.schedule.mode",
+                "key": "mode",
+                "label": "Schedule mode",
+                "type": "enum",
+                "default": "local",
+                "options": [
+                  "local",
+                  "platform"
+                ],
+                "hint": "Who holds a future publication: ClipMorph or the platform."
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "flat_fields": {
+      "youtube": [
+        {
+          "path": "platforms.youtube.category",
+          "key": "category",
+          "label": "Category",
+          "type": "string",
+          "default": "22"
+        },
+        {
+          "path": "platforms.youtube.privacy_status",
+          "key": "privacy_status",
+          "label": "Privacy status",
+          "type": "string",
+          "default": "public"
+        }
+      ],
+      "instagram": [
+        {
+          "path": "platforms.instagram.share_to_feed",
+          "key": "share_to_feed",
+          "label": "Share to feed",
+          "type": "boolean",
+          "default": true
+        },
+        {
+          "path": "platforms.instagram.thumb_offset",
+          "key": "thumb_offset",
+          "label": "Thumb offset",
+          "type": "integer",
+          "default": 0
+        },
+        {
+          "path": "platforms.instagram.is_ai_generated",
+          "key": "is_ai_generated",
+          "label": "Is ai generated",
+          "type": "boolean",
+          "default": false
+        }
+      ],
+      "tiktok": [
+        {
+          "path": "platforms.tiktok.privacy_level",
+          "key": "privacy_level",
+          "label": "Privacy level",
+          "type": "string",
+          "default": "PUBLIC_TO_EVERYONE"
+        }
+      ],
+      "twitter": [],
+      "facebook": [
+        {
+          "path": "platforms.facebook.content_kind",
+          "key": "content_kind",
+          "label": "Content kind",
+          "type": "string",
+          "default": "reel"
+        },
+        {
+          "path": "platforms.facebook.is_ai_generated",
+          "key": "is_ai_generated",
+          "label": "Is ai generated",
+          "type": "boolean",
+          "default": false
+        }
+      ]
+    }
+  }
+}

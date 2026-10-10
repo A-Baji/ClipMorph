@@ -37,6 +37,10 @@ APP_CONFIG_VERSION = 2
 # the registry in clipmorph.platforms, so no per-platform mode map exists.
 SCHEDULE_MODES = {None, "local", "platform"}
 
+# Caption renderer backends the subtitles/layout schema accepts. The form spec
+# imports this so its renderer enum cannot drift from the validator.
+SUBTITLE_RENDERERS = {"overlay", "stacked"}
+
 # Number of rotated `<file>.backup[n]` copies kept when retention.backups.keep_n
 # is unset or app.yml cannot be read (auth may persist before a valid app.yml).
 DEFAULT_BACKUP_KEEP_N = 5
@@ -437,7 +441,7 @@ def _validate_subtitles_section(subtitles: Any,
             raise ValueError(
                 f"{label}.{key} is not allowed per platform; the job shares "
                 "one transcript session")
-    if subtitles.get("renderer", "overlay") not in {"overlay", "stacked"}:
+    if subtitles.get("renderer", "overlay") not in SUBTITLE_RENDERERS:
         raise ValueError(f"{label}.renderer must be overlay or stacked")
     if "skip" in subtitles and not isinstance(subtitles["skip"], bool):
         raise ValueError(f"{label}.skip must be a boolean")
@@ -669,7 +673,7 @@ def resolve_job_configuration(
     if not isinstance(subtitles, dict):
         raise ValueError("conversion.subtitles must be an object")
     renderer = subtitles.setdefault("renderer", "overlay")
-    if renderer not in {"overlay", "stacked"}:
+    if renderer not in SUBTITLE_RENDERERS:
         raise ValueError("conversion.subtitles.renderer must be overlay or stacked")
     layout = conversion["layout"]
     if not isinstance(layout, dict):
@@ -886,7 +890,7 @@ def _validate_overlay_conversion(conversion: Any, label: str,
         for key in _TRANSCRIPTION_KEYS:
             if key in subtitles and not isinstance(subtitles[key], str):
                 raise ValueError(f"{label}.subtitles.{key} must be a string")
-        if subtitles.get("renderer", "overlay") not in {"overlay", "stacked"}:
+        if subtitles.get("renderer", "overlay") not in SUBTITLE_RENDERERS:
             raise ValueError(f"{label}.subtitles.renderer must be overlay or stacked")
         if per_platform:
             protected = sorted(_TRANSCRIPTION_KEYS & set(subtitles))

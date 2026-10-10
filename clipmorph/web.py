@@ -111,6 +111,20 @@ def create_app(data_dir: str | Path | None = None,
     def health():
         return {"status": "ok"}
 
+    @app.get("/form-spec.json", include_in_schema=False)
+    def form_spec_asset():
+        """The build-time configuration-form spec the dashboard renders from.
+
+        Served from the packaged asset when a frontend build has shipped it;
+        otherwise generated live so the form still renders in a source
+        checkout that has not been built.
+        """
+        spec_file = frontend_dist / "form-spec.json"
+        if spec_file.is_file():
+            return FileResponse(spec_file)
+        from clipmorph.form_spec import form_spec
+        return form_spec()
+
     @app.get("/api/v1/configuration")
     def get_configuration():
         return {"configuration": app_config(), "credentials": credential_status()}
@@ -249,11 +263,12 @@ def create_app(data_dir: str | Path | None = None,
     @app.post("/api/v1/jobs/validate")
     def validate_jobs(payload: dict):
         try:
-            if "source_names" in payload:
+            if "source_names" in payload or "sources" in payload:
                 result = service.create_jobs(
                     payload.get("source_names"), payload.get("job_configs"),
                     config_dir=payload.get("config_dir"),
-                    overrides=payload.get("overrides"), dry_run=True)
+                    overrides=payload.get("overrides"), dry_run=True,
+                    sources=payload.get("sources"))
                 return {"valid": not result["failed"], **result, "warnings": []}
             source = payload.get("source")
             if not isinstance(source, str):
@@ -295,6 +310,7 @@ def create_app(data_dir: str | Path | None = None,
                 job_configs=payload.get("job_configs"),
                 config_dir=payload.get("config_dir"),
                 overrides=payload.get("overrides"),
+                sources=payload.get("sources"),
                 runner=lambda job, token: execute_job(
                     job, token, service.jobs_dir, service.app_config_path))
         except ValueError as error:
