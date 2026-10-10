@@ -143,6 +143,8 @@ export const api = {
     request(`/jobs/${id}/artifacts/prune`, { method: 'POST' }),
   previewUrl: (id, artifactId) => `${BASE}/jobs/${id}/artifacts/${artifactId}/preview`,
   downloadUrl: (id, artifactId) => `${BASE}/jobs/${id}/artifacts/${artifactId}/download`,
+  openFolder: (jobId, artifactId) =>
+    request(`/jobs/${jobId}/artifacts/${artifactId}/open-folder`, { method: 'POST' }),
 
   // Metrics
   getMetrics: (id, includeDimensions = false) =>

@@ -6,7 +6,7 @@
   import ErrorAlert from './components/ErrorAlert.svelte';
   import ConfirmDialog from './components/ConfirmDialog.svelte';
   import JobDetailModal from './components/JobDetailModal.svelte';
-  import QueueView from './views/QueueView.svelte';
+  import JobsView from './views/JobsView.svelte';
   import WizardView from './views/WizardView.svelte';
   import MetricsView from './views/MetricsView.svelte';
   import LayoutsView from './views/LayoutsView.svelte';
@@ -14,20 +14,16 @@
   import { app, loadWorkspace } from './lib/store.svelte.js';
 
   const PAGE = {
-    queue: {
+    jobs: {
       title: 'Your edit queue',
       subtitle: 'Select clips and upload — everything else has a sensible default.',
-    },
-    wizard: {
-      title: 'New batch',
-      subtitle: 'Pick clips, then configure. Complexity only when you ask for it.',
     },
     metrics: { title: 'Metrics', subtitle: 'Cross-job comparison of published clips.' },
     layouts: { title: 'Layouts', subtitle: 'Reusable conversion presets.' },
     settings: { title: 'Settings', subtitle: 'Workspace paths, credentials, and defaults.' },
   };
 
-  const page = $derived(PAGE[app.view] || PAGE.queue);
+  const page = $derived(PAGE[app.view] || PAGE.jobs);
 
   onMount(() => {
     loadWorkspace();
@@ -68,7 +64,7 @@
       {:else if app.view === 'settings'}
         <SettingsView />
       {:else}
-        <QueueView />
+        <JobsView />
       {/if}
     {/if}
   </main>
@@ -80,7 +76,6 @@
 <style>
   .alert-slot {
     width: 100%;
-    max-width: 1180px;
     padding: var(--space-6) var(--space-8) 0;
   }
 

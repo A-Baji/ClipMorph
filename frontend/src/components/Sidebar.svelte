@@ -2,11 +2,11 @@
   import Icon from './Icon.svelte';
   import { app, setView } from '../lib/store.svelte.js';
 
-  /** Primary navigation. Queue is the default surface; job detail is nested. */
+  /** Primary navigation. Jobs is the default surface; job detail is nested. */
   let { onNavigate } = $props();
 
   const items = [
-    { id: 'queue', label: 'Queue', icon: 'queue' },
+    { id: 'jobs', label: 'Jobs', icon: 'queue' },
     { id: 'metrics', label: 'Metrics', icon: 'chart' },
     { id: 'layouts', label: 'Layouts', icon: 'layers' },
     { id: 'settings', label: 'Settings', icon: 'sliders' },
@@ -27,14 +27,11 @@
     {#each items as item (item.id)}
       <button
         class="nav-item"
-        class:active={app.view === item.id || (app.view === 'wizard' && item.id === 'queue')}
+        class:active={app.view === item.id || (app.view === 'wizard' && item.id === 'jobs')}
         onclick={() => { setView(item.id); onNavigate?.(); }}
       >
         <Icon name={item.icon} />
         <span>{item.label}</span>
-        {#if item.id === 'queue'}
-          <span class="count">{app.jobs.length.toString().padStart(2, '0')}</span>
-        {/if}
       </button>
     {/each}
   </nav>

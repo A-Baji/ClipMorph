@@ -17,9 +17,19 @@
    * Recursive renderer for the generated configuration-form spec (issue #257).
    * Every control is tri-state: inherit batch / inherit global default /
    * custom. ``mode`` is "batch" for the shared block and "job" for a job's
-   * detail form; ``prefix`` namespaces per-platform paths.
+   * detail form; ``prefix`` namespaces per-platform paths. Sections render as
+   * collapsible ``<details>`` (issue #259 D9/U10): ``open`` is the initial
+   * state — batch sections may start expanded, per-job sections start
+   * collapsed.
    */
-  let { sections = [], mode = 'job', source = '', prefix = '', depth = 0 } = $props();
+  let {
+    sections = [],
+    mode = 'job',
+    source = '',
+    prefix = '',
+    depth = 0,
+    open = false,
+  } = $props();
 
   function fullPath(field) {
     return prefix ? `${prefix}${field.path}` : field.path;
@@ -83,8 +93,10 @@
 </script>
 
 {#each sections as section (section.id)}
-  <fieldset class="config-section depth-{depth}">
-    <legend>{section.label}</legend>
+  <details class="config-section depth-{depth}" open={open}>
+    <summary class="config-summary">
+      <span class="config-legend">{section.label}</span>
+    </summary>
     <div class="config-fields">
       {#each section.fields as field (field.path)}
         {@const path = fullPath(field)}
@@ -170,9 +182,16 @@
       {/each}
     </div>
     {#if section.sections}
-      <SelfConfigForm sections={section.sections} {mode} {source} {prefix} depth={depth + 1} />
+      <SelfConfigForm
+        sections={section.sections}
+        {mode}
+        {source}
+        {prefix}
+        depth={depth + 1}
+        {open}
+      />
     {/if}
-  </fieldset>
+  </details>
 {/each}
 
 <style>
@@ -184,12 +203,34 @@
     background: var(--color-surface);
   }
 
-  .config-section legend {
+  .config-summary {
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .config-summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .config-summary::before {
+    content: '\203A';
+    display: inline-block;
+    transition: transform var(--duration-fast) var(--ease-standard);
+    color: var(--color-text-faint);
+  }
+
+  .config-section[open] > .config-summary::before {
+    transform: rotate(90deg);
+  }
+
+  .config-legend {
     font-size: var(--text-xs);
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--color-text-muted);
-    padding: 0 var(--space-2);
   }
 
   .config-fields {

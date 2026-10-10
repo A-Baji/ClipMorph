@@ -177,11 +177,9 @@
               {@const checkpoint = job.checkpoints?.[stage] || {}}
               <div class="checkpoint-row">
                 <Icon name={checkpoint.status === 'accepted' ? 'check' : 'dot'} />
-                <div>
-                  <div class="name">{stage.charAt(0).toUpperCase() + stage.slice(1)}</div>
-                  <div class="desc">{humanize(checkpoint.status) || 'not started'}</div>
-                </div>
+                <div class="name">{stage.charAt(0).toUpperCase() + stage.slice(1)}</div>
                 <div class="row">
+                  <!-- U7: the badge is the row's single status render. -->
                   <Badge tone={statusTone(checkpoint.status)}>{humanize(checkpoint.status) || 'pending'}</Badge>
                   {#if checkpoint.status === 'failed'}
                     <button class="btn btn-ghost btn-sm" onclick={() => retryCheckpoint(stage)}>Retry</button>

@@ -1,7 +1,7 @@
 <script>
   import Icon from '../components/Icon.svelte';
   import Badge from '../components/Badge.svelte';
-  import EmptyState from '../components/EmptyState.svelte';
+  import Tabs from '../components/Tabs.svelte';
   import Progress from '../components/Progress.svelte';
   import {
     app,
@@ -9,29 +9,51 @@
     cancelScheduledAttempt,
     loadWorkspace,
     openJob,
+    openJobFolder,
     requestConfirm,
+    setJobsTab,
     startWizard,
   } from '../lib/store.svelte.js';
-  import { statusTone, humanize, soonestScheduledPublish } from '../lib/format.js';
+  import {
+    statusTone,
+    humanize,
+    soonestScheduledPublish,
+    formatDateTime,
+  } from '../lib/format.js';
 
   /**
-   * Queue = kanban board (issue #257). Columns are pipeline statuses; WIP
-   * counters per column; collapsing a column filters it out. No drag-and-drop:
-   * column membership is pipeline-driven.
+   * The Jobs tab (issue #259 B20): two sub-tabs — Completed (the archive,
+   * the default) and Queue (the kanban board). "New" lives above both
+   * sub-tabs. The board (B2/12/3) always renders its four columns; completed
+   * jobs never appear on it and never render progress bars (B19).
    */
+  const QUEUED_PRE_RUN = ['queued', 'created', 'pending'];
+
   const COLUMNS = [
-    { id: 'queued', label: 'Queued', statuses: ['queued', 'created', 'pending'] },
-    { id: 'running', label: 'Running', statuses: ['running'] },
+    { id: 'running', label: 'Running', statuses: ['running', ...QUEUED_PRE_RUN] },
     { id: 'awaiting_review', label: 'Awaiting review', statuses: ['awaiting_review'] },
     { id: 'scheduled', label: 'Scheduled', statuses: ['scheduled'] },
-    { id: 'completed', label: 'Completed', statuses: ['completed'] },
     { id: 'failed', label: 'Failed', statuses: ['failed', 'cancelled', 'partial_failure'] },
   ];
 
+  const jobsTabs = $derived([
+    { id: 'completed', label: 'Completed' },
+    // B20: the WIP count badge moved here from the sidebar item.
+    { id: 'queue', label: 'Queue', count: wipCount || null },
+  ]);
+
   let collapsed = $state({});
 
+  const boardJobs = $derived(app.jobs.filter((job) => job.status !== 'completed'));
+  const wipCount = $derived(boardJobs.length);
+  const completedJobs = $derived(app.jobs.filter((job) => job.status === 'completed'));
+
   function columnJobs(column) {
-    return app.jobs.filter((job) => column.statuses.includes(job.status));
+    return boardJobs.filter((job) => column.statuses.includes(job.status));
+  }
+
+  function columnQueuedCount(column) {
+    return columnJobs(column).filter((job) => QUEUED_PRE_RUN.includes(job.status)).length;
   }
 
   function jobTitle(job) {
@@ -42,12 +64,17 @@
     );
   }
 
+  /** Completed time: the upload checkpoint's completion, else the last job update. */
+  function completedTime(job) {
+    return formatDateTime(job.checkpoints?.upload?.completed_at || job.updated_at);
+  }
+
   function scheduledAttempt(job) {
     return (job.upload_attempts || []).find((attempt) => attempt.status === 'scheduled');
   }
 
   function canResume(job) {
-    return ['failed', 'cancelled', 'partial_failure', 'queued', 'created'].includes(job.status);
+    return ['failed', 'cancelled', 'partial_failure', ...QUEUED_PRE_RUN].includes(job.status);
   }
 
   function canCancel(job) {
@@ -55,7 +82,7 @@
   }
 
   function resumeLabel(job) {
-    return ['queued', 'created'].includes(job.status) ? 'Run' : 'Resume';
+    return QUEUED_PRE_RUN.includes(job.status) ? 'Run' : 'Resume';
   }
 
   function confirmDelete(job) {
@@ -96,10 +123,9 @@
 </script>
 
 <div class="content board-view">
-  <div class="section-head">
-    <div>
-      <h2>Queue</h2>
-      <p>Every job by pipeline status. Click a card for its full detail.</p>
+  <div class="jobs-head">
+    <div class="row">
+      <Tabs tabs={jobsTabs} active={app.jobsTab} onSelect={setJobsTab} />
     </div>
     <div class="row">
       <button class="btn btn-ghost btn-sm" onclick={loadWorkspace}>
@@ -111,16 +137,11 @@
     </div>
   </div>
 
-  {#if !app.jobs.length}
-    <EmptyState
-      icon="queue"
-      title="Your queue is empty"
-      message="Create your first job to see it move across the board."
-    />
-  {:else}
+  {#if app.jobsTab === 'queue'}
     <div class="board">
       {#each COLUMNS as column (column.id)}
         {@const jobs = columnJobs(column)}
+        {@const queuedCount = columnQueuedCount(column)}
         <section class="column" class:collapsed={collapsed[column.id]} aria-label={column.label}>
           <button
             type="button"
@@ -129,6 +150,9 @@
             onclick={() => toggleColumn(column.id)}
           >
             <span class="column-title">{column.label}</span>
+            {#if column.id === 'running' && queuedCount > 0}
+              <span class="badge queued-badge">queued {queuedCount}</span>
+            {/if}
             <span class="wip">{jobs.length}</span>
             <Icon name={collapsed[column.id] ? 'chevronRight' : 'chevronDown'} size={14} />
           </button>
@@ -149,7 +173,9 @@
                       {/if}
                     </span>
                     <span class="faint mono card-source">{job.configuration?.general?.source}</span>
-                    {#if app.uploadProgress[job.job_id] && Object.keys(app.uploadProgress[job.job_id]).length}
+                    {#if job.status === 'completed'}
+                      <!-- B19: completed jobs never render progress bars. -->
+                    {:else if app.uploadProgress[job.job_id] && Object.keys(app.uploadProgress[job.job_id]).length}
                       {#each Object.entries(app.uploadProgress[job.job_id]) as [platform, percent] (platform)}
                         <Progress value={percent} small label={`${platform}: ${percent}%`} />
                       {/each}
@@ -189,23 +215,81 @@
         </section>
       {/each}
     </div>
+  {:else}
+    {#if completedJobs.length}
+      <div class="archive">
+        {#each completedJobs as job (job.job_id)}
+          <article class="archive-row">
+            <button class="archive-main" onclick={() => openJob(job.job_id)}>
+              <span class="archive-thumb"><Icon name="video" size={16} /></span>
+              <span class="archive-main-text">
+                <b class="archive-title">{jobTitle(job)}</b>
+                <span class="faint mono archive-source">
+                  {job.configuration?.general?.source}
+                </span>
+              </span>
+              <span class="faint archive-time">completed {completedTime(job)}</span>
+            </button>
+            <button
+              class="btn btn-ghost btn-sm"
+              disabled={!job.current_artifact_id}
+              title="Reveal the exported file in its folder"
+              onclick={() => openJobFolder(job)}
+            >
+              <Icon name="external" size={14} /> Open folder
+            </button>
+          </article>
+        {/each}
+      </div>
+    {:else}
+      <div class="empty" role="status">
+        <p>Nothing completed yet — start with <strong>New</strong></p>
+      </div>
+    {/if}
   {/if}
 </div>
 
 <style>
+  .board-view {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .jobs-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    flex-wrap: wrap;
+  }
+
+  /* --- Board (B3): fills the content area, columns share the full width,
+         each column scrolls internally, the container scrolling horizontally
+         below the 1400px breakpoint. --- */
   .board {
-    display: grid;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
+    flex: 1;
+    min-height: 0;
+    display: flex;
     gap: var(--space-3);
-    align-items: start;
     overflow-x: auto;
+    align-items: stretch;
   }
 
   .column {
     background: var(--color-surface);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-md);
-    min-width: 180px;
+    flex: 1 1 0;
+    min-width: 280px;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  @media (min-width: 1400px) {
+    .column {
+      min-width: 220px;
+    }
   }
 
   .column-head {
@@ -226,6 +310,12 @@
     font-weight: 600;
     flex: 1;
     font-size: var(--text-sm);
+    white-space: nowrap;
+  }
+
+  .queued-badge {
+    color: var(--color-text-muted);
+    flex-shrink: 0;
   }
 
   .wip {
@@ -238,6 +328,10 @@
     display: grid;
     gap: var(--space-2);
     padding: var(--space-2);
+    align-content: start;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
   }
 
   .card {
@@ -302,15 +396,70 @@
     font-size: var(--text-xs);
   }
 
-  @media (max-width: 1100px) {
-    .board {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
+  /* --- Completed archive (B20) --- */
+  .archive {
+    display: grid;
+    gap: var(--space-2);
+    align-content: start;
   }
 
-  @media (max-width: 700px) {
-    .board {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
+  .archive-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-surface);
+  }
+
+  .archive-main {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    flex: 1;
+    min-width: 0;
+    background: none;
+    border: none;
+    color: inherit;
+    cursor: pointer;
+    text-align: left;
+    padding: 0;
+  }
+
+  .archive-thumb {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--space-1);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface-hover);
+    color: var(--color-text-muted);
+  }
+
+  .archive-main-text {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .archive-title {
+    font-size: var(--text-sm);
+    font-weight: var(--weight-semibold);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .archive-source {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .archive-time {
+    font-size: var(--text-xs);
+    flex-shrink: 0;
   }
 </style>

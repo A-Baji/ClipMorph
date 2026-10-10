@@ -81,11 +81,22 @@ def capture(out_dir: Path, label: str, scenarios: list[str]) -> list[str]:
                         _wait_ready(page)
 
                         if scenario == "empty":
+                            # B20: the fresh entry is the Completed sub-tab; its
+                            # mandated empty prompt is a capture surface, and the
+                            # four-column board lives behind the Queue sub-tab.
+                            _capture_view(page, out_dir, label, "jobs-completed",
+                                          viewport, captures)
+                            page.get_by_role("tab", name="Queue").click()
+                            page.wait_for_timeout(250)
                             _capture_view(page, out_dir, label, "board-empty",
                                           viewport, captures)
                             context.close()
                             continue
 
+                        _capture_view(page, out_dir, label,
+                                      f"jobs-completed-{scenario}", viewport, captures)
+                        page.get_by_role("tab", name="Queue").click()
+                        page.wait_for_timeout(250)
                         _capture_view(page, out_dir, label,
                                       f"board-{scenario}", viewport, captures)
 
@@ -118,7 +129,7 @@ def capture(out_dir: Path, label: str, scenarios: list[str]) -> list[str]:
 
                         # Wizard: clip selection then configure.
                         try:
-                            page.locator(".nav-item", has_text="Queue").first.click()
+                            page.locator(".nav-item", has_text="Jobs").first.click()
                             page.locator(".btn-primary", has_text="New").first.click()
                             page.wait_for_selector(".wizard", timeout=5_000)
                             _capture_view(page, out_dir, label, "wizard-clips",

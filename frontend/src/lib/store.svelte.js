@@ -33,6 +33,10 @@ function emptyWizard() {
     extras: [], // [{ name, path }] transient out-of-folder clips
     batch: { values: {}, overrides: [] },
     jobs: {}, // source -> { values, overrides }
+    // Batch rail entry (issue #259 D10): created once more than one clip is
+    // configured, then kept for the rest of the wizard session even if the
+    // selection later drops to a single clip.
+    batchEntry: false,
     activeJob: '',
     validation: null,
     validating: false,
@@ -42,7 +46,10 @@ function emptyWizard() {
 export const app = $state({
   ready: false,
   online: true,
-  view: 'queue',
+  view: 'jobs',
+  // The Jobs tab's active sub-tab (issue #259 B20): "completed" (the archive)
+  // is the default surface; "queue" is the kanban board a create lands on.
+  jobsTab: 'completed',
   selectedJobId: '',
   detailTab: 'overview',
   mobileNav: false,
@@ -114,11 +121,17 @@ export function setView(view) {
   app.mobileNav = false;
   app.view = view;
   if (view !== 'wizard') app.wizard.active = false;
-  if (view !== 'queue') app.selectedJobId = '';
+  if (view !== 'jobs') app.selectedJobId = '';
+  if (view === 'jobs') app.jobsTab = 'completed'; // fresh entry lands on Completed (B20)
   if (view === 'metrics') loadMetrics();
   if (view === 'layouts') {
     api.listLayouts().then((items) => (app.layouts = items)).catch(report);
   }
+}
+
+/** Switch the Jobs tab's sub-tab (Completed archive / Queue board) (B20). */
+export function setJobsTab(tab) {
+  app.jobsTab = tab;
 }
 
 export function openJob(jobId) {
@@ -129,6 +142,8 @@ export function openJob(jobId) {
 
 export function closeJob() {
   closeProgressStream();
+  // B19: a per-attempt progress map must never outlive its job.
+  clearUploadProgress(app.selectedJobId);
   app.selectedJobId = '';
   app.transcript = null;
 }
@@ -199,6 +214,7 @@ export async function loadJobDetails() {
     api.getUploadDraft(jobId),
   ]);
   app.jobs = app.jobs.map((item) => (item.job_id === jobId ? job : item));
+  if (job.status === 'completed') clearUploadProgress(jobId); // B19 render-out
   app.artifacts = artifacts;
   app.attempts = attempts;
   app.metrics = metrics;
@@ -248,6 +264,18 @@ export function selectedJob() {
 
 /* --- Live progress ------------------------------------------------------- */
 
+/**
+ * B19: drop a job's per-attempt upload progress map. Completed jobs never
+ * render progress bars, so the map is cleared the moment a stream reports a
+ * terminal status and whenever a completed job's details load.
+ */
+function clearUploadProgress(jobId) {
+  if (!jobId || !app.uploadProgress[jobId]) return;
+  const next = { ...app.uploadProgress };
+  delete next[jobId];
+  app.uploadProgress = next;
+}
+
 function closeProgressStream() {
   if (progressStream) {
     progressStream.close();
@@ -267,6 +295,7 @@ function openProgressStream(jobId) {
         [jobId]: data.upload_progress || {},
       };
       if (['completed', 'failed', 'cancelled'].includes(data.status)) {
+        clearUploadProgress(jobId);
         source.close();
         if (progressStream === source) progressStream = null;
       }
@@ -287,20 +316,27 @@ export function startWizard() {
   app.wizard.active = true;
   app.view = 'wizard';
   if (app.wizard.step !== 2) app.wizard.step = 1;
+  else if (!wizardActiveInRail()) {
+    // A restored draft landed back on step 2 with a rail entry that no
+    // longer exists: reapply the D10 default selection.
+    app.wizard.activeJob = app.wizard.batchEntry ? 'batch' : wizardSelected()[0] || '';
+  }
   persistWizardDraft();
 }
 
 export function discardWizard() {
   clearWizardDraft();
   app.wizard.active = false;
-  app.view = 'queue';
+  app.view = 'jobs';
+  app.jobsTab = 'completed'; // B20: a discard returns to the Completed sub-tab
 }
 
-/** Leave the wizard for the board while preserving the in-progress draft. */
+/** Leave the wizard for the Jobs board while preserving the in-progress draft. */
 export function leaveWizard() {
   persistWizardDraft();
   app.wizard.active = false;
-  app.view = 'queue';
+  app.view = 'jobs';
+  app.jobsTab = 'completed';
 }
 
 export function wizardGoStep(step) {
@@ -309,8 +345,13 @@ export function wizardGoStep(step) {
     return;
   }
   app.wizard.step = step;
-  if (step === 2 && !app.wizard.activeJob) {
-    app.wizard.activeJob = wizardSelected()[0] || '';
+  if (step === 2) {
+    // D10: the batch rail entry exists only when more than one clip is
+    // configured, and it is the selected entry when the wizard starts.
+    if (wizardSelected().length > 1) app.wizard.batchEntry = true;
+    if (!wizardActiveInRail()) {
+      app.wizard.activeJob = app.wizard.batchEntry ? 'batch' : wizardSelected()[0] || '';
+    }
   }
   persistWizardDraft();
 }
@@ -358,6 +399,23 @@ export function wizardSelected() {
   return [...app.wizard.selected, ...extras.filter((name) => !app.wizard.selected.includes(name))];
 }
 
+/* --- Wizard: master-detail rail (issue #259 D10) --------------------------- */
+
+/**
+ * The config step's rail is ``Batch, clip1.mp4, …``: ``Batch`` exists only
+ * while ``batchEntry`` holds, followed by every still-selected clip. The
+ * currently selected entry is always one of them (the left pane shows exactly
+ * one config form).
+ */
+export function wizardRail() {
+  return app.wizard.batchEntry ? ['batch', ...wizardSelected()] : wizardSelected();
+}
+
+function wizardActiveInRail() {
+  if (app.wizard.activeJob === 'batch') return Boolean(app.wizard.batchEntry);
+  return wizardSelected().includes(app.wizard.activeJob);
+}
+
 export function wizardSetActiveJob(source) {
   app.wizard.activeJob = source;
   persistWizardDraft();
@@ -371,7 +429,7 @@ function syncWizardJobs() {
   for (const source of keep) {
     if (!app.wizard.jobs[source]) app.wizard.jobs[source] = { values: {}, overrides: [] };
   }
-  if (!keep.has(app.wizard.activeJob)) app.wizard.activeJob = wizardSelected()[0] || '';
+  if (!wizardActiveInRail()) app.wizard.activeJob = '';
 }
 
 /* --- Wizard: tri-state configuration ------------------------------------- */
@@ -549,7 +607,8 @@ export async function createFromWizard() {
     }
     clearWizardDraft();
     app.wizard = emptyWizard();
-    app.view = 'queue';
+    app.view = 'jobs';
+    app.jobsTab = 'queue'; // B20: a successful create lands on the Queue board
     await loadWorkspace();
     notify(
       `${result.summary?.created ?? result.created.length} created · ` +
@@ -655,6 +714,26 @@ export async function cancelScheduledAttempt(job, attemptId) {
 async function refreshJob(jobId) {
   if (app.selectedJobId === jobId) await loadJobDetails();
   else await loadWorkspace();
+}
+
+/* --- Completed archive (issue #259 B20) ----------------------------------- */
+
+/**
+ * "Open folder" for a Completed archive row (F21): reveals the job's exported
+ * file in its output folder. Artifact-scoped, so it targets the job's current
+ * artifact; rows without an artifact are not revealable.
+ */
+export async function openJobFolder(job) {
+  if (!job?.current_artifact_id) {
+    report(new Error('This job has no exported file to reveal yet'));
+    return;
+  }
+  try {
+    await api.openFolder(job.job_id, job.current_artifact_id);
+    notify('Folder opened');
+  } catch (error) {
+    report(error);
+  }
 }
 
 export async function retryCheckpoint(stage) {

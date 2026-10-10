@@ -275,8 +275,8 @@ a {
   padding: var(--space-8);
   display: grid;
   gap: var(--space-8);
-  max-width: 1180px;
   width: 100%;
+  flex: 1;
 }
 
 /* --- Buttons ------------------------------------------------------------- */
@@ -960,11 +960,6 @@ details.advanced .advanced-body {
 .checkpoint-row .name {
   font-size: var(--text-sm);
   font-weight: var(--weight-medium);
-}
-
-.checkpoint-row .desc {
-  font-size: var(--text-2xs);
-  color: var(--color-text-faint);
 }
 
 /* --- Review (segments / composition) ------------------------------------- */
