@@ -6,6 +6,8 @@ import argparse
 from dataclasses import asdict
 import json
 from pathlib import Path
+import platform
+import subprocess
 import time
 import uuid
 from typing import NoReturn, Optional
@@ -15,6 +17,7 @@ from clipmorph.auth import credential_status, load_auth_config, persist_auth_cre
 from clipmorph.configuration import discover_source_names, load_app_configuration
 from clipmorph.configuration import save_app_configuration
 from clipmorph.job import default_data_dir, JobManifest, resolve_output_dir
+from clipmorph.job import source_sha256
 from clipmorph.metrics import compare_metrics, join_dimensions
 from clipmorph.platforms import SUPPORTED_PLATFORMS, is_supported_platform
 from clipmorph.service import JobService
@@ -187,6 +190,41 @@ def create_app(data_dir: str | Path | None = None,
             index += 1
         destination.write_bytes(contents)
         return {"name": destination.name, "source": destination.name}
+
+    @app.get("/api/v1/sources/{name}/thumbnail")
+    def source_thumbnail(name: str):
+        """One poster frame per source clip, rendered by the bundled FFmpeg.
+
+        Localhost-only dashboard surface behind the clip grid and job cards:
+        the frame is generated on demand from the source's first frame and
+        cached on disk under the data dir, keyed by the clip's name and its
+        ``source_sha256`` content checksum -- the same source identity the job
+        manifests use. One cache file exists per (source, content) pair and
+        its bytes never change for a key, so responses carry long-lived
+        browser cache headers and a re-generated clip gets a fresh key.
+        """
+        if not name or Path(name).name != name or name in {".", ".."}:
+            fail(404, "not_found", "source clip not found")
+        source = source_root() / name
+        if (Path(name).suffix.lower() not in SUPPORTED_EXTENSIONS
+                or not source.is_file()):
+            fail(404, "not_found", "source clip not found")
+        cache_dir = root / "thumbnails"
+        cached = cache_dir / f"{source.stem}-{source_sha256(source)[:16]}.jpg"
+        if not cached.is_file():
+            from clipmorph.ffmpeg import FFmpegError, FFmpegRunner
+            try:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                runner = FFmpegRunner()
+                runner.run_ffmpeg([
+                    runner.config.ffmpeg_path, "-y", "-i", str(source),
+                    "-frames:v", "1", str(cached)])
+            except (FFmpegError, OSError) as error:
+                # A generation failure leaves the dashboard's generic icon as
+                # the load fallback instead of surfacing a media error.
+                fail(404, "thumbnail_unavailable", str(error))
+        return FileResponse(cached, media_type="image/jpeg", headers={
+            "Cache-Control": "public, max-age=31536000, immutable"})
 
     @app.get("/api/v1/layouts")
     def list_layouts():
@@ -633,6 +671,38 @@ def create_app(data_dir: str | Path | None = None,
     def download_artifact(job_id: str, artifact_id: str):
         _manifest, artifact, path = artifact_record(job_id, artifact_id)
         return FileResponse(path, filename=artifact.get("display_name", path.name))
+
+    def reveal_command(path: Path) -> "list[str] | None":
+        """The OS command that reveals ``path`` in its folder, or ``None``.
+
+        Only the Windows reveal is implemented (``explorer.exe /select``);
+        macOS and Linux reveals are documented follow-ups.
+        """
+        if platform.system() == "Windows":
+            return ["explorer.exe", f"/select,{path}"]
+        return None
+
+    @app.post("/api/v1/jobs/{job_id}/artifacts/{artifact_id}/open-folder")
+    def open_artifact_folder(job_id: str, artifact_id: str):
+        """Reveal one artifact's file in the OS file manager.
+
+        Localhost-only desktop convenience behind the artifact row's
+        "Open folder" action: the reveal selects the file in its folder.
+        The artifact guard is the boundary again: only paths the preview and
+        download routes may also hand out -- the job's output dir, the job's
+        data dir, and, for source artifacts, the sources dir -- are
+        revealable, so nothing outside the guarded job roots can be opened.
+        """
+        _manifest, _artifact, path = artifact_record(job_id, artifact_id)
+        command = reveal_command(path)
+        if command is None:
+            fail(501, "not_implemented",
+                 "folder reveal is implemented on Windows; macOS and Linux "
+                 "reveals are follow-ups")
+        # Launched without being waited on: the reveal is advisory, and the
+        # file manager reports its own status independently.
+        subprocess.Popen(command)
+        return {"opened": True}
 
     @app.patch("/api/v1/jobs/{job_id}/artifacts/{artifact_id}")
     def patch_artifact(job_id: str, artifact_id: str, payload: dict):

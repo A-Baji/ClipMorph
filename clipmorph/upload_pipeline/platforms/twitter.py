@@ -24,7 +24,8 @@ class TwitterUploadPipeline(BaseUploadPipeline):
     DEFAULT_PROCESSING_TIME_PER_MB = 8  # seconds
     MIN_PROCESSING_TIME = 10  # seconds
     MAX_PROGRESS_DURING_PROCESSING = 80  # don't complete progress bar during processing
-    API_POLL_INTERVAL = 5  # seconds between status checks
+    # API_POLL_INTERVAL (5s) is inherited from the shared default in
+    # BaseUploadPipeline.
     MIN_PROGRESS_INCREMENT = 2.0
 
     def __init__(self,
