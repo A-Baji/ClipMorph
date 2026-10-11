@@ -22,6 +22,8 @@ JOBS_VIEW = FRONTEND_SRC / "views" / "JobsView.svelte"
 THUMBNAIL = FRONTEND_SRC / "components" / "Thumbnail.svelte"
 API_JS = FRONTEND_SRC / "lib" / "api.js"
 ICON = FRONTEND_SRC / "components" / "Icon.svelte"
+ARTIFACT_ROW = FRONTEND_SRC / "components" / "ArtifactRow.svelte"
+ATTEMPT_ROW = FRONTEND_SRC / "components" / "AttemptRow.svelte"
 
 
 def source(path: Path) -> str:
@@ -191,6 +193,40 @@ class CardCompositionTests(unittest.TestCase):
 
     def test_calendarX_icon_exists_for_the_cancel_attempt_action(self):
         self.assertIn("calendarX", source(ICON))
+
+
+class Phase2DQualityTests(unittest.TestCase):
+    """F21/F6/F7 (#259): artifact-row menu, label structure, no raw ids.
+
+    The spec review (``docs/audit/issues/259/reviews/r1.json``, F1/F6/F7)
+    relocated the raw download into the artifact row's menu, made the
+    non-checkbox configuration label text-only, and dropped the last raw
+    artifact-id render. These source guards pin the fixes next to the runtime
+    board check in ``tests/e2e/verify_board.py``.
+    """
+
+    def test_artifact_row_keeps_raw_download_in_its_menu(self):
+        row = source(ARTIFACT_ROW)
+        # "Download" is no longer a bare row link; the raw download lives in
+        # the row's "more" menu while "Open folder" is the row affordance.
+        self.assertIn("api.downloadUrl", row)
+        self.assertIn("api.openFolder", row)
+        self.assertIn("Open folder", row)
+        self.assertIn('name="more"', row)
+        # The kebab menu carries both a tooltip and an accessible name.
+        self.assertIn('title="Artifact actions"', row)
+        self.assertIn('aria-label="Artifact actions"', row)
+
+    def test_non_checkbox_config_label_is_text_only(self):
+        form = source(CONFIG_FORM)
+        # F6: the label wraps only its text; badges/reset are a sibling span.
+        self.assertIn("<label for={fid}><span>{field.label}</span></label>", form)
+        self.assertNotIn('class="config-label" for={fid}', form)
+
+    def test_attempt_row_never_renders_the_raw_artifact_id(self):
+        attempt = source(ATTEMPT_ROW)
+        self.assertNotIn("{attempt.artifact_id", attempt)
+        self.assertIn("artifactName", attempt)
 
 
 class Phase2CViewTests(unittest.TestCase):

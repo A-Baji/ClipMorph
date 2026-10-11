@@ -414,13 +414,19 @@ export function startWizard() {
 }
 
 export function discardWizard() {
+  // D24 (spec-review F2): the landing decision keys off what the draft still
+  // held, so capture it BEFORE the reset; the discard then clears the ENTIRE
+  // draft — the localStorage draft and the in-memory wizard state alike — so a
+  // later "New" opens an empty clip grid with no Batch entry, never a
+  // resurrected half-draft, matching the confirm dialog's own copy.
+  const hadClips = wizardSelected().length > 0;
   clearWizardDraft();
-  app.wizard.active = false;
+  app.wizard = emptyWizard();
   app.view = 'jobs';
   // B20/D24 landing: a discard returns to the Completed sub-tab when the
   // draft still had clips to configure; discarding with nothing left to
   // configure lands on the Queue board instead.
-  app.jobsTab = wizardSelected().length ? 'completed' : 'queue';
+  app.jobsTab = hadClips ? 'completed' : 'queue';
 }
 
 /** Leave the wizard for the Jobs board while preserving the in-progress draft. */

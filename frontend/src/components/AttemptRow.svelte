@@ -18,6 +18,12 @@
         ? `Attempt · ${formatDateTime(attempt.started_at || attempt.created_at)}`
         : 'Upload attempt'),
   );
+  // F7 (spec review): the small line names the artifact by its display name,
+  // never the raw artifact id.
+  const artifactName = $derived(
+    app.artifacts.find((a) => a.id === attempt.artifact_id)?.display_name
+      || (attempt.artifact_id ? 'artifact' : 'no artifact'),
+  );
 </script>
 
 <div class="list-row">
@@ -27,7 +33,7 @@
       <Badge tone={statusTone(attempt.status)}>{humanize(attempt.status)}</Badge>
       <span class="truncate">{label}</span>
     </b>
-    <small>{attempt.artifact_id || 'no artifact'}{scheduleLabel(attempt) ? ` · ${scheduleLabel(attempt)}` : ''}</small>
+    <small>{artifactName}{scheduleLabel(attempt) ? ` · ${scheduleLabel(attempt)}` : ''}</small>
   </div>
   {#if typeof live === 'number'}
     <span class="mono">{live}%</span>

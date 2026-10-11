@@ -169,8 +169,8 @@
           </div>
         {:else}
           <div class="config-field" class:overridden class:invalid={fieldError(path)}>
-            <label class="config-label" for={fid}>
-              <span>{field.label}</span>
+            <div class="config-label">
+              <label for={fid}><span>{field.label}</span></label>
               <span class="badges">
                 {#if defaultDiffers(path)}
                   <span class="badge badge-warning" title={`default: ${display(globalDefault(path))}`}>
@@ -194,7 +194,7 @@
                   </button>
                 {/if}
               </span>
-            </label>
+            </div>
             <div class="config-control">
               {#if control.kind === 'select'}
                 <select
@@ -344,6 +344,15 @@
 
   .config-label > .check {
     max-width: 100%;
+  }
+
+  /* F6 (spec review): the non-checkbox row's label is text-only (no nested
+     interactive reset button); it truncates like the checkbox label. */
+  .config-label > label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .config-label > .check span {

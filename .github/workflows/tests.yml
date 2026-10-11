@@ -198,3 +198,9 @@ jobs:
 
       - name: Run node Playwright smoke test
         run: node tests/e2e/smoke.js
+
+      - name: Run board / scroll-model / empty-state verification
+        run: python tests/e2e/verify_board.py
+
+      - name: Run Phase 2C modal and wizard verification
+        run: python tests/e2e/verify_phase2c.py
