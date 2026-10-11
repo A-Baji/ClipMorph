@@ -17,6 +17,10 @@
   let editing = $state(false);
   let draftName = $state('');
   let menuOpen = $state(false);
+  let triggerEl = $state(null);
+
+  // F8: a stable id lets the trigger own the disclosure it controls.
+  const menuId = $derived(`artifact-actions-${artifact.id}`);
 
   const jobId = $derived(selectedJob()?.job_id || '');
   const isSource = $derived(artifact.kind === 'source');
@@ -111,6 +115,8 @@
         title="Artifact actions"
         aria-label="Artifact actions"
         aria-expanded={menuOpen}
+        aria-controls={menuId}
+        bind:this={triggerEl}
         onclick={toggleMenu}
         onkeydown={(event) => {
           if (event.key === 'Escape') menuOpen = false;
@@ -120,12 +126,19 @@
       </button>
       {#if menuOpen}
         <button class="menu-backdrop" tabindex="-1" aria-hidden="true" onclick={() => (menuOpen = false)}></button>
-        <div class="menu" role="menu" aria-label="Artifact actions">
+        <div class="menu" id={menuId}>
           <a
             class="menu-item"
-            role="menuitem"
             href={api.downloadUrl(jobId, artifact.id)}
             onclick={() => (menuOpen = false)}
+            onkeydown={(event) => {
+              // F8: Escape closes from the open menu and returns focus to
+              // the trigger that owns the disclosure.
+              if (event.key === 'Escape') {
+                menuOpen = false;
+                triggerEl?.focus();
+              }
+            }}
           >
             <Icon name="download" size={14} /> Download
           </a>

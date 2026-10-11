@@ -534,8 +534,9 @@ Topbar — recorded here for the maintainer to confirm ([after-settings-desktop]
    U9 shared truncation/responsiveness utility (now also covering R2), U6
    modal width utilization.
 3. **Maintainer confirmation:** U3 was resolved in-implementation (Topbar
-   header survives, per-view `h2` removed) — confirm the choice, and confirm
-   the single-clip-start batch rule's quota of tests if desired.
+   header survives, per-view `h2` removed) — confirm the choice. (The
+   single-clip-start batch rule no longer needs a confirmation: its pin now
+   exists in `tests/e2e/verify_board.py`.)
 
 ---
 
