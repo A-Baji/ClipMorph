@@ -35,11 +35,8 @@
 </script>
 
 <div class="content">
-  <div class="section-head">
-    <div>
-      <h2>Settings</h2>
-      <p>Workspace paths, credentials, and the defaults every new job starts from.</p>
-    </div>
+  <!-- U3: the Topbar renders the page's single header. -->
+  <div class="section-head head-end">
     <button class="btn btn-primary" onclick={save}>Save app.yml</button>
   </div>
 
@@ -83,3 +80,10 @@
     </details>
   </Card>
 </div>
+
+<style>
+  /* U3: the lone toolbar action aligns with the Topbar's trailing edge. */
+  .head-end {
+    justify-content: flex-end;
+  }
+</style>

@@ -37,6 +37,7 @@
     metricRows,
     formatDelta,
     platformLabel,
+    platformListLabel,
   } from '../lib/format.js';
   import { api } from '../lib/api.js';
 
@@ -54,12 +55,26 @@
   let loadedJobId = $state('');
   let renderGroup = $state('');
 
-  const renderGroups = $derived(
+  /** F15: the platforms a group is shared by, in the app's platform order. */
+  function groupPlatforms(id) {
+    const order = (platform) => app.platforms.indexOf(platform);
+    return Object.entries(app.platformSummaries || {})
+      .filter(([, summary]) => summary.group_id === id)
+      .map(([platform]) => platform)
+      .sort((a, b) => order(a) - order(b));
+  }
+
+  /**
+   * F15: one entry per group, each carrying its member platforms so the
+   * dropdown labels entries by the stored platform list instead of the raw
+   * group id.
+   */
+  const renderGroupOptions = $derived(
     [...new Set(
       Object.values(app.platformSummaries || {})
         .map((summary) => summary.group_id)
         .filter(Boolean),
-    )],
+    )].map((id) => ({ id, platforms: groupPlatforms(id) })),
   );
 
   $effect(() => {
@@ -175,7 +190,9 @@
   function confirmCancel() {
     requestConfirm({
       title: 'Cancel this job?',
-      message: 'Queued and running work is aborted. Scheduled attempts are cancelled.',
+      // U12: the dialog speaks for this one job's Cancel action only.
+      message:
+        'Running and queued work for this job is aborted, including its scheduled attempts.',
       confirmLabel: 'Cancel job',
       danger: true,
       onConfirm: () => jobAction('cancel'),
@@ -199,8 +216,8 @@
 {#if !job}
   <div class="content">
     <Card flush>
-      <EmptyState title="Job not found" message="It may have been deleted. Return to the queue.">
-        <button class="btn btn-primary" onclick={closeJob}>Back to queue</button>
+      <EmptyState title="Job not found" message="It may have been deleted. Return to the Jobs tab.">
+        <button class="btn btn-primary" onclick={closeJob}>Back to jobs</button>
       </EmptyState>
     </Card>
   </div>
@@ -208,7 +225,7 @@
   <div class="content">
     <div class="detail-head">
       <div class="row">
-        <button class="btn btn-ghost btn-icon" aria-label="Back to queue" onclick={closeJob}>
+        <button class="btn btn-ghost btn-icon" aria-label="Back to jobs" onclick={closeJob}>
           <Icon name="arrowLeft" />
         </button>
         <div>
@@ -353,6 +370,9 @@
         <div class="review-grid">
           <Card title="Rendered clip" description="The full converted artifact for this job.">
             {#if reviewArtifact}
+              <!-- The rendered artifact carries burned-in captions; a served
+                   captions track is a follow-up (issue #259 F22 family). -->
+              <!-- svelte-ignore a11y_media_has_caption -->
               <video
                 class="review-player"
                 controls
@@ -379,13 +399,19 @@
                   ? `${app.transcript.segments.length} caption line${app.transcript.segments.length === 1 ? '' : 's'}`
                   : ''}
               </span>
-              {#if renderGroups.length}
-                <select aria-label="Conversion group" bind:value={renderGroup}>
-                  <option value="">All groups</option>
-                  {#each renderGroups as group (group)}
-                    <option value={group}>{group}</option>
-                  {/each}
-                </select>
+              {#if renderGroupOptions.length}
+                <!-- F15: human labels — "All variants" plus one entry per
+                     group, labeled by the platform list sharing that render
+                     variant; the raw group id is the value only. -->
+                <span class="variant-picker">
+                  <select aria-label="Render variant" bind:value={renderGroup}>
+                    <option value="">All variants</option>
+                    {#each renderGroupOptions as option (option.id)}
+                      <option value={option.id}>{platformListLabel(option.platforms)}</option>
+                    {/each}
+                  </select>
+                  <small class="faint">Each group is one render variant shared by the platforms it lists.</small>
+                </span>
               {/if}
               <div class="action-group">
                 <button class="btn btn-secondary" onclick={() => jobAction('render', renderGroup)}>
@@ -516,7 +542,13 @@
                     <b>{platformLabel(platform)} · {summary.kind || 'clip'}</b>
                     <small>
                       {summary.conversion?.skip ? 'uploads the source file' : 'uploads the rendered vertical'}
-                      · group {summary.group_id || 'unassigned'}
+                      {#if summary.group_id}
+                        <!-- F15: the group renders as its platform list, never a hash. -->
+                        {@const members = groupPlatforms(summary.group_id)}
+                        · {members.length > 1
+                          ? `one render variant shared by ${platformListLabel(members)}`
+                          : 'its own render variant'}
+                      {/if}
                     </small>
                   </div>
                 </div>
@@ -675,5 +707,12 @@
 
   .row.between > .faint {
     margin-right: auto;
+  }
+
+  /* F15: the rerender variant dropdown with its one-line hint below. */
+  .variant-picker {
+    display: grid;
+    gap: var(--space-1);
+    justify-items: start;
   }
 </style>

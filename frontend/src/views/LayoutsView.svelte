@@ -70,11 +70,8 @@
 </script>
 
 <div class="content">
-  <div class="section-head">
-    <div>
-      <h2>Layouts</h2>
-      <p>Reusable conversion presets you can attach to any job.</p>
-    </div>
+  <!-- U3: the Topbar renders the page's single header. -->
+  <div class="section-head head-end">
     <button class="btn btn-primary" onclick={save}>Save layout</button>
   </div>
 
@@ -170,6 +167,11 @@
 </div>
 
 <style>
+  /* U3: the lone toolbar action aligns with the Topbar's trailing edge. */
+  .head-end {
+    justify-content: flex-end;
+  }
+
   .columns {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);

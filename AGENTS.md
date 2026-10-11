@@ -33,7 +33,14 @@ python -m mypy --ignore-missing-imports clipmorph                   # pip instal
 python -m clipmorph --help
 python -m clipmorph init --config-path <temporary-path>/clipmorph.yaml
 python -m pip wheel . --no-deps --no-build-isolation --wheel-dir <temporary-path>/wheel
+npm --prefix frontend run check                                     # svelte-check (issue #259)
+node tests/e2e/smoke.js                                             # Playwright dashboard smoke; boots the tests/e2e harness
 ```
+
+The two frontend commands run from the repository root with Node 20 or newer
+(`npm --prefix frontend install` first; the smoke test also needs its chromium
+browser, `npx --prefix frontend playwright install chromium`, and resolves
+Playwright from `frontend/node_modules` — never a root package.json).
 
 Install runtime dependencies when needed with:
 

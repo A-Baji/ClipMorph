@@ -8,7 +8,7 @@
  */
 
 import { api } from './api.js';
-import { toLocalInput, toUtcTimestamp } from './format.js';
+import { toLocalInput, toUtcTimestamp, platformListLabel } from './format.js';
 
 const FALLBACK_CONFIGURATION = {
   source_dir: 'sources',
@@ -851,7 +851,15 @@ async function performJobAction(job, action, arg) {
     } else if (action === 'render') {
       await api.renderJob(job.job_id, arg || undefined);
       await refreshJob(job.job_id);
-      notify(arg ? `Render requested for group ${arg}` : 'Render requested');
+      // F15: the toast names the variant by its platform list, never the id.
+      if (arg) {
+        const members = Object.entries(app.platformSummaries || {})
+          .filter(([, summary]) => summary.group_id === arg)
+          .map(([platform]) => platform);
+        notify(`Render requested for the ${platformListLabel(members)} variant`);
+      } else {
+        notify('Render requested');
+      }
     }
   } catch (error) {
     report(error);

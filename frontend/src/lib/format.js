@@ -114,6 +114,14 @@ export function platformLabel(platform) {
   return PLATFORM_LABELS[platform] || platform;
 }
 
+/**
+ * F15: a render group's human label — the list of platforms sharing that one
+ * render variant ("YouTube + TikTok"). Never a raw group hash.
+ */
+export function platformListLabel(platforms) {
+  return (platforms || []).map(platformLabel).join(' + ');
+}
+
 /** Collapse a metric snapshot list into one entry per published post. */
 export function groupMetricPosts(snapshots) {
   const posts = {};

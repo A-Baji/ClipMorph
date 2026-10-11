@@ -14,11 +14,9 @@
 </script>
 
 <div class="content">
+  <!-- U3: the Topbar renders the page's single header; the filter chips
+       belong to the table below it. -->
   <div class="section-head">
-    <div>
-      <h2>Metrics</h2>
-      <p>Compare how every published clip is performing.</p>
-    </div>
     <div class="chips">
       {#each app.platforms as platform (platform)}
         <button

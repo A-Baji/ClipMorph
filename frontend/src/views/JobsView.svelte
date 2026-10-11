@@ -100,7 +100,9 @@
   function confirmCancel(job) {
     requestConfirm({
       title: 'Cancel this job?',
-      message: 'Queued and running work is aborted. Scheduled attempts are cancelled.',
+      // U12: the dialog speaks for one card's Cancel action only.
+      message:
+        'Running and queued work for this job is aborted, including its scheduled attempts.',
       confirmLabel: 'Cancel job',
       danger: true,
       onConfirm: () => cardAction(job, 'cancel'),

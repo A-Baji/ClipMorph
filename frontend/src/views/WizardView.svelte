@@ -69,7 +69,7 @@
         </button>
       {:else}
         <button class="btn btn-ghost" onclick={leaveWizard}>
-          <Icon name="arrowLeft" /> Back to queue
+          <Icon name="arrowLeft" /> Back to jobs
         </button>
       {/if}
       <ol class="steps" aria-label="Creation steps">

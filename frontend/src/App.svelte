@@ -15,7 +15,8 @@
 
   const PAGE = {
     jobs: {
-      title: 'Your edit queue',
+      // A1: the workspace's canonical name for the Jobs tab.
+      title: 'Your Clip Queue',
       subtitle: 'Select clips and upload — everything else has a sensible default.',
     },
     metrics: { title: 'Metrics', subtitle: 'Cross-job comparison of published clips.' },
@@ -31,7 +32,7 @@
 </script>
 
 <svelte:head>
-  <title>ClipMorph / Studio</title>
+  <title>{page.title} · ClipMorph</title>
   <link rel="icon" href="data:," />
 </svelte:head>
 
