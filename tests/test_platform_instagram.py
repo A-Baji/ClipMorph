@@ -123,13 +123,13 @@ class InstagramPollingTests(unittest.TestCase):
                                                         video_size_mb=1)
         return result, poll_times
 
-    def test_first_poll_is_immediate_second_at_15s_then_60s_cadence(self):
+    def test_polls_every_five_seconds_uniformly_starting_immediately(self):
         clock = _FakeClock()
         result, poll_times = self._wait(
             clock, ["IN_PROGRESS", "IN_PROGRESS", "IN_PROGRESS", "FINISHED"])
 
         self.assertTrue(result)
-        self.assertEqual(poll_times, [0, 15, 75, 135])
+        self.assertEqual(poll_times, [0, 5, 10, 15])
 
     def test_finished_is_a_success_terminal(self):
         clock = _FakeClock()
@@ -165,12 +165,58 @@ class InstagramPollingTests(unittest.TestCase):
                 self.pipeline._wait_for_processing("container-1",
                                                    video_size_mb=1)
 
-        # The cap fires at 480s, after the last scheduled 60s poll at 435s.
+        # The cap fires at 480s, after the last scheduled 5s poll at 480s.
         self.assertEqual(clock.now, 480)
-        self.assertEqual(poll_times, [0, 15, 75, 135, 195, 255, 315, 375, 435])
+        self.assertEqual(poll_times, [t * 5 for t in range(97)])
         # The derived pacing stays bounded and terminates under the cadence.
         self.assertLessEqual(self.pipeline._percent,
                              self.pipeline.MAX_PROGRESS_DURING_PROCESSING)
+
+
+class InstagramPollingUnificationTests(unittest.TestCase):
+    """F18: one shared 5-second default, with derived pacing moving with it."""
+
+    def test_shared_poll_interval_default_is_five_seconds(self):
+        from clipmorph.upload_pipeline.platforms.base import (
+            BaseUploadPipeline,
+        )
+        from clipmorph.upload_pipeline.platforms.tiktok import (
+            TikTokUploadPipeline,
+        )
+        from clipmorph.upload_pipeline.platforms.twitter import (
+            TwitterUploadPipeline,
+        )
+        from clipmorph.upload_pipeline.platforms.youtube import (
+            YouTubeUploadPipeline,
+        )
+
+        self.assertEqual(BaseUploadPipeline.API_POLL_INTERVAL, 5)
+        # Instagram and Twitter run on the shared default (no one-off
+        # constant), while TikTok and YouTube keep their documented
+        # platform-specific cadence overrides.
+        self.assertNotIn("API_POLL_INTERVAL", InstagramUploadPipeline.__dict__)
+        self.assertNotIn("API_POLL_INTERVAL", TwitterUploadPipeline.__dict__)
+        self.assertEqual(InstagramUploadPipeline.API_POLL_INTERVAL, 5)
+        self.assertEqual(TwitterUploadPipeline.API_POLL_INTERVAL, 5)
+        self.assertEqual(TikTokUploadPipeline.API_POLL_INTERVAL, 3)
+        self.assertEqual(YouTubeUploadPipeline.API_POLL_INTERVAL, 2)
+
+    def test_derived_pacing_moves_with_the_poll_interval(self):
+        base = _pipeline()
+        tripled = _pipeline()
+        tripled.API_POLL_INTERVAL = base.API_POLL_INTERVAL * 3
+
+        # At the shared 5s default a check advances one poll's share of the
+        # estimated processing allocation; a tripled interval triples it, so
+        # pacing and cadence move together.
+        estimated_time = 30.0
+        base_share = base._progress_share_per_poll(estimated_time)
+        self.assertEqual(
+            base_share,
+            base.MAX_PROGRESS_DURING_PROCESSING
+            / (estimated_time / base.API_POLL_INTERVAL))
+        self.assertEqual(tripled._progress_share_per_poll(estimated_time),
+                         base_share * 3)
 
 
 class InstagramErrorTests(unittest.TestCase):

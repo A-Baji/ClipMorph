@@ -1,6 +1,8 @@
 <script>
   import Icon from '../components/Icon.svelte';
   import ConfigForm from '../components/ConfigForm.svelte';
+  import PlatformSection from '../components/PlatformSection.svelte';
+  import Thumbnail from '../components/Thumbnail.svelte';
   import {
     app,
     createFromWizard,
@@ -11,6 +13,7 @@
     wizardClearSelection,
     wizardGoStep,
     wizardJobError,
+    wizardRail,
     wizardRemoveExtra,
     wizardSelectAll,
     wizardSelected,
@@ -24,6 +27,7 @@
   let extraPath = $state('');
 
   const selected = $derived(wizardSelected());
+  const rail = $derived(wizardRail());
   const spec = $derived(app.formSpec);
   const jobError = $derived(
     app.wizard.activeJob ? wizardJobError(app.wizard.activeJob) : '',
@@ -65,7 +69,7 @@
         </button>
       {:else}
         <button class="btn btn-ghost" onclick={leaveWizard}>
-          <Icon name="arrowLeft" /> Back to queue
+          <Icon name="arrowLeft" /> Back to jobs
         </button>
       {/if}
       <ol class="steps" aria-label="Creation steps">
@@ -113,7 +117,7 @@
                 checked={app.wizard.selected.includes(source.name)}
                 onchange={(event) => wizardToggleSource(source.name, event.currentTarget.checked)}
               />
-              <span class="clip-thumb"><Icon name="video" /></span>
+              <Thumbnail name={source.name} size={52} alt={`Poster frame for ${source.name}`} />
               <span class="clip-main">
                 <b>{source.name}</b>
                 <small class="faint">{formatBytes(source.size)}</small>
@@ -170,36 +174,60 @@
     {#if !spec}
       <p class="faint">Configuration form is loading…</p>
     {:else}
-      <details class="batch-block" open>
-        <summary>
-          <b>Batch defaults</b>
-          <small class="faint">Jobs inherit these unless they override them.</small>
-        </summary>
-        <p class="faint resolution">Resolution: job &gt; batch &gt; global default.</p>
-        <ConfigForm sections={spec.sections} mode="batch" />
-        {#each spec.platforms?.order || app.platforms as platform (platform)}
-          <details class="platform-block">
-            <summary>{platform}</summary>
-            <ConfigForm
-              sections={spec.platforms.sections}
-              mode="batch"
-              prefix={`platforms.${platform}.`}
-            />
-            <ConfigForm
-              sections={[{
-                id: `platforms.${platform}.options`,
-                label: `${platform} options`,
-                fields: spec.platforms.flat_fields[platform] || [],
-              }]}
-              mode="batch"
-            />
-          </details>
-        {/each}
-      </details>
-
+      <!-- D10: one right-hand rail (Batch first, then clips) driving exactly
+           one config pane on the left; never two config forms. sections start
+           collapsed per selection (D9); Batch sections may start expanded. -->
       <div class="wizard-body">
-        <aside class="rail" aria-label="Selected jobs">
-          <h3>Jobs</h3>
+        <div class="detail">
+          {#key app.wizard.activeJob}
+            {#if app.wizard.activeJob === 'batch'}
+              <div class="config-pane">
+                <div class="pane-head">
+                  <h2>Batch defaults</h2>
+                  <span class="faint">{app.wizard.batch.overrides.length} override(s)</span>
+                </div>
+                <p class="faint resolution">Resolution: job &gt; batch &gt; global default.</p>
+                <div class="pane-sections">
+                  <ConfigForm sections={spec.sections} mode="batch" open />
+                </div>
+                <!-- D8: every per-platform block nests under one collapsible
+                     "Platform" section; nodes per platform, collapsed by
+                     default; enable toggles sit on the platform nodes. -->
+                <PlatformSection {spec} mode="batch" />
+              </div>
+            {:else}
+              <div class="config-pane">
+                {#if jobError}
+                  <div class="job-error" role="alert">{app.wizard.activeJob}: {jobError}</div>
+                {/if}
+
+                <div class="pane-head">
+                  <h2>{app.wizard.activeJob}</h2>
+                  <span class="faint">{activeJobConfig.overrides.length} override(s)</span>
+                </div>
+
+                <div class="pane-sections">
+                  <ConfigForm sections={spec.sections} mode="job" source={app.wizard.activeJob} />
+                </div>
+                <PlatformSection spec={spec} mode="job" source={app.wizard.activeJob} />
+              </div>
+            {/if}
+          {/key}
+        </div>
+
+        <aside class="rail" aria-label="Configuration targets">
+          {#if app.wizard.batchEntry}
+            <button
+              class="rail-item"
+              class:active={app.wizard.activeJob === 'batch'}
+              onclick={() => wizardSetActiveJob('batch')}
+            >
+              <span class="rail-name">Batch</span>
+              <span class="badge" class:badge-info={app.wizard.batch.overrides.length > 0}>
+                {app.wizard.batch.overrides.length}
+              </span>
+            </button>
+          {/if}
           {#each selected as source (source)}
             <button
               class="rail-item"
@@ -216,42 +244,6 @@
             <Icon name="plus" /> Add or remove clips
           </button>
         </aside>
-
-        <div class="detail">
-          {#if jobError}
-            <div class="job-error" role="alert">{app.wizard.activeJob}: {jobError}</div>
-          {/if}
-
-          <div class="job-config">
-            <div class="job-head">
-              <h2>{app.wizard.activeJob}</h2>
-              <span class="faint">{activeJobConfig.overrides.length} override(s)</span>
-            </div>
-
-            <ConfigForm sections={spec.sections} mode="job" source={app.wizard.activeJob} />
-          </div>
-
-          {#each spec.platforms?.order || app.platforms as platform (platform)}
-            <details class="platform-block">
-              <summary>{platform}</summary>
-              <ConfigForm
-                sections={spec.platforms.sections}
-                mode="job"
-                source={app.wizard.activeJob}
-                prefix={`platforms.${platform}.`}
-              />
-              <ConfigForm
-                sections={[{
-                  id: `platforms.${platform}.options`,
-                  label: `${platform} options`,
-                  fields: spec.platforms.flat_fields[platform] || [],
-                }]}
-                mode="job"
-                source={app.wizard.activeJob}
-              />
-            </details>
-          {/each}
-        </div>
       </div>
     {/if}
   {/if}
@@ -312,13 +304,6 @@
     border-color: var(--color-primary);
   }
 
-  .clip-thumb {
-    display: inline-flex;
-    padding: var(--space-2);
-    border-radius: var(--radius-sm);
-    background: var(--color-surface);
-  }
-
   .clip-main {
     display: grid;
   }
@@ -358,13 +343,14 @@
 
   .wizard-body {
     display: grid;
-    grid-template-columns: minmax(0, 220px) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) minmax(220px, 260px);
     gap: var(--space-5);
     align-items: start;
   }
 
   .rail {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--space-2);
     position: sticky;
     top: var(--space-4);
@@ -375,6 +361,7 @@
     justify-content: space-between;
     align-items: center;
     gap: var(--space-2);
+    min-width: 0;
     padding: var(--space-2) var(--space-3);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
@@ -388,17 +375,11 @@
   }
 
   .rail-name {
+    flex: 1;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .batch-block,
-  .platform-block {
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-    padding: var(--space-3) var(--space-4);
-    margin-bottom: var(--space-4);
   }
 
   .resolution {
@@ -406,15 +387,7 @@
     font-size: var(--text-xs);
   }
 
-  .batch-block summary,
-  .platform-block summary {
-    cursor: pointer;
-    display: flex;
-    gap: var(--space-3);
-    align-items: baseline;
-  }
-
-  .job-head {
+  .pane-head {
     display: flex;
     justify-content: space-between;
     align-items: baseline;

@@ -38,6 +38,10 @@ jobs:
         working-directory: frontend
         run: npm install && npm run build
 
+      - name: Svelte check the frontend
+        working-directory: frontend
+        run: npm run check
+
       - name: Validate repository structure policy
         run: python scripts/check_structure.py
 
@@ -159,8 +163,44 @@ jobs:
         working-directory: frontend
         run: npm install --no-audit --no-fund && npm run build
 
+      # The node-bound smoke test (tests/e2e/smoke.js) drives the same
+      # chromium browser family; its revision can differ from the Python
+      # playwright's, so the cache key pins both versions — browsers for
+      # each sdk live side by side under ~/.cache/ms-playwright.
+      - name: Resolve node Playwright version
+        id: node-playwright-version
+        working-directory: frontend
+        run: |
+          VERSION=$(node -p "require('./node_modules/playwright/package.json').version")
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve Playwright version
+        id: playwright-version
+        run: |
+          VERSION=$(python -c "import importlib.metadata; print(importlib.metadata.version('playwright'))")
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}-node-${{ steps.node-playwright-version.outputs.version }}
+
       - name: Install Playwright browser
         run: python -m playwright install --with-deps chromium
 
+      - name: Install node Playwright browser
+        working-directory: frontend
+        run: npx playwright install chromium
+
       - name: Run packaged browser E2E tests
         run: python -m unittest tests.test_e2e_dashboard -v
+
+      - name: Run node Playwright smoke test
+        run: node tests/e2e/smoke.js
+
+      - name: Run board / scroll-model / empty-state verification
+        run: python tests/e2e/verify_board.py
+
+      - name: Run Phase 2C modal and wizard verification
+        run: python tests/e2e/verify_phase2c.py

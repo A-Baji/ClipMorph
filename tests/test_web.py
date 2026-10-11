@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta, timezone
+from subprocess import CompletedProcess
+from types import SimpleNamespace
 from urllib.parse import quote
 import json
 import tempfile
@@ -8,6 +10,7 @@ from unittest.mock import patch
 
 import yaml
 from clipmorph.configuration import APP_CONFIG_VERSION, save_app_configuration
+from clipmorph.job import source_sha256
 from clipmorph.metrics import append_snapshot
 from clipmorph.service import JobService
 from clipmorph.service import conversion_groups
@@ -15,10 +18,12 @@ from clipmorph.upload_pipeline.platforms.base import BaseUploadPipeline
 
 try:
     from fastapi.testclient import TestClient
+    from clipmorph.ffmpeg import FFmpegError
     from clipmorph.web import create_app
 except ImportError:  # CLI-only installations do not include the web extra.
     TestClient = None
     create_app = None
+    FFmpegError = None
 
 
 def _fake_youtube_adapter(percent, fail=False):
@@ -47,6 +52,45 @@ def _fake_youtube_adapter(percent, fail=False):
                     "completed_at": "2026-01-01T00:00:01+00:00"}
 
     return FakeYouTubeAdapter()
+
+
+class _FakeThumbnailRunner:
+    """Stand-in for FFmpegRunner: records the command, writes the poster.
+
+    The web suite never runs real media through FFmpeg; the runner writes a
+    JPEG-shaped payload to the command's output path, mirroring what a real
+    successful ``ffmpeg -frames:v 1`` invocation would leave behind.
+    """
+
+    config = SimpleNamespace(ffmpeg_path="ffmpeg")
+
+    def __init__(self):
+        self.calls = []
+
+    def run_ffmpeg(self, cmd, timeout=None):
+        self.calls.append(list(cmd))
+        if getattr(self, "raise_ffmpeg_error", False):
+            raise FFmpegError("mocked ffmpeg failure: bad input")
+        Path(cmd[-1]).write_bytes(b"poster-frame-jpeg")
+        return CompletedProcess(cmd, 0)
+
+
+def _job_with_current_artifact(data_dir: Path):
+    """Create one skip-everything job with a current output artifact.
+
+    Returns ``(service, manifest, artifact_path, artifact_id)``; the caller
+    must close the service.
+    """
+    service = JobService(data_dir)
+    manifest = service.create_job("clip.mp4", {
+        "conversion": {"skip": True, "subtitles": {"skip": True}}})
+    artifact_dir = data_dir / "output" / manifest.job_id
+    artifact_dir.mkdir(parents=True)
+    artifact_path = artifact_dir / "output.mp4"
+    artifact_path.write_bytes(b"rendered artifact")
+    manifest.set_artifact(str(artifact_path), service.jobs_dir)
+    artifact_id = manifest.current_artifact_id
+    return service, manifest, artifact_path, artifact_id
 
 
 @unittest.skipUnless(TestClient and create_app, "web extra is not installed")
@@ -195,6 +239,180 @@ class WebApiTests(unittest.TestCase):
                 self.assertEqual(len(bulk.json()["created"]), 1)
                 self.assertEqual(bulk.json()["skipped"][0]["code"], "duplicate_content")
                 self.assertEqual(client.post("/api/v1/batches", json={}).status_code, 404)
+
+    def test_source_thumbnail_generates_once_and_serves_cache_headers(self):
+        """C5: one FFmpeg poster frame per (name, content) cache key."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            sources = data_dir / "sources"
+            sources.mkdir(parents=True)
+            clip = sources / "clip.mp4"
+            clip.write_bytes(b"fake-source-bytes")
+            with TestClient(create_app(data_dir)) as client:
+                runner = _FakeThumbnailRunner()
+                with patch("clipmorph.ffmpeg.FFmpegRunner", lambda: runner):
+                    first = client.get("/api/v1/sources/clip.mp4/thumbnail")
+                cache_files = sorted((data_dir / "thumbnails").iterdir())
+
+                self.assertEqual(first.status_code, 200, first.text)
+                self.assertEqual(first.headers["content-type"], "image/jpeg")
+                # Long-lived cache headers: a key's bytes never change.
+                self.assertEqual(first.headers["cache-control"],
+                                 "public, max-age=31536000, immutable")
+                self.assertEqual(first.content, b"poster-frame-jpeg")
+                self.assertEqual(len(cache_files), 1)
+                self.assertTrue(cache_files[0].name.startswith("clip-"))
+                self.assertEqual(runner.calls, [[
+                    runner.config.ffmpeg_path, "-y", "-i", str(clip),
+                    "-frames:v", "1", str(cache_files[0])]])
+
+                # A second request is served from disk: the cache key is
+                # stable, so FFmpeg never runs again for the same source.
+                with patch("clipmorph.ffmpeg.FFmpegRunner", lambda: runner):
+                    second = client.get("/api/v1/sources/clip.mp4/thumbnail")
+                self.assertEqual(second.status_code, 200, second.text)
+                self.assertEqual(second.content, b"poster-frame-jpeg")
+                self.assertEqual(len(runner.calls), 1)
+
+                # Changed clip bytes get a fresh key: one cache file per
+                # (source, content) pair, not one stale file overwritten.
+                clip.write_bytes(b"re-recorded-bytes")
+                with patch("clipmorph.ffmpeg.FFmpegRunner", lambda: runner):
+                    third = client.get("/api/v1/sources/clip.mp4/thumbnail")
+                self.assertEqual(third.status_code, 200, third.text)
+                self.assertEqual(third.content, b"poster-frame-jpeg")
+                self.assertEqual(len(runner.calls), 2)
+                self.assertEqual(
+                    len(list((data_dir / "thumbnails").iterdir())), 2)
+
+    def test_source_thumbnail_content_key_matches_the_source_identity(self):
+        """C5: the cache key carries the same content hash job manifests use."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            sources = data_dir / "sources"
+            sources.mkdir(parents=True)
+            clip = sources / "take.mp4"
+            clip.write_bytes(b"identity-bytes")
+            with TestClient(create_app(data_dir)) as client:
+                runner = _FakeThumbnailRunner()
+                with patch("clipmorph.ffmpeg.FFmpegRunner", lambda: runner):
+                    first = client.get("/api/v1/sources/take.mp4/thumbnail")
+                cache_files = list((data_dir / "thumbnails").iterdir())
+
+                self.assertEqual(first.status_code, 200, first.text)
+                self.assertEqual([p.name for p in cache_files],
+                                 [f"take-{source_sha256(clip)[:16]}.jpg"])
+
+    def test_source_thumbnail_rejects_missing_and_illegal_sources(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            sources = data_dir / "sources"
+            sources.mkdir(parents=True)
+            (sources / "clip.mp4").write_bytes(b"real source")
+            (sources / "notes.txt").write_bytes(b"not a clip")
+            with TestClient(create_app(data_dir)) as client:
+                runner = _FakeThumbnailRunner()
+                with patch("clipmorph.ffmpeg.FFmpegRunner", lambda: runner):
+                    missing = client.get("/api/v1/sources/absent.mp4/thumbnail")
+                    illegal = [client.get(
+                        "/api/v1/sources/" + quote(name) + "/thumbnail")
+                        for name in ("../../app.yml", "sub/secret.mp4")]
+                    non_media = client.get("/api/v1/sources/notes.txt/thumbnail")
+                    failing = _FakeThumbnailRunner()
+                    failing.raise_ffmpeg_error = True
+                    with patch("clipmorph.ffmpeg.FFmpegRunner", lambda: failing):
+                        broken = client.get("/api/v1/sources/clip.mp4/thumbnail")
+                calls_after = len(runner.calls)
+
+            self.assertEqual(missing.status_code, 404)
+            self.assertEqual(missing.json()["error"]["code"], "not_found")
+            # Traversal-tainted names are rejected before any file access;
+            # names with slashes fall through to the router's own 404, so
+            # only the status is asserted there.
+            for response in illegal:
+                self.assertEqual(response.status_code, 404)
+            self.assertEqual(non_media.status_code, 404)
+            self.assertEqual(non_media.json()["error"]["code"], "not_found")
+            # A generation failure is a 404 too: the dashboard's generic
+            # icon stays the load fallback.
+            self.assertEqual(broken.status_code, 404, broken.text)
+            self.assertEqual(broken.json()["error"]["code"],
+                             "thumbnail_unavailable")
+            self.assertIn("mocked ffmpeg failure",
+                          broken.json()["error"]["message"])
+            self.assertEqual(calls_after, 0)
+            thumbnails = data_dir / "thumbnails"
+            self.assertEqual(
+                sorted(p.name for p in thumbnails.iterdir())
+                if thumbnails.exists() else [], [])
+
+    def test_open_folder_route_reveals_guarded_artifacts_only(self):
+        """F21: explorer /select runs only for paths the artifact guard allows."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"source")
+            service, manifest, artifact_path, artifact_id = (
+                _job_with_current_artifact(data_dir))
+            job_id = manifest.job_id
+            # One hand-edited escape record: a path outside the guarded job
+            # roots that still resolves to a real, existing file.
+            blueprint = manifest.artifacts[artifact_id]
+            manifest.artifacts["escape"] = {
+                **blueprint, "id": "escape",
+                "storage": {**blueprint["storage"],
+                            "key": "../sources/clip.mp4"}}
+            manifest.save(service.jobs_dir)
+            service.close()
+
+            with TestClient(create_app(data_dir)) as client:
+                with patch("clipmorph.web.platform.system",
+                           return_value="Windows"), \
+                        patch("clipmorph.web.subprocess.Popen") as popen:
+                    opened = client.post(
+                        f"/api/v1/jobs/{job_id}/artifacts/{artifact_id}"
+                        + "/open-folder")
+                    escaped = client.post(
+                        f"/api/v1/jobs/{job_id}/artifacts/escape"
+                        + "/open-folder")
+                    missing = client.post(
+                        f"/api/v1/jobs/{job_id}/artifacts/no-such"
+                        + "/open-folder")
+
+            self.assertEqual(opened.status_code, 200, opened.text)
+            self.assertEqual(opened.json(), {"opened": True})
+            self.assertEqual(popen.call_count, 1)
+            popen.assert_called_once_with(
+                ["explorer.exe", f"/select,{artifact_path}"])
+            # Paths outside the guarded job roots and unknown artifacts never
+            # reach the file manager.
+            self.assertEqual(escaped.status_code, 404)
+            self.assertEqual(missing.status_code, 404)
+
+    def test_open_folder_endpoint_never_reveals_off_windows(self):
+        """macOS/Linux reveals are follow-ups; the request fails without one."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            (data_dir / "sources" / "clip.mp4").write_bytes(b"source")
+            service, manifest, _artifact_path, artifact_id = (
+                _job_with_current_artifact(data_dir))
+            job_id = manifest.job_id
+            service.close()
+
+            with TestClient(create_app(data_dir)) as client:
+                with patch("clipmorph.web.platform.system",
+                           return_value="Linux"), \
+                        patch("clipmorph.web.subprocess.Popen") as popen:
+                    response = client.post(
+                        f"/api/v1/jobs/{job_id}/artifacts/{artifact_id}"
+                        + "/open-folder")
+
+            self.assertEqual(response.status_code, 501, response.text)
+            self.assertEqual(response.json()["error"]["code"],
+                             "not_implemented")
+            popen.assert_not_called()
 
     def test_form_spec_route_serves_the_generated_spec(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -705,14 +923,115 @@ class WebApiTests(unittest.TestCase):
             checkpoint = manifest.checkpoints["transcript"]
             checkpoint = manifest.transition_checkpoint(
                 "transcript", "running", checkpoint["revision"], service.jobs_dir)
-            manifest.transition_checkpoint(
+            updated = manifest.transition_checkpoint(
                 "transcript", "awaiting_review", checkpoint["revision"], service.jobs_dir)
             service.close()
 
             with TestClient(create_app(data_dir)) as client:
                 path = f"/api/v1/jobs/{manifest.job_id}/checkpoints/transcript/accept"
-                accepted = client.post(path, json={"expected_revision": 2})
-                self.assertEqual(accepted.status_code, 200)
+                # The current revision is whatever the last transition left.
+                stale = client.post(path, json={"expected_revision": 1})
+                self.assertEqual(stale.status_code, 409, stale.text)
+                with patch("clipmorph.workflow.execute_job") as execute_job:
+                    accepted = client.post(
+                        path, json={"expected_revision": updated["revision"]})
+                    self.assertEqual(
+                        accepted.status_code, 202, accepted.text)
+                    self.assertTrue(accepted.json()["resumed"])
+                    service = client.app.state.job_service
+                    service._futures[manifest.job_id].result(timeout=5)
+                    execute_job.assert_called_once()
+
+    def test_accept_checkpoint_resumes_pending_work_immediately(self):
+        """E14 (#259): an accepted gate lands the job in a running run.
+
+        The accept endpoint resumes the pre-run manifest itself: the response
+        carries ``resumed: true`` (202) and, while the resumed run is on the
+        conversion checkpoint, ``GET /jobs/{id}`` reports ``running`` — no
+        accepted -> queued -> running passthrough is observable via the API.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"source")
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {})
+            checkpoint = manifest.checkpoints["transcript"]
+            checkpoint = manifest.transition_checkpoint(
+                "transcript", "running", checkpoint["revision"], service.jobs_dir)
+            updated = manifest.transition_checkpoint(
+                "transcript", "awaiting_review", checkpoint["revision"], service.jobs_dir)
+            service.close()
+
+            def runner(job, token, jobs_dir=None, config_path=None):
+                # Mimic a pipeline that is mid-conversion after the resume
+                # (the route wraps it in the execute_job(job, token, jobs_dir,
+                # config_path) call shape).
+                job.transition_checkpoint(
+                    "conversion", "running",
+                    job.checkpoints["conversion"]["revision"],
+                    service.jobs_dir)
+
+            with TestClient(create_app(data_dir)) as client:
+                with patch("clipmorph.workflow.execute_job", new=runner):
+                    accepted = client.post(
+                        f"/api/v1/jobs/{manifest.job_id}"
+                        "/checkpoints/transcript/accept",
+                        json={"expected_revision": updated["revision"]})
+                    self.assertEqual(accepted.status_code, 202, accepted.text)
+                    self.assertTrue(accepted.json()["resumed"])
+                    service = client.app.state.job_service
+                    service._futures[manifest.job_id].result(timeout=5)
+                after = client.get(f"/api/v1/jobs/{manifest.job_id}").json()
+                self.assertEqual(after["status"], "running")
+                self.assertEqual(
+                    after["checkpoints"]["conversion"]["status"], "running")
+
+    def test_conversion_gate_accept_opens_upload_review_without_running(self):
+        """Accepting the composition gate leaves upload review, not a run.
+
+        All groups await review; the accept resolves them into the upload
+        draft gate: the response is ``200`` with ``resumed: false`` and no
+        run is submitted — the Review modal hands off to the Publish draft.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"source")
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {
+                "conversion": {"skip": False, "subtitles": {"skip": True}},
+                # A different effective conversion section per platform so
+                # the job renders two distinct groups.
+                "platforms": {"youtube": {"conversion": {"strict": True}}}})
+            for group_id in manifest.checkpoints["conversion"]["groups"]:
+                for status in ("running", "awaiting_review"):
+                    manifest = service.get_job(manifest.job_id)
+                    revision = manifest.checkpoints["conversion"]["groups"][
+                        group_id]["revision"]
+                    manifest.transition_checkpoint(
+                        "conversion", status, revision, service.jobs_dir,
+                        group_id=group_id)
+            service.close()
+
+            with TestClient(create_app(data_dir)) as client:
+                conversion = client.get(
+                    f"/api/v1/jobs/{manifest.job_id}").json()[
+                    "checkpoints"]["conversion"]
+                with patch("clipmorph.workflow.execute_job") as execute_job:
+                    path = (f"/api/v1/jobs/{manifest.job_id}"
+                            "/checkpoints/conversion/accept")
+                    accepted = client.post(
+                        path, json={"expected_revision": conversion["revision"]})
+                    self.assertEqual(accepted.status_code, 200, accepted.text)
+                    self.assertFalse(accepted.json()["resumed"])
+                    execute_job.assert_not_called()
+                after = client.get(f"/api/v1/jobs/{manifest.job_id}").json()
+                self.assertEqual(after["status"], "awaiting_review")
+                self.assertEqual(
+                    after["checkpoints"]["upload"]["status"], "awaiting_review")
 
     def test_upload_draft_put_accepts_platforms_key(self):
         with tempfile.TemporaryDirectory() as temp_dir:

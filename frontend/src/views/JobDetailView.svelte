@@ -19,7 +19,6 @@
     retryCheckpoint,
     loadTranscript,
     saveTranscript,
-    saveComposition,
     saveUploadDraft,
     submitUpload,
     generateSuggestions,
@@ -38,7 +37,9 @@
     metricRows,
     formatDelta,
     platformLabel,
+    platformListLabel,
   } from '../lib/format.js';
+  import { api } from '../lib/api.js';
 
   const TABS = [
     { id: 'overview', label: 'Overview' },
@@ -51,26 +52,108 @@
 
   const job = $derived(selectedJob());
 
-  let compositionJson = $state('{}');
   let loadedJobId = $state('');
   let renderGroup = $state('');
 
-  const renderGroups = $derived(
+  /** F15: the platforms a group is shared by, in the app's platform order. */
+  function groupPlatforms(id) {
+    const order = (platform) => app.platforms.indexOf(platform);
+    return Object.entries(app.platformSummaries || {})
+      .filter(([, summary]) => summary.group_id === id)
+      .map(([platform]) => platform)
+      .sort((a, b) => order(a) - order(b));
+  }
+
+  /**
+   * F15: one entry per group, each carrying its member platforms so the
+   * dropdown labels entries by the stored platform list instead of the raw
+   * group id.
+   */
+  const renderGroupOptions = $derived(
     [...new Set(
       Object.values(app.platformSummaries || {})
         .map((summary) => summary.group_id)
         .filter(Boolean),
-    )],
+    )].map((id) => ({ id, platforms: groupPlatforms(id) })),
   );
 
   $effect(() => {
     if (job && job.job_id !== loadedJobId) {
       loadedJobId = job.job_id;
-      compositionJson = JSON.stringify(job.configuration?.conversion?.layout || {}, null, 2);
+      renderGroup = '';
     }
   });
 
+  /**
+   * E17: the Review tab shows the current gate only. The earliest gate that
+   * still awaits review drives which panel renders: the transcript editor,
+   * or the conversion/composition review (media player + structured
+   * composition), or nothing (the upload draft review lives on Publish).
+   */
+  const reviewGate = $derived.by(() => {
+    if (!job) return null;
+    if (job.checkpoints?.transcript?.status === 'awaiting_review') return 'transcript';
+    if (job.checkpoints?.conversion?.status === 'awaiting_review') return 'conversion';
+    return null;
+  });
+
+  const uploadAwaitingReview = $derived(
+    Boolean(job?.checkpoints?.upload?.status === 'awaiting_review'),
+  );
+
+  /**
+   * E17: the full converted artifact for the player. The job's current
+   * artifact is the reviewed render; any registered artifact is a fallback.
+   */
+  const reviewArtifact = $derived.by(() => {
+    if (!job) return null;
+    const artifacts = app.artifacts || [];
+    return artifacts.find((item) => item.id === job.current_artifact_id) ||
+      artifacts[0] || null;
+  });
+
+  /**
+   * E22: composition data as readable sections — every conversion value
+   * renders as labeled text ("anything without a widget renders as labeled
+   * text"); no raw JSON blob exists on any review surface.
+   */
+  function labeledRows(value, label = '', rows = [], depth = 0) {
+    if (value === null || value === undefined || value === '') return rows;
+    if (Array.isArray(value)) {
+      if (value.every((item) => item === null || typeof item !== 'object')) {
+        rows.push({ label, value: value.filter((item) => item !== null).join(', ') });
+      } else {
+        value.forEach((item, index) => {
+          labeledRows(item, label ? `${label} ${index + 1}` : `Item ${index + 1}`, rows, depth);
+        });
+      }
+      return rows;
+    }
+    if (typeof value === 'object') {
+      for (const [key, nested] of Object.entries(value)) {
+        labeledRows(nested, label ? `${label} · ${humanize(key)}` : humanize(key), rows, depth + 1);
+      }
+      return rows;
+    }
+    rows.push({ label, value: String(value) });
+    return rows;
+  }
+
+  const compositionSections = $derived.by(() => {
+    const conversion = job?.configuration?.conversion || {};
+    const parts = Object.entries(conversion)
+      .filter(([key]) => !['skip'].includes(key))
+      .map(([key, value]) => ({
+        title: humanize(key),
+        rows: labeledRows(value, humanize(key)),
+      }))
+      .filter((section) => section.rows.length);
+    return parts;
+  });
+
   $effect(() => {
+    // E17: caption lines read from the active transcript revision in both
+    // review gates (the transcript editor and the composition review).
     if (app.detailTab === 'review' && job?.active_transcript && !app.transcript) {
       loadTranscript().catch((error) => (app.errors = [error.message]));
     }
@@ -107,7 +190,9 @@
   function confirmCancel() {
     requestConfirm({
       title: 'Cancel this job?',
-      message: 'Queued and running work is aborted. Scheduled attempts are cancelled.',
+      // U12: the dialog speaks for this one job's Cancel action only.
+      message:
+        'Running and queued work for this job is aborted, including its scheduled attempts.',
       confirmLabel: 'Cancel job',
       danger: true,
       onConfirm: () => jobAction('cancel'),
@@ -131,8 +216,8 @@
 {#if !job}
   <div class="content">
     <Card flush>
-      <EmptyState title="Job not found" message="It may have been deleted. Return to the queue.">
-        <button class="btn btn-primary" onclick={closeJob}>Back to queue</button>
+      <EmptyState title="Job not found" message="It may have been deleted. Return to the Jobs tab.">
+        <button class="btn btn-primary" onclick={closeJob}>Back to jobs</button>
       </EmptyState>
     </Card>
   </div>
@@ -140,11 +225,11 @@
   <div class="content">
     <div class="detail-head">
       <div class="row">
-        <button class="btn btn-ghost btn-icon" aria-label="Back to queue" onclick={closeJob}>
+        <button class="btn btn-ghost btn-icon" aria-label="Back to jobs" onclick={closeJob}>
           <Icon name="arrowLeft" />
         </button>
         <div>
-          <div class="title">{title}</div>
+          <div class="title truncate">{title}</div>
           <div class="row faint">
             <Badge tone={statusTone(job.status)}>{humanize(job.status)}</Badge>
             <span class="mono">{job.configuration?.general?.source}</span>
@@ -152,18 +237,25 @@
           </div>
         </div>
       </div>
-      <div class="row">
+      <div class="action-bar">
         {#if canResume}
-          <button class="btn btn-secondary" onclick={() => jobAction('resume')}>
-            <Icon name="play" /> Resume
-          </button>
+          <div class="action-group">
+            <button class="btn btn-secondary" onclick={() => jobAction('resume')}>
+              <Icon name="play" /> Resume
+            </button>
+          </div>
         {/if}
         {#if canCancel}
-          <button class="btn btn-secondary" onclick={confirmCancel}>Cancel</button>
+          <div class="action-group">
+            <button class="btn btn-secondary" onclick={confirmCancel}>Cancel</button>
+          </div>
         {/if}
-        <button class="btn btn-danger" onclick={confirmDelete}>
-          <Icon name="trash" /> Delete
-        </button>
+        <!-- Risky actions keep their own muted/danger group (E11/E16). -->
+        <div class="action-group">
+          <button class="btn btn-danger" onclick={confirmDelete}>
+            <Icon name="trash" /> Delete
+          </button>
+        </div>
       </div>
     </div>
 
@@ -177,11 +269,9 @@
               {@const checkpoint = job.checkpoints?.[stage] || {}}
               <div class="checkpoint-row">
                 <Icon name={checkpoint.status === 'accepted' ? 'check' : 'dot'} />
-                <div>
-                  <div class="name">{stage.charAt(0).toUpperCase() + stage.slice(1)}</div>
-                  <div class="desc">{humanize(checkpoint.status) || 'not started'}</div>
-                </div>
+                <div class="name">{stage.charAt(0).toUpperCase() + stage.slice(1)}</div>
                 <div class="row">
+                  <!-- U7: the badge is the row's single status render. -->
                   <Badge tone={statusTone(checkpoint.status)}>{humanize(checkpoint.status) || 'pending'}</Badge>
                   {#if checkpoint.status === 'failed'}
                     <button class="btn btn-ghost btn-sm" onclick={() => retryCheckpoint(stage)}>Retry</button>
@@ -235,16 +325,22 @@
       </Card>
 
     {:else if app.detailTab === 'review'}
-      <div class="review-grid">
+      <!-- E17: review affordances for the current gate only. -->
+      {#if reviewGate === 'transcript'}
         <Card title="Transcript" description="Edit timing and text, then save a new revision.">
-          <div class="row-between">
-            <span class="faint">{app.transcript ? `${app.transcript.segments.length} segments` : ''}</span>
-            <div class="row">
+          <!-- E11: one standard action bar, primary/secondary separated. -->
+          <div class="action-bar action-lead-row">
+            <span class="action-lead faint">
+              {app.transcript ? `${app.transcript.segments.length} segments` : ''}
+            </span>
+            <div class="action-group">
               <button
                 class="btn btn-secondary"
                 disabled={!app.transcript}
                 onclick={saveTranscript}
               >Save transcript revision</button>
+            </div>
+            <div class="action-group">
               <button
                 class="btn btn-primary"
                 disabled={job.checkpoints?.transcript?.status !== 'awaiting_review'}
@@ -261,47 +357,119 @@
           {:else}
             <EmptyState
               icon="pencil"
-              title="No transcript review pending"
+              title="No transcript revision loaded"
               message="This job has no active transcript revision to edit."
             />
           {/if}
         </Card>
 
-        <Card title="Composition" description="The conversion layout for this job. Saving marks the current render stale.">
-          <div class="stack">
-            <label class="field">
-              <span>Job layout JSON</span>
-              <textarea
-                aria-label="Job composition layout"
-                rows="12"
-                spellcheck="false"
-                bind:value={compositionJson}
-              ></textarea>
-            </label>
-            <div class="row">
-              <button class="btn btn-primary" onclick={() => saveComposition(compositionJson)}>
-                Save job composition
-              </button>
-              {#if renderGroups.length}
-                <select aria-label="Conversion group" bind:value={renderGroup}>
-                  <option value="">All groups</option>
-                  {#each renderGroups as group (group)}
-                    <option value={group}>{group}</option>
-                  {/each}
-                </select>
+      {:else if reviewGate === 'conversion'}
+        <!-- E17/E22: the composition review plays the full converted artifact
+             and renders composition data as labeled structured sections — no
+             raw JSON anywhere in a review surface. -->
+        <div class="review-grid">
+          <Card title="Rendered clip" description="The full converted artifact for this job.">
+            {#if reviewArtifact}
+              <!-- The rendered artifact carries burned-in captions; a served
+                   captions track is a follow-up (issue #259 F22 family). -->
+              <!-- svelte-ignore a11y_media_has_caption -->
+              <video
+                class="review-player"
+                controls
+                preload="metadata"
+                aria-label={`Play the converted artifact ${reviewArtifact.display_name || reviewArtifact.kind}`}
+                src={api.previewUrl(job.job_id, reviewArtifact.id)}
+              ></video>
+            {:else}
+              <EmptyState
+                icon="video"
+                title="No rendered artifact yet"
+                message="Run a render to create the artifact this review plays."
+              />
+            {/if}
+          </Card>
+
+          <Card
+            title="Composition"
+            description="The conversion layout this job renders."
+          >
+            <div class="action-bar action-lead-row">
+              <span class="action-lead faint">
+                {app.transcript
+                  ? `${app.transcript.segments.length} caption line${app.transcript.segments.length === 1 ? '' : 's'}`
+                  : ''}
+              </span>
+              {#if renderGroupOptions.length}
+                <!-- F15: human labels — "All variants" plus one entry per
+                     group, labeled by the platform list sharing that render
+                     variant; the raw group id is the value only. -->
+                <span class="variant-picker">
+                  <select aria-label="Render variant" bind:value={renderGroup}>
+                    <option value="">All variants</option>
+                    {#each renderGroupOptions as option (option.id)}
+                      <option value={option.id}>{platformListLabel(option.platforms)}</option>
+                    {/each}
+                  </select>
+                  <small class="faint">Each group is one render variant shared by the platforms it lists.</small>
+                </span>
               {/if}
-              <button class="btn btn-secondary" onclick={() => jobAction('render', renderGroup)}>
-                <Icon name="refresh" /> Render
-              </button>
-              <button
-                class="btn btn-secondary"
-                disabled={job.checkpoints?.conversion?.status !== 'awaiting_review'}
-                onclick={() => acceptCheckpoint('conversion')}
-              >Accept composition</button>
+              <div class="action-group">
+                <button class="btn btn-secondary" onclick={() => jobAction('render', renderGroup)}>
+                  <Icon name="refresh" /> Render
+                </button>
+              </div>
+              <div class="action-group">
+                <button
+                  class="btn btn-primary"
+                  disabled={job.checkpoints?.conversion?.status !== 'awaiting_review'}
+                  onclick={() => acceptCheckpoint('conversion')}
+                >Accept composition</button>
+              </div>
             </div>
-          </div>
-        </Card>
-      </div>
+
+            {#if app.transcript}
+              <div class="composition-block">
+                <div class="composition-title">Caption lines</div>
+                {#each app.transcript.segments as segment, index (index)}
+                  <div class="composition-row">
+                    <span class="faint mono">{segment.start}s → {segment.end}s</span>
+                    <span class="truncate">{segment.text}</span>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+
+            {#each compositionSections as section (section.title)}
+              <div class="composition-block">
+                <div class="composition-title">{section.title}</div>
+                {#each section.rows as row (row.label + row.value)}
+                  <div class="composition-row">
+                    <span class="faint">{row.label}</span>
+                    <span class="truncate">{row.value}</span>
+                  </div>
+                {/each}
+              </div>
+            {/each}
+          </Card>
+        </div>
+
+      {:else}
+        <EmptyState
+          icon="check"
+          title={uploadAwaitingReview
+            ? 'The next review is the upload draft'
+            : 'No review pending'}
+          message={uploadAwaitingReview
+            ? 'The upload draft review lives on the Publish tab.'
+            : 'When the pipeline lands on a review gate, its review controls appear here.'}
+        >
+          {#if uploadAwaitingReview}
+            <button class="btn btn-secondary" onclick={() => (app.detailTab = 'publish')}>
+              Go to Publish
+            </button>
+          {/if}
+        </EmptyState>
+      {/if}
 
     {:else if app.detailTab === 'publish'}
       <div class="grid-2">
@@ -348,13 +516,17 @@
               </Field>
             {/if}
 
-            <div class="row">
-              <button class="btn btn-secondary" onclick={saveUploadDraft}>
-                <Icon name="check" /> Save draft
-              </button>
-              <button class="btn btn-primary" disabled={app.busy} onclick={submitUpload}>
-                <Icon name="upload" /> Submit upload
-              </button>
+            <div class="action-bar">
+              <div class="action-group">
+                <button class="btn btn-secondary" onclick={saveUploadDraft}>
+                  <Icon name="check" /> Save draft
+                </button>
+              </div>
+              <div class="action-group">
+                <button class="btn btn-primary" disabled={app.busy} onclick={submitUpload}>
+                  <Icon name="upload" /> Submit upload
+                </button>
+              </div>
             </div>
           </div>
         </Card>
@@ -370,7 +542,13 @@
                     <b>{platformLabel(platform)} · {summary.kind || 'clip'}</b>
                     <small>
                       {summary.conversion?.skip ? 'uploads the source file' : 'uploads the rendered vertical'}
-                      · group {summary.group_id || 'unassigned'}
+                      {#if summary.group_id}
+                        <!-- F15: the group renders as its platform list, never a hash. -->
+                        {@const members = groupPlatforms(summary.group_id)}
+                        · {members.length > 1
+                          ? `one render variant shared by ${platformListLabel(members)}`
+                          : 'its own render variant'}
+                      {/if}
                     </small>
                   </div>
                 </div>
@@ -529,5 +707,12 @@
 
   .row.between > .faint {
     margin-right: auto;
+  }
+
+  /* F15: the rerender variant dropdown with its one-line hint below. */
+  .variant-picker {
+    display: grid;
+    gap: var(--space-1);
+    justify-items: start;
   }
 </style>

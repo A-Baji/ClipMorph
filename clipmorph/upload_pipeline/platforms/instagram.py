@@ -28,11 +28,6 @@ class InstagramUploadPipeline(BaseUploadPipeline):
     DEFAULT_PROCESSING_TIME_PER_MB = 20  # seconds
     MIN_PROCESSING_TIME = 30  # seconds
     MAX_PROGRESS_DURING_PROCESSING = 80  # don't complete progress bar during processing
-    # Tiered status polling: check immediately, again shortly after to catch a
-    # fast encode, then on Meta's recommended once-per-minute cadence.
-    API_FIRST_POLL_DELAY = 0  # first check fires immediately
-    API_SECOND_POLL_DELAY = 15  # seconds before the second check
-    API_POLL_INTERVAL = 60  # seconds between later checks
     MIN_PROGRESS_INCREMENT = 1.5
     # Meta's error-codes reference, surfaced when a container fails without a
     # usable detail instead of guessing a cause.
@@ -347,33 +342,44 @@ class InstagramUploadPipeline(BaseUploadPipeline):
                 f"Response: {media_status}. See Meta's error codes reference: "
                 f"{self.ERROR_CODES_REFERENCE}")
 
+    def _progress_share_per_poll(self, estimated_time: float) -> float:
+        """Percent per status check, derived from the shared poll interval.
+
+        Each check advances one poll's share of the estimated processing
+        allocation, so changing the inherited ``API_POLL_INTERVAL`` re-derives
+        the pacing automatically instead of leaving it tuned to one cadence.
+
+        Args:
+            estimated_time: Expected processing duration in seconds.
+        """
+        return max(
+            self.MIN_PROGRESS_INCREMENT,
+            self.MAX_PROGRESS_DURING_PROCESSING
+            / (estimated_time / self.API_POLL_INTERVAL))
+
     def _wait_for_processing(self, creation_id, video_size_mb=0):
         """
         Polls the media container status until it reaches a terminal state.
 
-        The cadence follows Meta's guidance: the first check fires immediately,
-        the second after ``API_SECOND_POLL_DELAY`` seconds to catch a fast
-        encode, and every later check ``API_POLL_INTERVAL`` seconds apart. The
-        wait is bounded by ``processing_timeout``; a container that never leaves
-        ``IN_PROGRESS`` raises ``TimeoutError`` only after every terminal status
-        has been checked, so a container that finished on the last poll is
-        never misreported as a timeout.
+        The cadence is the shared adapter default: the first check fires
+        immediately and every later check ``API_POLL_INTERVAL`` seconds apart.
+        The wait is bounded by ``processing_timeout``; a container that never
+        leaves ``IN_PROGRESS`` raises ``TimeoutError`` only after every terminal
+        status has been checked, so a container that finished on the last poll
+        is never misreported as a timeout.
         """
         url = f"{self.FACEBOOK_GRAPH_BASE_URL}/{self.api_version}/{creation_id}?fields=status_code&access_token={self.page_token}"
         start = time.time()
-        next_poll_at = self.API_FIRST_POLL_DELAY
-        poll_count = 0
+        next_poll_at = 0
 
-        # Progress rate (percent per second) derived from the expected
-        # processing time; the floor keeps the bar moving for small files. The
-        # elapsed-based target is bounded by MAX_PROGRESS_DURING_PROCESSING, so
-        # the pacing terminates with the loop under any cadence.
+        # Progress pacing derives from the shared poll interval (see
+        # _progress_share_per_poll); the elapsed-based target is bounded by
+        # MAX_PROGRESS_DURING_PROCESSING, so the pacing terminates with the
+        # loop under any cadence.
         estimated_time = max(
             self.MIN_PROCESSING_TIME,
             video_size_mb * self.DEFAULT_PROCESSING_TIME_PER_MB)
-        progress_per_second = max(
-            self.MIN_PROGRESS_INCREMENT,
-            self.MAX_PROGRESS_DURING_PROCESSING / estimated_time)
+        increment_per_poll = self._progress_share_per_poll(estimated_time)
 
         current_progress = (self.progress_bar.n if self.progress_bar
                             else self._progress_seen)
@@ -383,20 +389,16 @@ class InstagramUploadPipeline(BaseUploadPipeline):
         while True:
             elapsed = time.time() - start
 
-            # Fetch the API status only when the next tier is due.
+            # Fetch the API status only when the next check is due.
             if elapsed >= next_poll_at:
                 resp = self._retry_request(requests.get, url, timeout=10)
                 media_status = resp.json()
                 status = media_status.get('status_code')
-                poll_count += 1
-                if poll_count == 1:
-                    next_poll_at = self.API_SECOND_POLL_DELAY
-                else:
-                    next_poll_at = elapsed + self.API_POLL_INTERVAL
+                next_poll_at = elapsed + self.API_POLL_INTERVAL
 
             # Progressive updates based on video size and elapsed time
             target_progress = current_progress + min(
-                elapsed * progress_per_second,
+                elapsed * (increment_per_poll / self.API_POLL_INTERVAL),
                 self.MAX_PROGRESS_DURING_PROCESSING)
 
             # Update the timer description

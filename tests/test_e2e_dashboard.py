@@ -87,9 +87,15 @@ class DashboardBrowserTests(unittest.TestCase):
                         page.get_by_role("button", name="New").click()
                         page.get_by_label("wizard.mp4").check()
                         page.get_by_role("button", name="Next: Configure").click()
-                        # Step 2: the spec-driven detail form. Editing a field
+                        # Step 2: the spec-driven single config pane (issue
+                        # #259 D10). Sections start collapsed (D9); expand the
+                        # Upload section to reach Title. Editing a field
                         # triggers debounced live validation.
-                        job_form = page.locator(".detail .job-config")
+                        sections = page.locator(".detail .pane-sections")
+                        # D9: sections start collapsed; expand Upload > Content.
+                        sections.locator("summary", has_text="Upload").first.click()
+                        sections.locator("summary", has_text="Content").first.click()
+                        job_form = sections
                         with page.expect_response(
                                 lambda response: response.url.endswith(
                                     "/api/v1/jobs/validate")
@@ -109,7 +115,7 @@ class DashboardBrowserTests(unittest.TestCase):
         finally:
             wizard_source.unlink(missing_ok=True)
 
-    def test_review_ui_edits_transcript_composition_and_upload_draft(self):
+    def test_review_ui_edits_transcript_and_upload_draft(self):
         service = self.app.state.job_service
         manifest = service.create_job("clip.mp4", {})
         session = create_edit_session(
@@ -126,7 +132,10 @@ class DashboardBrowserTests(unittest.TestCase):
                 page = browser.new_page(viewport=DESKTOP_VIEWPORT)
                 page.goto(f"http://127.0.0.1:{self.port}/")
                 page.wait_for_load_state("networkidle")
-                # Depth is one deliberate step: open the job card modal, then Review.
+                # Depth is one deliberate step: the fresh entry is the
+                # Completed sub-tab (issue #259 B20); the new job lives on the
+                # Queue board, so switch, then open the card modal, then Review.
+                page.get_by_role("tab", name="Queue").click()
                 page.locator(".card-main").first.click()
                 page.get_by_role("tab", name="Review").click()
                 page.get_by_label("Segment 1 start time").fill("0.25")
@@ -145,14 +154,22 @@ class DashboardBrowserTests(unittest.TestCase):
                 self.assertEqual(saved_session["segments"][0]["typography"]["size"], 32)
                 self.assertTrue(saved_session["segments"][0]["typography"]["italic"])
 
-                page.get_by_label("Job composition layout").fill(
-                    '{"captions":{"overlay":{"items":[]}}}')
-                with page.expect_response(
-                        lambda response: response.url.endswith(
-                            f"/api/v1/jobs/{manifest.job_id}/configuration")
-                        and response.request.method == "PATCH") as composition_response:
-                    page.get_by_role("button", name="Save job composition").click()
-                self.assertEqual(composition_response.value.status, 200)
+                # E22 (#259): there is no "Job layout JSON" raw composition
+                # editor on any review surface; the composition card renders
+                # labeled structured sections instead.
+                self.assertNotIn("Job layout JSON",
+                                 page.locator(".detail-modal").inner_text())
+                self.assertNotIn(
+                    "Save job composition",
+                    page.locator(".detail-modal").inner_text())
+                self.assertEqual(
+                    page.locator(".composition-block").count(), 0)
+
+                # The transcript gate's accept action stays the accent button
+                # (E16) and completes the review (E13: it closes the modal).
+                accept_class = page.get_by_text(
+                    "Accept transcript", exact=True).get_attribute("class")
+                self.assertTrue(accept_class and "btn btn-primary" in accept_class)
 
                 page.get_by_role("tab", name="Publish").click()
                 page.get_by_label("Upload description").fill("Upload description")

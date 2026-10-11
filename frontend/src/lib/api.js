@@ -59,6 +59,8 @@ export const api = {
 
   // Sources
   listSources: () => request('/sources'),
+  /** The Phase 1 poster-frame endpoint (issue #259 C5), cached on disk. */
+  thumbnailUrl: (name) => `${BASE}/sources/${encodeURIComponent(name)}/thumbnail`,
   uploadSource: (file) => {
     const form = new FormData();
     form.append('file', file);
@@ -77,15 +79,6 @@ export const api = {
   getJob: (id) => request(`/jobs/${id}`),
   validateJobs: (payload) => request('/jobs/validate', { method: 'POST', body: payload }),
   createJobs: (payload) => request('/jobs/bulk', { method: 'POST', body: payload }),
-  patchJobConfiguration: (id, patch, expectedConfigurationHash, reopen = false) =>
-    request(`/jobs/${id}/configuration`, {
-      method: 'PATCH',
-      body: {
-        patch,
-        expected_configuration_hash: expectedConfigurationHash,
-        reopen,
-      },
-    }),
   deleteJob: (id) =>
     request(`/jobs/${id}${query({ confirm: true })}`, { method: 'DELETE' }),
   cancelJob: (id) =>
@@ -143,6 +136,8 @@ export const api = {
     request(`/jobs/${id}/artifacts/prune`, { method: 'POST' }),
   previewUrl: (id, artifactId) => `${BASE}/jobs/${id}/artifacts/${artifactId}/preview`,
   downloadUrl: (id, artifactId) => `${BASE}/jobs/${id}/artifacts/${artifactId}/download`,
+  openFolder: (jobId, artifactId) =>
+    request(`/jobs/${jobId}/artifacts/${artifactId}/open-folder`, { method: 'POST' }),
 
   // Metrics
   getMetrics: (id, includeDimensions = false) =>

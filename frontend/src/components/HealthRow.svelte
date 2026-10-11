@@ -19,7 +19,9 @@
       <span class="dot {tone}"></span>
       <small>{probe}</small>
     {/if}
-    <button class="btn btn-ghost btn-sm" onclick={() => onProbe(platform)}>
+    <!-- U13: the probe sits in the same quiet bordered control family as the
+         app's other secondary actions, not as a naked text link. -->
+    <button class="btn btn-secondary btn-sm" onclick={() => onProbe(platform)}>
       {probe ? 'Re-probe' : 'Probe'}
     </button>
   </div>

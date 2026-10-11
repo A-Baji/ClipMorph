@@ -20,6 +20,13 @@ class BaseUploadPipeline(ABC):
     MAX_RETRIES = 3
     RETRIABLE_STATUS_CODES = [500, 502, 503, 504]
 
+    # Shared status-polling cadence: adapters check processing status once
+    # every this many seconds. Adapters override it only when their API
+    # dictates a different cadence (TikTok 3s, YouTube 2s); Instagram and
+    # Twitter run on this default. Progress pacing that depends on the
+    # cadence derives from this constant, so it moves with any change.
+    API_POLL_INTERVAL = 5  # seconds between status checks
+
     # Whether this platform can deterministically detect an existing post for
     # an artifact (see ``find_existing_post``). Adapters opt in by setting this
     # to True; the default False means detection is unsupported.

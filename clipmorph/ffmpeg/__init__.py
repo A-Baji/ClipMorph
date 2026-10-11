@@ -6,6 +6,7 @@ import platform
 import shutil
 import subprocess
 import tempfile
+from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -20,11 +21,24 @@ class FFmpegConfig:
     _instance = None
     _ffmpeg_path = None
     _ffprobe_path = None
+    # Guard for the first-use singleton below: it stays lazy (``--help``/`init`
+    # never need it) while keeping initialization atomic, so a second thread
+    # can never observe or keep the half-initialized instance whose
+    # ``ffmpeg_path``/``ffprobe_path`` are still ``None``. Under the torn
+    # __new__ that produced, ``FFmpegRunner.run_ffmpeg`` raised ``TypeError``
+    # against the missing path instead of an ``FFmpegError``.
+    _init_lock = Lock()
 
     def __new__(cls):
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialize_paths()
+            with cls._init_lock:
+                if cls._instance is None:
+                    instance = super().__new__(cls)
+                    instance._initialize_paths()
+                    # Publish only after initialization completed: the
+                    # unlocked first check must never see a reference whose
+                    # paths are still unset.
+                    cls._instance = instance
         return cls._instance
 
     def _initialize_paths(self):
