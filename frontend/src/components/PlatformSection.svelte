@@ -44,7 +44,15 @@
 
   function platformSections(platform) {
     const base = spec?.platforms?.sections || [];
-    const flat = spec?.platforms?.flat_fields?.[platform] || [];
+    // The spec's flat per-platform options carry full paths
+    // ("platforms.youtube.privacy_status"); ConfigForm re-prefixes them with
+    // ``platforms.<platform>.``, so strip the platform prefix here.
+    const flat = (spec?.platforms?.flat_fields?.[platform] || []).map(
+      (field) => ({
+        ...field,
+        path: field.path.replace(
+          new RegExp(`^platforms\\.${platform}\\.`), ''),
+      }));
     if (!flat.length) return base;
     return [
       ...base,

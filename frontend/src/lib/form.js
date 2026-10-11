@@ -19,6 +19,25 @@ export const FREE_TEXT_PATHS = new Set([
  * where the platform APIs agree.
  */
 export const STATIC_OPTION_LEAVES = {
+  // Transcription language: "auto" means faster-whisper auto-detects
+  // (clipmorph/conversion_pipeline/transcribe.py maps "auto" -> None); the
+  // list stays a bounded common-language set (D7: free text only for
+  // title/description/tags).
+  transcription_language: [
+    { value: 'auto', label: 'Auto' },
+    { value: 'en', label: 'English' },
+    { value: 'es', label: 'Spanish' },
+    { value: 'fr', label: 'French' },
+    { value: 'de', label: 'German' },
+    { value: 'it', label: 'Italian' },
+    { value: 'pt', label: 'Portuguese' },
+    { value: 'nl', label: 'Dutch' },
+    { value: 'ru', label: 'Russian' },
+    { value: 'hi', label: 'Hindi' },
+    { value: 'ja', label: 'Japanese' },
+    { value: 'ko', label: 'Korean' },
+    { value: 'zh', label: 'Chinese' },
+  ],
   // faster-whisper / WhisperX model sizes and runtime targets.
   transcription_model: ['tiny', 'base', 'small', 'medium', 'large-v3'].map((value) => ({
     value,

@@ -115,7 +115,7 @@ class DashboardBrowserTests(unittest.TestCase):
         finally:
             wizard_source.unlink(missing_ok=True)
 
-    def test_review_ui_edits_transcript_composition_and_upload_draft(self):
+    def test_review_ui_edits_transcript_and_upload_draft(self):
         service = self.app.state.job_service
         manifest = service.create_job("clip.mp4", {})
         session = create_edit_session(
@@ -154,14 +154,22 @@ class DashboardBrowserTests(unittest.TestCase):
                 self.assertEqual(saved_session["segments"][0]["typography"]["size"], 32)
                 self.assertTrue(saved_session["segments"][0]["typography"]["italic"])
 
-                page.get_by_label("Job composition layout").fill(
-                    '{"captions":{"overlay":{"items":[]}}}')
-                with page.expect_response(
-                        lambda response: response.url.endswith(
-                            f"/api/v1/jobs/{manifest.job_id}/configuration")
-                        and response.request.method == "PATCH") as composition_response:
-                    page.get_by_role("button", name="Save job composition").click()
-                self.assertEqual(composition_response.value.status, 200)
+                # E22 (#259): there is no "Job layout JSON" raw composition
+                # editor on any review surface; the composition card renders
+                # labeled structured sections instead.
+                self.assertNotIn("Job layout JSON",
+                                 page.locator(".detail-modal").inner_text())
+                self.assertNotIn(
+                    "Save job composition",
+                    page.locator(".detail-modal").inner_text())
+                self.assertEqual(
+                    page.locator(".composition-block").count(), 0)
+
+                # The transcript gate's accept action stays the accent button
+                # (E16) and completes the review (E13: it closes the modal).
+                accept_class = page.get_by_text(
+                    "Accept transcript", exact=True).get_attribute("class")
+                self.assertTrue(accept_class and "btn btn-primary" in accept_class)
 
                 page.get_by_role("tab", name="Publish").click()
                 page.get_by_label("Upload description").fill("Upload description")

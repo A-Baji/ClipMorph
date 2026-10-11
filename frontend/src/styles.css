@@ -456,6 +456,38 @@ a {
   flex-wrap: wrap;
 }
 
+/* --- Modal action bars (issue #259 E11) -----------------------------------
+   One standard gap between every action, and a visible separation between
+   groups (secondary | primary, or actions | risky) so no elements touch. */
+.action-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.action-bar > .action-group + .action-group {
+  padding-left: var(--space-3);
+  border-left: 1px solid var(--color-border);
+}
+
+.action-bar .action-lead {
+  margin-right: auto;
+}
+
+.action-group {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+/* --- D24: mapped per-field inline errors ---------------------------------- */
+
+.field-error {
+  color: var(--color-danger);
+  font-size: var(--text-2xs);
+}
+
 .spacer {
   flex: 1;
 }
@@ -1020,6 +1052,46 @@ details.advanced .advanced-body {
   display: grid;
   gap: var(--space-3);
   padding-top: var(--space-3);
+}
+
+/* --- E17/E22: conversion review player + labeled composition rows --------- */
+
+.review-player {
+  display: block;
+  width: 100%;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.composition-block {
+  display: grid;
+  gap: var(--space-1);
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border);
+}
+
+.composition-title {
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted);
+  margin-bottom: var(--space-1);
+}
+
+.composition-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  font-size: var(--text-sm);
+  padding: var(--space-1) 0;
+}
+
+.composition-row > .truncate {
+  flex: 1;
+  min-width: 0;
 }
 
 /* --- Suggestions --------------------------------------------------------- */

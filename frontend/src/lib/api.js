@@ -79,15 +79,6 @@ export const api = {
   getJob: (id) => request(`/jobs/${id}`),
   validateJobs: (payload) => request('/jobs/validate', { method: 'POST', body: payload }),
   createJobs: (payload) => request('/jobs/bulk', { method: 'POST', body: payload }),
-  patchJobConfiguration: (id, patch, expectedConfigurationHash, reopen = false) =>
-    request(`/jobs/${id}/configuration`, {
-      method: 'PATCH',
-      body: {
-        patch,
-        expected_configuration_hash: expectedConfigurationHash,
-        reopen,
-      },
-    }),
   deleteJob: (id) =>
     request(`/jobs/${id}${query({ confirm: true })}`, { method: 'DELETE' }),
   cancelJob: (id) =>

@@ -57,6 +57,7 @@ class ControlMappingTests(unittest.TestCase):
         module = source(FORM_JS)
         # Spec-declared enums plus the D7 enumerated strings.
         for leaf in (
+            "transcription_language",
             "transcription_model",
             "transcription_device",
             "transcription_compute_type",
@@ -69,6 +70,20 @@ class ControlMappingTests(unittest.TestCase):
         # The layout-preset dropdown is resolved from /api/v1/layouts data.
         self.assertIn("'conversion.layout_id'", module)
         self.assertIn("layouts", module)
+
+    def test_transcription_language_is_a_bounded_select(self):
+        """D7 leftover: the transcription language never renders as free text.
+
+        It renders as "Auto" plus a bounded common-language list whose "auto"
+        value maps to faster-whisper auto-detection.
+        """
+        module = source(FORM_JS)
+        self.assertIn("transcription_language: [", module)
+        self.assertIn("{ value: 'auto', label: 'Auto' }", module)
+        # A bounded list, not an arbitrary free-text input.
+        options = re.search(
+            r"transcription_language: \[(.*?)\]", module, re.DOTALL).group(1)
+        self.assertGreaterEqual(options.count("{ value:"), 5)
 
     def test_datetime_fields_render_as_datetime_inputs(self):
         self.assertIn("kind: 'datetime'", source(FORM_JS))
@@ -176,6 +191,113 @@ class CardCompositionTests(unittest.TestCase):
 
     def test_calendarX_icon_exists_for_the_cancel_attempt_action(self):
         self.assertIn("calendarX", source(ICON))
+
+
+class Phase2CViewTests(unittest.TestCase):
+    """Phase 2C (#259): modal behaviors E11/E13/E14/E16/E17/E22, U18, D24.
+
+    These source guards pin the built-in behaviors next to the runtime
+    verification in ``tests/e2e/verify_phase2c.py`` and the E14 store-level
+    mocked-poll harness ``tests/e2e/e14-store-poll.mjs``.
+    """
+
+    DETAIL = FRONTEND_SRC / "views" / "JobDetailView.svelte"
+    MODAL = FRONTEND_SRC / "components" / "JobDetailModal.svelte"
+    STORE = FRONTEND_SRC / "lib" / "store.svelte.js"
+
+    def test_accept_actions_share_one_accent_class(self):
+        """E16: every gate-accept primary action uses the accent button."""
+        detail = source(self.DETAIL)
+        for label in ("Accept transcript", "Accept composition"):
+            match = re.search(
+                r'<button\s+class="([^"]+)"(?:(?!</button>)[\s\S])*?>\s*'
+                + label + "</button>", detail)
+            self.assertIsNotNone(match, label)
+            self.assertEqual(match.group(1), "btn btn-primary")
+        # No secondary/riskiced accept primary exists.
+        self.assertIsNone(
+            re.search(r'btn btn-secondary"[^>]*>\s*Accept [a-z]+</button>', detail))
+
+    def test_review_tab_renders_only_the_current_gate(self):
+        """E17: one gate panel lives on the Review tab at a time."""
+        detail = source(self.DETAIL)
+        self.assertIn("{#if reviewGate === 'transcript'}", detail)
+        self.assertIn("{:else if reviewGate === 'conversion'}", detail)
+        transcript_branch = detail.index("{:else if reviewGate === 'conversion'}")
+        self.assertIn("SegmentEditor", detail[:transcript_branch])
+        # No composition review affordances inside the transcript branch.
+        self.assertNotIn("Accept composition", detail[:transcript_branch])
+
+    def test_conversion_review_mounts_media_player(self):
+        """E17: the composition review plays the artifact preview URL."""
+        detail = source(self.DETAIL)
+        player = detail[detail.index('<video'):detail.index('</video>')]
+        self.assertIn('controls', player)
+        self.assertIn('api.previewUrl', player)
+        self.assertIn('reviewArtifact', player)
+
+    def test_no_raw_json_on_any_review_surface(self):
+        """E22: composition data renders as labeled sections, never JSON."""
+        detail = source(self.DETAIL)
+        self.assertNotIn('Job layout JSON', detail)
+        self.assertNotIn('JSON.stringify', detail)
+        self.assertIn('labeledRows', detail)
+        self.assertIn('compositionSections', detail)
+        # Nothing stringifies a layout object into a textarea anymore.
+        for removed in ("compositionJson", "saveComposition"):
+            self.assertNotIn(removed, detail)
+
+    def test_accept_completing_review_closes_the_modal(self):
+        """E13: acceptCheckpoint closes the job modal after success."""
+        store = source(self.STORE)
+        self.assertIn("gateResolved", store)
+        self.assertIn(
+            "if (gateResolved && app.selectedJobId === job.job_id) closeJob();",
+            store)
+
+    def test_accepted_passthrough_is_never_rendered(self):
+        """E14: the store suppresses queued passthrough; the board counts the
+        "queued N" sub-badge from the same shared status list."""
+        store = source(self.STORE)
+        self.assertIn("export const PRERUN_STATUSES", store)
+        self.assertIn("resumeGuards", store)
+        self.assertIn("startResumePoll", store)
+        jobs = source(JOBS_VIEW)
+        self.assertIn("PRERUN_STATUSES,", jobs)
+        self.assertNotIn("const QUEUED_PRE_RUN = [", jobs)
+
+    def test_modal_traps_focus_and_locks_scroll(self):
+        """U18: background scroll lock + in-dialog focus cycling."""
+        modal = source(self.MODAL)
+        self.assertIn("document.body.style.overflow = 'hidden'", modal)
+        self.assertIn("trapFocus", modal)
+        self.assertIn("shiftKey", modal)
+        # The window keydown wires the trap; Escape still closes.
+        self.assertIn("on:keydown={onKeydown}", modal)
+        self.assertIn("closeJob();", modal)
+
+    def test_partial_create_removes_created_clips(self):
+        """D24: created clips leave the wizard; the remainder reselects."""
+        store = source(self.STORE)
+        self.assertIn("createdNames", store)
+        self.assertIn("app.wizard.selected.filter", store)
+        self.assertIn("wizardMaybeRelocate", store)
+        self.assertIn("app.jobsTab = 'queue'; // D24: the last clip's create lands on Queue", store)
+        config_form = source(CONFIG_FORM)
+        self.assertIn("wizardFieldError", config_form)
+        self.assertIn("field-error", config_form)
+
+    def test_modal_action_bars_use_the_shared_gap(self):
+        """E11: action bars share one gap with group separation."""
+        detail = source(self.DETAIL)
+        self.assertIn('class="action-bar', detail)
+        self.assertGreaterEqual(detail.count('class="action-group"'), 4)
+        styles = (FRONTEND_SRC / "styles.css").read_text(encoding="utf-8")
+        self.assertIn(".action-bar {", styles)
+        gap_block = styles[styles.index(".action-bar {"):styles.index(".action-group {")]
+        self.assertIn("gap: var(--space-3)", gap_block)
+        #_group separation is wired from the bar itself.
+        self.assertIn(".action-bar > .action-group + .action-group", styles)
 
 
 if __name__ == "__main__":

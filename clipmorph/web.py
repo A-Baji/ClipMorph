@@ -24,11 +24,11 @@ from clipmorph.service import JobService
 from clipmorph.service import UnknownUploadAttempt
 
 try:
-    from fastapi import FastAPI, File, HTTPException, UploadFile
+    from fastapi import FastAPI, File, HTTPException, Response, UploadFile
     from fastapi.exceptions import RequestValidationError
     from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 except ImportError:
-    FastAPI = File = HTTPException = UploadFile = None  # type: ignore[assignment, misc]
+    FastAPI = File = HTTPException = Response = UploadFile = None  # type: ignore[assignment, misc]
     RequestValidationError = None  # type: ignore[assignment, misc]
     FileResponse = JSONResponse = StreamingResponse = None  # type: ignore[assignment, misc]
 
@@ -455,18 +455,38 @@ def create_app(data_dir: str | Path | None = None,
             service_failure(error)
 
     @app.post("/api/v1/jobs/{job_id}/checkpoints/{stage}/accept")
-    def accept_checkpoint(job_id: str, stage: str, payload: dict):
+    def accept_checkpoint(job_id: str, stage: str, payload: dict,
+                          response: Response):
         revision = payload.get("expected_revision")
         if not isinstance(revision, int):
             fail(422, "revision_required", "expected_revision is required")
         group_id = payload.get("group")
         try:
-            return asdict(service.accept_checkpoint(
-                job_id, stage, revision, group_id=group_id))
+            manifest = service.accept_checkpoint(
+                job_id, stage, revision, group_id=group_id)
         except FileNotFoundError:
             fail(404, "not_found", "job not found")
         except ValueError as error:
             service_failure(error)
+        # Issue #259 E14: acceptance resumes the pipeline immediately. An
+        # accepted gate that leaves the manifest in a pre-run ("queued")
+        # state goes straight to execution instead of stranding the job in
+        # the "queued" passthrough; the dashboard must never observe an
+        # accepted -> queued -> running transition. Gates that land on a
+        # review/report state (the upload draft after conversion, remaining
+        # conversion groups) return without resuming.
+        resumed = False
+        if manifest.status == "queued":
+            from clipmorph.workflow import execute_job
+            service.resume_job(job_id, lambda job, token: execute_job(
+                job, token, service.jobs_dir, service.app_config_path))
+            resumed = True
+        if resumed and response is not None:
+            response.status_code = 202
+        body = asdict(manifest)
+        body["resumed"] = resumed
+        body["status_url"] = f"/api/v1/jobs/{job_id}"
+        return body
 
     def upload_draft_response(job_id: str, manifest: JobManifest) -> dict:
         """The one upload-draft body every draft route returns.

@@ -21,6 +21,13 @@ const FALLBACK_PLATFORMS = ['youtube', 'instagram', 'tiktok', 'twitter', 'facebo
 
 const DRAFT_KEY = 'clipmorph.wizard.draft.v1';
 
+/**
+ * Pre-run statuses a job can pass through between "created" and its first
+ * running checkpoint (B12 renders them inside the Running column's "queued
+ * N" sub-badge; E14 makes the passthrough unobservable after a gate accept).
+ */
+export const PRERUN_STATUSES = ['queued', 'created', 'pending'];
+
 function emptyDraft() {
   return { title: '', description: '', tags: '', publishAt: '' };
 }
@@ -86,6 +93,83 @@ export const app = $state({
 let noticeTimer = null;
 let progressStream = null;
 let validationTimer = null;
+
+/* --- E14 resume guard ------------------------------------------------------
+   After a gate accept that resumes the pipeline, the manifest may still pass
+   through a queued/created state on its way to running (server-side
+   accepted -> queued -> running). That passthrough is never observable:
+   accepted jobs are guarded, and every fetched job list or poll iteration
+   renders a guarded job as Running until the backend reports a real
+   (non-pre-run) status. The Running column's "queued N" sub-badge counts
+   PRERUN_STATUSES over these *displayed* statuses, so a guarded job is
+   never counted. */
+const resumeGuards = new Set();
+
+const RESUME_POLL_MS = 700;
+const RESUME_POLL_MAX_ATTEMPTS = 10;
+
+const resumePollTimers = new Map();
+
+function stopResumePoll(jobId) {
+  const timer = resumePollTimers.get(jobId);
+  if (timer) clearTimeout(timer);
+  resumePollTimers.delete(jobId);
+}
+
+/** The board-rendered status of a job, with the E14 passthrough suppressed. */
+function displayStatus(job) {
+  const observed = job?.status;
+  if (resumeGuards.has(job?.job_id) && PRERUN_STATUSES.includes(observed)) {
+    return 'running';
+  }
+  return observed;
+}
+
+/** Clear a guard the moment its job reports a real (non-pre-run) status. */
+function settleResumeGuard(job) {
+  if (resumeGuards.has(job.job_id) && !PRERUN_STATUSES.includes(job.status)) {
+    resumeGuards.delete(job.job_id);
+    stopResumePoll(job.job_id);
+  }
+}
+
+/** Apply one fetched job into the board with the guard applied. */
+function acceptFetchedJob(job) {
+  settleResumeGuard(job);
+  const normalized = { ...job, status: displayStatus(job) };
+  const index = app.jobs.findIndex((item) => item.job_id === job.job_id);
+  if (index < 0) {
+    app.jobs = [...app.jobs, normalized];
+  } else {
+    app.jobs[index] = normalized;
+  }
+}
+
+/**
+ * Short-lived post-acceptance poll: keeps the board live until the resumed
+ * run's real status lands (running / gate / terminal), never longer than
+ * RESUME_POLL_MAX_ATTEMPTS so a wedged backend cannot wedge the board.
+ */
+function startResumePoll(jobId) {
+  stopResumePoll(jobId);
+  let attempts = 0;
+  const tick = () => {
+    attempts += 1;
+    api.getJob(jobId).then((job) => {
+      acceptFetchedJob(job);
+    }).catch(() => {
+      /* transient server errors: keep polling within the bounded window */
+    }).finally(() => {
+      if (resumeGuards.has(jobId) && attempts < RESUME_POLL_MAX_ATTEMPTS) {
+        resumePollTimers.set(jobId, setTimeout(tick, RESUME_POLL_MS));
+      } else {
+        resumeGuards.delete(jobId);
+        stopResumePoll(jobId);
+      }
+    });
+  };
+  tick();
+}
 
 export function notify(message) {
   app.notice = message;
@@ -186,7 +270,11 @@ export async function loadWorkspace() {
       api.getConfiguration(),
       api.getFormSpec().catch(() => null),
     ]);
-    app.jobs = jobs;
+    app.jobs = jobs.map((item) => {
+      // E14: guard a fetched pre-run status for accepted-and-resuming jobs.
+      settleResumeGuard(item);
+      return { ...item, status: displayStatus(item) };
+    });
     app.sources = sources;
     app.layouts = layouts;
     app.configuration = settings.configuration || { ...FALLBACK_CONFIGURATION };
@@ -214,6 +302,7 @@ export async function loadJobDetails() {
     api.getUploadDraft(jobId),
   ]);
   app.jobs = app.jobs.map((item) => (item.job_id === jobId ? job : item));
+  acceptFetchedJob(job); // E14 render the fetched detail under the guard
   if (job.status === 'completed') clearUploadProgress(jobId); // B19 render-out
   app.artifacts = artifacts;
   app.attempts = attempts;
@@ -328,7 +417,10 @@ export function discardWizard() {
   clearWizardDraft();
   app.wizard.active = false;
   app.view = 'jobs';
-  app.jobsTab = 'completed'; // B20: a discard returns to the Completed sub-tab
+  // B20/D24 landing: a discard returns to the Completed sub-tab when the
+  // draft still had clips to configure; discarding with nothing left to
+  // configure lands on the Queue board instead.
+  app.jobsTab = wizardSelected().length ? 'completed' : 'queue';
 }
 
 /** Leave the wizard for the Jobs board while preserving the in-progress draft. */
@@ -562,6 +654,32 @@ export function wizardJobError(source) {
   return app.wizard.validation?.perSource?.[source] || '';
 }
 
+const CONFIG_PATH_RE = /[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+/g;
+
+/**
+ * D24: per-field inline errors where the dry-run message names a config
+ * path. Backend messages embed the offending dotted path (e.g.
+ * ``platforms.youtube.upload.privacy_status must be ...``), so an exact
+ * token match against the form field's full path maps the error to its
+ * field; anything that maps to nothing stays a per-job summary (the config
+ * pane banner). Pass ``perSourceOnly`` from a per-job pane so one job's
+ * mapped error never headlines another job's identical field.
+ */
+export function wizardFieldError(source, path, perSourceOnly = false) {
+  const patterns = [];
+  const perSource = app.wizard.validation?.perSource || {};
+  if (perSource[source]) patterns.push(perSource[source]);
+  if (!perSourceOnly) {
+    for (const message of Object.values(perSource)) {
+      if (message) patterns.push(message);
+    }
+  }
+  if (!path) return '';
+  return patterns.find(
+    (message) => (String(message).match(CONFIG_PATH_RE) || []).includes(path),
+  ) || '';
+}
+
 export async function createFromWizard() {
   app.busy = true;
   clearErrors();
@@ -591,34 +709,81 @@ export async function createFromWizard() {
         .filter((extra) => validSources.has(extra.name))
         .map((extra) => extra.path),
       job_configs: payload.job_configs.filter(
-        (config) => validSources.has(config.general?.source),
-      ),
+        (config) => validSources.has(config.general?.source)),
       overrides: {},
     };
     if (!filtered.job_configs.length && !filtered.sources.length) {
+      // D24: only invalid jobs remain — nothing is submitted, they stay on
+      // the config step with their errors.
       app.busy = false;
       return;
     }
     const result = await api.createJobs(filtered);
-    if (result.failed?.length) {
-      app.errors = result.failed.map((item) => `${item.source || 'record'}: ${item.message}`);
+    if (!result.created?.length) {
+      // D24: nothing valid survived creation; the invalid jobs keep their
+      // errors and the draft stays untouched for correction.
+      if (result.failed?.length) {
+        app.errors = result.failed.map((item) => `${item.source || 'record'}: ${item.message}`);
+      }
       app.busy = false;
       return;
     }
-    clearWizardDraft();
-    app.wizard = emptyWizard();
-    app.view = 'jobs';
-    app.jobsTab = 'queue'; // B20: a successful create lands on the Queue board
-    await loadWorkspace();
-    notify(
-      `${result.summary?.created ?? result.created.length} created · ` +
-        `${result.summary?.skipped ?? 0} skipped`,
+    // D24 partial create: each created clip leaves the wizard immediately, so
+    // a second Create click can never recreate it. A server-side failure
+    // leaves that clip in the draft with its error.
+    const createdNames = new Set(
+      (result.created || []).map((item) => item.source).filter(Boolean),
     );
+    const failedByName = new Map(
+      (result.failed || [])
+        .filter((item) => item.source)
+        .map((item) => [item.source, item.message]),
+    );
+    for (const name of createdNames) {
+      app.wizard.selected = app.wizard.selected.filter((item) => item !== name);
+      app.wizard.extras = app.wizard.extras.filter((extra) => extra.name !== name);
+      delete app.wizard.jobs[name];
+    }
+    for (const [source, message] of failedByName) {
+      app.wizard.validation.perSource = {
+        ...app.wizard.validation.perSource,
+        [source]: message,
+      };
+    }
+    syncWizardJobs();
+    wizardMaybeRelocate(); // D24 reselection rule + last-clip landing
+    notify(`${createdNames.size} created`);
+    if (app.wizard.active) await validateWizard(); // revalidate the remainder
   } catch (error) {
     report(error);
   } finally {
     app.busy = false;
   }
+}
+
+/**
+ * D24 rail-rebuild semantics: after creations the selected entry stays
+ * selected if it still exists, otherwise it falls back to Batch (which
+ * persists across dedents per D10), then to the first remaining clip. When
+ * the rail's last clip is gone the wizard closes onto the Queue sub-tab.
+ */
+function wizardMaybeRelocate() {
+  if (!app.wizard.active) return;
+  // D24 landing keys off remaining CLIPS: the Batch entry persists per D10
+  // even after the selection drops to one clip, so a rail with only Batch
+  // still means "the rail's last clip is created" → Queue.
+  if (!wizardSelected().length) {
+    clearWizardDraft();
+    app.wizard = emptyWizard();
+    app.view = 'jobs';
+    app.jobsTab = 'queue'; // D24: the last clip's create lands on Queue
+    loadWorkspace();
+    return;
+  }
+  if (wizardActiveInRail()) return;
+  app.wizard.activeJob = app.wizard.batchEntry
+    ? 'batch'
+    : wizardSelected()[0] || '';
 }
 
 /* --- Wizard: draft persistence ------------------------------------------- */
@@ -750,13 +915,32 @@ export async function retryCheckpoint(stage) {
 
 export async function acceptCheckpoint(stage, group) {
   const job = selectedJob();
-  if (!job) return;
+  if (!job) return false;
   try {
-    await api.acceptCheckpoint(job.job_id, stage, job.checkpoints[stage].revision, group);
-    await refreshJob(job.job_id);
+    const result = await api.acceptCheckpoint(
+      job.job_id, stage, job.checkpoints[stage].revision, group);
+    if (result.resumed) {
+      // E14: the pipeline resumes immediately; keep the passthrough
+      // unobservable and follow the resumed run until a real status lands.
+      resumeGuards.add(job.job_id);
+      const index = app.jobs.findIndex((item) => item.job_id === job.job_id);
+      if (index >= 0) app.jobs[index] = { ...app.jobs[index], status: 'running' };
+      startResumePoll(job.job_id);
+    } else {
+      resumeGuards.delete(job.job_id);
+      stopResumePoll(job.job_id);
+      await refreshJob(job.job_id);
+    }
     notify(`${stage} review accepted`);
+    // E13: an accept that completes the modal's visible review closes it.
+    const gateResolved =
+      result.resumed === true ||
+      result.checkpoints?.[stage]?.status !== 'awaiting_review';
+    if (gateResolved && app.selectedJobId === job.job_id) closeJob();
+    return gateResolved;
   } catch (error) {
     report(error);
+    return false;
   }
 }
 
@@ -797,44 +981,6 @@ export async function saveTranscript() {
   } catch (error) {
     report(error);
   }
-}
-
-export async function saveComposition(composition) {
-  const job = selectedJob();
-  if (!job) return false;
-  let layout;
-  try {
-    layout = JSON.parse(composition);
-  } catch (error) {
-    app.errors = [`Invalid layout JSON: ${error.message}`];
-    return false;
-  }
-  const apply = async () => {
-    try {
-      await api.patchJobConfiguration(
-        job.job_id,
-        { conversion: { layout } },
-        job.current_configuration_hash,
-        job.status === 'completed',
-      );
-      await refreshJob(job.job_id);
-      notify('Job composition saved · render to apply');
-      return true;
-    } catch (error) {
-      report(error);
-      return false;
-    }
-  };
-  if (job.status === 'completed') {
-    requestConfirm({
-      title: 'Reopen this completed job?',
-      message: 'Saving reopens the job and marks its current render stale.',
-      confirmLabel: 'Reopen & save',
-      onConfirm: apply,
-    });
-    return false;
-  }
-  return apply();
 }
 
 /* --- Upload draft / suggestions / attempts ------------------------------ */

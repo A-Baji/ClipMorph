@@ -923,14 +923,115 @@ class WebApiTests(unittest.TestCase):
             checkpoint = manifest.checkpoints["transcript"]
             checkpoint = manifest.transition_checkpoint(
                 "transcript", "running", checkpoint["revision"], service.jobs_dir)
-            manifest.transition_checkpoint(
+            updated = manifest.transition_checkpoint(
                 "transcript", "awaiting_review", checkpoint["revision"], service.jobs_dir)
             service.close()
 
             with TestClient(create_app(data_dir)) as client:
                 path = f"/api/v1/jobs/{manifest.job_id}/checkpoints/transcript/accept"
-                accepted = client.post(path, json={"expected_revision": 2})
-                self.assertEqual(accepted.status_code, 200)
+                # The current revision is whatever the last transition left.
+                stale = client.post(path, json={"expected_revision": 1})
+                self.assertEqual(stale.status_code, 409, stale.text)
+                with patch("clipmorph.workflow.execute_job") as execute_job:
+                    accepted = client.post(
+                        path, json={"expected_revision": updated["revision"]})
+                    self.assertEqual(
+                        accepted.status_code, 202, accepted.text)
+                    self.assertTrue(accepted.json()["resumed"])
+                    service = client.app.state.job_service
+                    service._futures[manifest.job_id].result(timeout=5)
+                    execute_job.assert_called_once()
+
+    def test_accept_checkpoint_resumes_pending_work_immediately(self):
+        """E14 (#259): an accepted gate lands the job in a running run.
+
+        The accept endpoint resumes the pre-run manifest itself: the response
+        carries ``resumed: true`` (202) and, while the resumed run is on the
+        conversion checkpoint, ``GET /jobs/{id}`` reports ``running`` — no
+        accepted -> queued -> running passthrough is observable via the API.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"source")
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {})
+            checkpoint = manifest.checkpoints["transcript"]
+            checkpoint = manifest.transition_checkpoint(
+                "transcript", "running", checkpoint["revision"], service.jobs_dir)
+            updated = manifest.transition_checkpoint(
+                "transcript", "awaiting_review", checkpoint["revision"], service.jobs_dir)
+            service.close()
+
+            def runner(job, token, jobs_dir=None, config_path=None):
+                # Mimic a pipeline that is mid-conversion after the resume
+                # (the route wraps it in the execute_job(job, token, jobs_dir,
+                # config_path) call shape).
+                job.transition_checkpoint(
+                    "conversion", "running",
+                    job.checkpoints["conversion"]["revision"],
+                    service.jobs_dir)
+
+            with TestClient(create_app(data_dir)) as client:
+                with patch("clipmorph.workflow.execute_job", new=runner):
+                    accepted = client.post(
+                        f"/api/v1/jobs/{manifest.job_id}"
+                        "/checkpoints/transcript/accept",
+                        json={"expected_revision": updated["revision"]})
+                    self.assertEqual(accepted.status_code, 202, accepted.text)
+                    self.assertTrue(accepted.json()["resumed"])
+                    service = client.app.state.job_service
+                    service._futures[manifest.job_id].result(timeout=5)
+                after = client.get(f"/api/v1/jobs/{manifest.job_id}").json()
+                self.assertEqual(after["status"], "running")
+                self.assertEqual(
+                    after["checkpoints"]["conversion"]["status"], "running")
+
+    def test_conversion_gate_accept_opens_upload_review_without_running(self):
+        """Accepting the composition gate leaves upload review, not a run.
+
+        All groups await review; the accept resolves them into the upload
+        draft gate: the response is ``200`` with ``resumed: false`` and no
+        run is submitted — the Review modal hands off to the Publish draft.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"source")
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {
+                "conversion": {"skip": False, "subtitles": {"skip": True}},
+                # A different effective conversion section per platform so
+                # the job renders two distinct groups.
+                "platforms": {"youtube": {"conversion": {"strict": True}}}})
+            for group_id in manifest.checkpoints["conversion"]["groups"]:
+                for status in ("running", "awaiting_review"):
+                    manifest = service.get_job(manifest.job_id)
+                    revision = manifest.checkpoints["conversion"]["groups"][
+                        group_id]["revision"]
+                    manifest.transition_checkpoint(
+                        "conversion", status, revision, service.jobs_dir,
+                        group_id=group_id)
+            service.close()
+
+            with TestClient(create_app(data_dir)) as client:
+                conversion = client.get(
+                    f"/api/v1/jobs/{manifest.job_id}").json()[
+                    "checkpoints"]["conversion"]
+                with patch("clipmorph.workflow.execute_job") as execute_job:
+                    path = (f"/api/v1/jobs/{manifest.job_id}"
+                            "/checkpoints/conversion/accept")
+                    accepted = client.post(
+                        path, json={"expected_revision": conversion["revision"]})
+                    self.assertEqual(accepted.status_code, 200, accepted.text)
+                    self.assertFalse(accepted.json()["resumed"])
+                    execute_job.assert_not_called()
+                after = client.get(f"/api/v1/jobs/{manifest.job_id}").json()
+                self.assertEqual(after["status"], "awaiting_review")
+                self.assertEqual(
+                    after["checkpoints"]["upload"]["status"], "awaiting_review")
 
     def test_upload_draft_put_accepts_platforms_key(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -14,6 +14,7 @@
     jobValue,
     setBatchField,
     setJobField,
+    wizardFieldError,
   } from '../lib/store.svelte.js';
 
   /**
@@ -29,7 +30,8 @@
    * fields (the inline layout) never render — inline layout overrides live
    * in the Layouts editor. Sections render as collapsible ``<details>``
    * (D9/U10): batch sections may start expanded, per-job sections start
-   * collapsed.
+   * collapsed. Dry-run validation errors that name a field's config path
+   * also render inline under that field (D24).
    */
   let {
     sections = [],
@@ -41,6 +43,11 @@
   } = $props();
 
   const layouts = $derived(app.layouts || []);
+
+  /** D24: the inline error for one field, mapped from its config path. */
+  function fieldError(path) {
+    return wizardFieldError(source, path, mode === 'job');
+  }
 
   function fullPath(field) {
     return prefix ? `${prefix}${field.path}` : field.path;
@@ -120,7 +127,7 @@
                Object fields (the inline layout) are D7-removed: inline layout
                overrides belong to the Layouts editor. -->
         {:else if control.kind === 'checkbox'}
-          <div class="config-field" class:overridden>
+          <div class="config-field" class:overridden class:invalid={fieldError(path)}>
             <div class="config-label">
               <label class="check" for={fid}>
                 <input
@@ -156,9 +163,12 @@
               </span>
             </div>
             {#if field.hint}<small class="field-hint">{field.hint}</small>{/if}
+            {#if fieldError(path)}
+              <small class="field-error" role="alert">{fieldError(path)}</small>
+            {/if}
           </div>
         {:else}
-          <div class="config-field" class:overridden>
+          <div class="config-field" class:overridden class:invalid={fieldError(path)}>
             <label class="config-label" for={fid}>
               <span>{field.label}</span>
               <span class="badges">
@@ -235,6 +245,9 @@
               {/if}
             </div>
             {#if field.hint}<small class="field-hint">{field.hint}</small>{/if}
+            {#if fieldError(path)}
+              <small class="field-error" role="alert">{fieldError(path)}</small>
+            {/if}
           </div>
         {/if}
       {/each}
@@ -309,6 +322,11 @@
   .config-field.overridden {
     border-color: var(--color-border);
     background: var(--color-surface-raised, var(--color-surface));
+  }
+
+  /* D24: a field that carries a mapped dry-run error marks itself. */
+  .config-field.invalid {
+    border-color: color-mix(in srgb, var(--color-danger) 45%, transparent);
   }
 
   .config-label,

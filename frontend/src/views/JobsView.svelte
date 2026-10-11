@@ -11,6 +11,7 @@
     loadWorkspace,
     openJob,
     openJobFolder,
+    PRERUN_STATUSES,
     requestConfirm,
     setJobsTab,
     startWizard,
@@ -26,12 +27,12 @@
    * The Jobs tab (issue #259 B20): two sub-tabs — Completed (the archive,
    * the default) and Queue (the kanban board). "New" lives above both
    * sub-tabs. The board (B2/12/3) always renders its four columns; completed
-   * jobs never appear on it and never render progress bars (B19).
+   * jobs never appear on it and never render progress bars (B19). The
+   * pre-run statuses are the store's shared list (E14) so the "queued N"
+   * sub-badge and the card chips see exactly what the board renders.
    */
-  const QUEUED_PRE_RUN = ['queued', 'created', 'pending'];
-
   const COLUMNS = [
-    { id: 'running', label: 'Running', statuses: ['running', ...QUEUED_PRE_RUN] },
+    { id: 'running', label: 'Running', statuses: ['running', ...PRERUN_STATUSES] },
     { id: 'awaiting_review', label: 'Awaiting review', statuses: ['awaiting_review'] },
     { id: 'scheduled', label: 'Scheduled', statuses: ['scheduled'] },
     { id: 'failed', label: 'Failed', statuses: ['failed', 'cancelled', 'partial_failure'] },
@@ -54,7 +55,7 @@
   }
 
   function columnQueuedCount(column) {
-    return columnJobs(column).filter((job) => QUEUED_PRE_RUN.includes(job.status)).length;
+    return columnJobs(column).filter((job) => PRERUN_STATUSES.includes(job.status)).length;
   }
 
   function jobTitle(job) {
@@ -75,7 +76,7 @@
   }
 
   function canResume(job) {
-    return ['failed', 'cancelled', 'partial_failure', ...QUEUED_PRE_RUN].includes(job.status);
+    return ['failed', 'cancelled', 'partial_failure', ...PRERUN_STATUSES].includes(job.status);
   }
 
   function canCancel(job) {
@@ -83,7 +84,7 @@
   }
 
   function resumeLabel(job) {
-    return QUEUED_PRE_RUN.includes(job.status) ? 'Run' : 'Resume';
+    return PRERUN_STATUSES.includes(job.status) ? 'Run' : 'Resume';
   }
 
   function confirmDelete(job) {
