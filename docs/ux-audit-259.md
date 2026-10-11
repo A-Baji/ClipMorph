@@ -352,6 +352,186 @@ sidebar badge should become "0" (U8 assumes yes, riding B20's rename).
 
 ---
 
-*Audit produced 2026-10-10 against `dev` at 29fe226 (branch state: clean).
-Committed evidence lives in [docs/ux-audit-259/evidence/](ux-audit-259/evidence/); the
-complete state×viewport run is the uncommitted 30-PNG set cited above.*
+# Phase 3 — Re-audit (after-state, committed)
+
+Phase 3 re-ran the Phase 0 sweep method against the same fixtures at the
+completed Phase 1–2 state (`dev` at `b90b634`, tree clean; no frontend or
+backend source was touched by the re-audit). Every Phase 0 "Fix here" finding
+gets a resolved/not-resolved verdict on its own before/after pair below.
+
+## Runs and re-pinned evidence
+
+```text
+python tests/e2e/verify_phase2c.py   # 32 passed, 0 failed (E11/E13/E14/E16/E17/E22/D24/U18/D10)
+node tests/e2e/e14-store-poll.mjs    # E14 mocked-poll store test OK (queued never renders)
+node tests/e2e/smoke.js              # fixtures -> board -> create flow OK
+python -m unittest discover -s tests # 710 tests OK (incl. C5 thumbnails, F18 polling,
+                                     #      F21/F23/D24 endpoints, E14 accept-resume, B19 state clear)
+npm --prefix frontend run check      # svelte-check: 0 errors, 0 warnings
+python -m compileall -q clipmorph    # OK
+```
+
+Screenshot runs: before `C:\Users\bidab\AppData\Local\Temp\ux259-before\` (30
+PNGs, at commit `29fe226`), after `C:\Users\bidab\AppData\Local\Temp\ux259-after\`
+(39 PNGs, at `b90b634`) — both regenerable with
+`python tests/e2e/capture.py --out <dir> --label <before|after>` and both full
+runs belong in CI artifacts, not the repo. Committed evidence below covers one
+pair per verdict.
+
+A Phase 3 DOM drive (three viewports, `states` + `empty` fixtures) re-verified
+the browser facts inline: 41/42 script checks passed (the one miss is below).
+Key numbers: page-level `scrollWidth > clientWidth` is **false at 1920/1366/
+1024**; `.board` scrolls internally below 1400 px (`overflow-x: auto`, scrollW
+1134/792 vs clientW, no scroll at 1920 where content width is 1688 px — U4's
+1116 px cap is gone); the empty board renders four columns with four "No jobs"
+rows; completed cards/artifact pages show **zero** `.progress` elements; card
+chips are humanized (0 raw enum keys); the F15 group picker renders `["All
+variants", "YouTube + Instagram + TikTok + Twitter / X + Facebook"]` with no
+12-hex options; 11/11 checkboxes sit inside their wrapping label with 7 enum
+selects and no "Inline layout" field; the selected job's pane opens with 0
+expanded sections and collapsed platform nodes; exactly one `.config-pane` is
+mounted with Batch active by default.
+
+## Acceptance-criteria walkthrough
+
+- Full-width four-column board inside the Queue sub-tab: yes — Running /
+  Awaiting review / Scheduled / Failed fill the content area at 1920, with the
+  container's internal horizontal scroll below 1400 px ([after-board-states-desktop](ux-audit-259/evidence/after-board-states-desktop.png), [after-board-states-laptop](ux-audit-259/evidence/after-board-states-laptop.png)).
+- Completed sub-tab as the default archive list with the empty prompt when
+  empty: yes — fresh workspaces land on Completed and show "Nothing completed
+  yet — start with **New**" ([after-jobs-completed-desktop](ux-audit-259/evidence/after-jobs-completed-desktop.png)); row fields (title, source, completed
+  time, Open folder + delete) in [after-jobs-completed-states-desktop](ux-audit-259/evidence/after-jobs-completed-states-desktop.png).
+- Thumbnails in the clip grid and cards: yes — the FFmpeg poster endpoint
+  (unit-tested generation, on-disk cache keyed by source identity, cache
+  headers) feeds the Thumbnail component; a real clip renders its poster frame
+  ([after-c5-board-card-thumbnail-desktop](ux-audit-259/evidence/after-c5-board-card-thumbnail-desktop.png)), and the synthetic 39-byte fixture clips show the
+  generic icon fallback only ([after-wizard-clips-desktop](ux-audit-259/evidence/after-wizard-clips-desktop.png)).
+- Card composition per C4: thumbnail left, title strong, status + checkpoint
+  badges, single-line muted filename, one bottom row of compact icon actions
+  with tooltips + accessible names ([after-board-states-desktop](ux-audit-259/evidence/after-board-states-desktop.png)).
+- Form rows with adjacent checkboxes and dropdowns where enums exist: yes —
+  checkboxes inside their wrapping label (11/11), 7 enum selects, no "Inline
+  layout" field, sections collapsible under summaries, all per-platform blocks
+  inside one collapsed Platform node ([after-wizard-configure-desktop](ux-audit-259/evidence/after-wizard-configure-desktop.png), [after-d8-platform-node-desktop](ux-audit-259/evidence/after-d8-platform-node-desktop.png)).
+- No raw JSON anywhere: review-surface text contains no `{` (verify_phase2c on
+  both gates); composition renders as labeled blocks; "Job layout JSON" and the
+  "· group <hex>" leaks are gone from the built UI.
+- Right-hand rail with Batch default (multi-clip start), sections collapsed:
+  yes — rail order Batch + clips, Batch active on entry, exactly one config
+  pane, and the selected job's sections all start collapsed.
+- Accept → Running with the modal closing and no queued passthrough: yes —
+  endpoint (`202`, resumed immediately, status `running`), store-level mocked
+  poll ("queued, queued, running" sequence never renders queued, badge cannot
+  count it), and Playwright route-mocked observation.
+- Uniform accept styling: both accept primaries carry `btn btn-primary`
+  (verify_phase2c class assertions); secondaries and danger actions stay
+  muted/danger.
+- Human group labels: verified (no 12-hex option or `· group <hex>` renders).
+- "Open folder": works on the Completed archive rows — see the F21 row below
+  for the artifact-row gap.
+- Partial-created clips removed with the defined reselection behavior:
+  verified (created clip leaves the rail, invalid stays, second Create never
+  duplicates, last-clip create lands on Queue, discard lands on Completed).
+- Completed cards free of progress bars: zero `.progress` elements archive- and
+  board-side; the per-attempt state clear is pinned by tests/test_service.py.
+- No page-level horizontal scrollbar at any tested viewport: measured false at
+  1920/1366/1024 board-side and with the modal open at 1024.
+- Phase 0 "Fix here" findings resolved on their own evidence pairs: all 12
+  (U16 on code evidence; see the fix-here table) — the only A–F gap is F21.
+
+## A–F verdict table (all 24 map items)
+
+| Item | Verdict | Basis |
+| --- | --- | --- |
+| A1 | PASS | DOM: body contains "Your Clip Queue", no "Your edit queue"; every empty state carries a prompt ([after-board-states-desktop](ux-audit-259/evidence/after-board-states-desktop.png), [after-metrics-desktop](ux-audit-259/evidence/after-metrics-desktop.png)) |
+| B2 | PASS | DOM (`empty` fixture): four columns with "No jobs"; the old full-board empty state is gone ([after-board-empty-desktop](ux-audit-259/evidence/after-board-empty-desktop.png)) |
+| B3 | PASS | DOM at 1920/1366/1024: page-level scrollWidth > clientWidth false everywhere; board scrolls internally below the break, no internal scroll at 1920 ([after-board-states-laptop](ux-audit-259/evidence/after-board-states-laptop.png), [after-board-states-small](ux-audit-259/evidence/after-board-states-small.png)) |
+| B12 | PASS | DOM: columns are exactly Running/Awaiting review/Scheduled/Failed; queued jobs render under Running with a "queued 5" sub-badge; the sub-badge counts the store's shared PRERUN_STATUSES (e14-store-poll + JobsView) |
+| B19 | PASS | DOM: zero `.progress` elements; the completed render-out branch exists (JobsView:185-186); the per-attempt state clear is unit-tested (tests/test_service.py:839) ([after-jobs-completed-states-desktop](ux-audit-259/evidence/after-jobs-completed-states-desktop.png)) |
+| B20 | PASS | DOM + capture: default sub-tab Completed; last-clip create lands on Queue, discard lands on Completed (verify_phase2c); archive row fields; empty prompt; sidebar "Jobs"; count badge on the Queue sub-tab ([after-jobs-completed-desktop](ux-audit-259/evidence/after-jobs-completed-desktop.png)) |
+| C4 | PASS | Screenshot pair + DOM (thumbnail, title, badges, truncated single-line source, one icon action row with titles/aria) ([after-board-states-desktop](ux-audit-259/evidence/after-board-states-desktop.png) vs [before-board-states-desktop](ux-audit-259/evidence/before-board-states-desktop.png)) |
+| C5 | PASS | Endpoint unit tests (generate-once + cache headers + content-hash key + missing/illegal rejections, test_web.py:243-347) and the real poster frame capture ([after-c5-board-card-thumbnail-desktop](ux-audit-259/evidence/after-c5-board-card-thumbnail-desktop.png)); fallback-only icon in the fresh run ([after-wizard-clips-desktop](ux-audit-259/evidence/after-wizard-clips-desktop.png) vs [before-wizard-clips-desktop](ux-audit-259/evidence/before-wizard-clips-desktop.png)) |
+| D6 | PASS | Generator unit tests (checkbox inside its wrapping label, `for`-association, one control column) + DOM 11/11 + visible pair ([after-wizard-configure-desktop](ux-audit-259/evidence/after-wizard-configure-desktop.png) vs [before-wizard-configure-desktop](ux-audit-259/evidence/before-wizard-configure-desktop.png)) |
+| D7 | PASS | Generator unit tests (free text exactly title/description/tags; "Inline layout" never renders; enum fields map to selects) + DOM (7 selects, no Inline layout) |
+| D8 | PASS | Platform-section unit tests (one grouping node, platform rows collapsed by default with the enable toggle) + DOM (`.platform-group` present, 0 open) ([after-d8-platform-node-desktop](ux-audit-259/evidence/after-d8-platform-node-desktop.png)) |
+| D9 | PASS | DOM: the selected job's pane opens with 0 expanded sections and 0 open platform nodes |
+| D10 | PASS | DOM: rail lists Batch first + active on entry, exactly one `.config-pane`; the batch-persists-when-selection-drops rule is exercised by verify_phase2c's partial-create flow; single-clip-start (no Batch entry) is code-branch-verified only (no fixture) |
+| D24 | PASS |Dry-run endpoint unit tests (test_web.py validate) + verify_phase2c: 12 live-validation/partial-create/reselection/landing checks PASS |
+| E11 | PASS | Shared action-bar gap is unit-tested (test_form_rendering) and visible in the modal pair ([after-modal-review-desktop](ux-audit-259/evidence/after-modal-review-desktop.png) vs [before-modal-review-tab-desktop](ux-audit-259/evidence/before-modal-review-tab-desktop.png)) |
+| E13 | PASS | verify_phase2c: modal closed after the accept call succeeded; e14-store-poll: `selectedJobId` cleared; non-completing conversion accept intentionally keeps the modal open (multi-group rule) |
+| E14 | PASS | Endpoint: status `running` after gate accept (test_web.py:945) + e14-store-poll.mjs OK ("poll-iteration-start: running" through the mocked queued/queued/running sequence) + verify_phase2c board sampling |
+| E16 | PASS | verify_phase2c computed class checks: both accept primaries carry `btn btn-primary`; secondary/danger kept for the rest |
+| E17 | PASS | verify_phase2c: transcript gate renders the editor and no accept-composition/video; conversion gate renders Accept composition + a `<video.review-player>` on the artifact preview URL; no transcript editor |
+| E22 | PASS | verify_phase2c: no `{` in the modal's text on either gate; labeled `.composition-block` sections; the U17 code-grep class result re-run clean; built UI drops the "Job layout JSON" textarea |
+| F15 | PASS | DOM: variants select renders "All variants" + platform-list labels, zero 12-hex options; `· group <hex>` absent from review/publish surfaces |
+| F18 | PASS | Unit tests (tests/test_platform_instagram.py:179-217): shared `API_POLL_INTERVAL = 5` default inherited by Instagram/Twitter, TikTok 3 / YouTube 2 unchanged, derived pacing scales with the constant |
+| F21 | **PARTIAL** | Endpoint verified (reveal route on guarded artifact paths, Windows-only documented follow-up, test_web.py:349-393 + CLI_WEB_PARITY) and the Completed archive rows expose "Open folder" ([after-jobs-completed-states-desktop](ux-audit-259/evidence/after-jobs-completed-states-desktop.png)); **the modal artifact row — F21's named surface — still renders "Preview | Download | ✏ | 🗑" with no Open-folder affordance and no row menu** (see finding R1) |
+| F23 | PASS | Endpoint + contract tests landed in #257 (test_web.py scheduled-attempt cancel) and verified shipping through mock-HTTP; DOM: scheduled cards expose the calendar-X "Cancel attempt" affordance and route it through the confirm dialog |
+
+## Fix-here findings — resolved/not-resolved on before/after pairs
+
+| Finding | Verdict | Evidence pair |
+| --- | --- | --- |
+| U1 (wizard back-link drift) | **RESOLVED** | "Back to clips" (configure) and "Back to jobs" (clips) share one vocabulary and name their real targets — DOM-verified both steps ([after-wizard-configure-desktop](ux-audit-259/evidence/after-wizard-configure-desktop.png) vs [before-wizard-configure-desktop](ux-audit-259/evidence/before-wizard-configure-desktop.png)) |
+| U2 (dead "New batch" copy) | **RESOLVED** | No such string ships (grep clean); the wizard header names nothing "batch" |
+| U4 (1116 px shell cap) | **RESOLVED** | Content width 1688 at 1920 (was ~1116); Settings/Layouts/Metrics span the full band ([after-settings-desktop](ux-audit-259/evidence/after-settings-desktop.png) vs [before-settings-desktop](ux-audit-259/evidence/before-settings-desktop.png)) |
+| U5 (weak scrim) | **RESOLVED** | Dimmed, opaque scrim; background unreadable behind the dialog ([after-modal-review-small](ux-audit-259/evidence/after-modal-review-small.png) vs [before-modal-review-small](ux-audit-259/evidence/before-modal-review-small.png)); scroll-lock facts under U18; [after-u5-modal-scrim-desktop](ux-audit-259/evidence/after-u5-modal-scrim-desktop.png) |
+| U7 (pipeline status printed twice) | **RESOLVED** | Rows show one muted subtext or one badge, not both ([after-modal-review-desktop](ux-audit-259/evidence/after-modal-review-desktop.png) vs [before-modal-review-desktop](ux-audit-259/evidence/before-modal-review-desktop.png)) |
+| U8 (zero-padded "00" badge) | **RESOLVED** | No `00` anywhere in DOM text; an empty workspace renders no badge at all ([after-board-empty-desktop](ux-audit-259/evidence/after-board-empty-desktop.png) vs [before-board-empty-desktop](ux-audit-259/evidence/before-board-empty-desktop.png)) |
+| U10 (flat non-collapsible sections) | **RESOLVED** | 8 collapsible `summary.config-summary` sections (General/Conversion/Subtitles/Upload/Content + platform nodes) ([after-wizard-configure-desktop](ux-audit-259/evidence/after-wizard-configure-desktop.png)) |
+| U12 (Cancel copy overstates scope) | **RESOLVED** | Card Cancel dialog says "Running and queued work **for this job** is aborted…" (DOM) |
+| U13 (Probe as naked text link) | **RESOLVED** | Probe/Re-probe render as bordered secondary buttons in the app's control family ([after-settings-desktop](ux-audit-259/evidence/after-settings-desktop.png)) |
+| U15 (raw enum chips) | **RESOLVED** | 0 raw enum keys in card badge DOM (humanizer applied on card chips) ([after-board-states-desktop](ux-audit-259/evidence/after-board-states-desktop.png)) |
+| U16 (raw attempt-id fallback) | **RESOLVED (code-verified)** | AttemptRow falls back to "Attempt · <localized time>", never the id; the fixture renders no upload-attempt rows, so the DOM check could not exercise it — noted as the one fixture limitation |
+| U18 (no modal focus trap / scroll lock) | **RESOLVED** | verify_phase2c U18 block (6 checks): scroll locked both containers, wheel barrier, 12 Tab steps + Shift+Tab inside the dialog, Esc closes and unlocks (pair under U5 above) |
+
+Follow-up findings remain follow-ups, unchanged: **U6** (modal width
+utilization) and **U19** (tooltip pass — the C4/F21 icon rows now carry
+`title` attributes, but the modal back arrow, error-dismiss and the sidebar
+menu toggle still have names without tooltips). **U3** (two page headers,
+maintainer decision) no longer reproduces: the implementation removed the
+per-view `h2` and kept the Topbar header, resolving the drift in favor of the
+Topbar — recorded here for the maintainer to confirm ([after-settings-desktop](ux-audit-259/evidence/after-settings-desktop.png) vs
+[before-settings-desktop](ux-audit-259/evidence/before-settings-desktop.png)).
+
+## New findings from the re-audit
+
+- **R1 (P2, F21 gap on its named surface): the JobDetail modal's artifact row
+  still shows "Preview | Download" with pencil/trash icons and no "Open
+  folder" affordance.** F21's before-evidence is exactly this row; the
+  approved change ("Download" → "Open folder", raw download in the row menu)
+  landed only as an "Open folder" button on the new Completed archive rows,
+  which reveals the *current* artifact — not the row F21 named, and not the
+  per-artifact reveal the Phase 1 endpoint (`POST
+  /jobs/{id}/artifacts/{artifact_id}/open-folder`) supports. Repro: open any
+  job with an artifact → Overview tab → Artifacts card ([after-modal-review-desktop](ux-audit-259/evidence/after-modal-review-desktop.png), row bottom right).
+  Fix is small and in-scope for F21: an "Open folder" button on the artifact
+  row wired to `api.openFolder(jobId, artifact.id)` (already exists in
+  `api.js`), with Download moved into the row's overflow/secondary affordance.
+- **R2 (P3 polish, fold into U9): the detail modal scrolls horizontally
+  inside itself at 1024×768** (`.detail-modal` scrollWidth 1572 vs client 940,
+  `overflow-x: auto`; the two cards stay side by side instead of stacking).
+  The page never overflows (checked), so B3 holds; the modal just does not
+  adapt its grid below ~1100 px. This is U9's truncation/responsiveness
+  follow-up territory, not a B3 regression.
+
+## Remaining gap list
+
+1. **F21's artifact-row half (R1)** — smallest open item; it complements the
+   landed endpoint instead of new backend work.
+2. **Follow-up issues to file (unchanged from Phase 0):** U19 tooltip pass,
+   U9 shared truncation/responsiveness utility (now also covering R2), U6
+   modal width utilization.
+3. **Maintainer confirmation:** U3 was resolved in-implementation (Topbar
+   header survives, per-view `h2` removed) — confirm the choice, and confirm
+   the single-clip-start batch rule's quota of tests if desired.
+
+---
+
+*Phase 0 audit produced 2026-10-10 against `dev` at 29fe226. Phase 3 re-audit
+completed 2026-10-10 against `dev` at b90b634 (branch state: clean at both
+ends). Committed evidence lives in
+[docs/ux-audit-259/evidence/](ux-audit-259/evidence/); the complete 30-PNG
+(before) and 39-PNG (after) runs are the uncommitted sets cited at the top of
+each phase and belong in CI artifacts.*
+
