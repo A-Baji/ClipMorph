@@ -1,6 +1,8 @@
 <script>
   import Icon from '../components/Icon.svelte';
   import ConfigForm from '../components/ConfigForm.svelte';
+  import PlatformSection from '../components/PlatformSection.svelte';
+  import Thumbnail from '../components/Thumbnail.svelte';
   import {
     app,
     createFromWizard,
@@ -115,7 +117,7 @@
                 checked={app.wizard.selected.includes(source.name)}
                 onchange={(event) => wizardToggleSource(source.name, event.currentTarget.checked)}
               />
-              <span class="clip-thumb"><Icon name="video" /></span>
+              <Thumbnail name={source.name} size={52} alt={`Poster frame for ${source.name}`} />
               <span class="clip-main">
                 <b>{source.name}</b>
                 <small class="faint">{formatBytes(source.size)}</small>
@@ -188,26 +190,10 @@
                 <div class="pane-sections">
                   <ConfigForm sections={spec.sections} mode="batch" open />
                 </div>
-                <div class="pane-platforms">
-                  {#each spec.platforms?.order || app.platforms as platform (platform)}
-                    <details class="platform-block">
-                      <summary>{platform}</summary>
-                      <ConfigForm
-                        sections={spec.platforms.sections}
-                        mode="batch"
-                        prefix={`platforms.${platform}.`}
-                      />
-                      <ConfigForm
-                        sections={[{
-                          id: `platforms.${platform}.options`,
-                          label: `${platform} options`,
-                          fields: spec.platforms.flat_fields[platform] || [],
-                        }]}
-                        mode="batch"
-                      />
-                    </details>
-                  {/each}
-                </div>
+                <!-- D8: every per-platform block nests under one collapsible
+                     "Platform" section; nodes per platform, collapsed by
+                     default; enable toggles sit on the platform nodes. -->
+                <PlatformSection {spec} mode="batch" />
               </div>
             {:else}
               <div class="config-pane">
@@ -223,28 +209,7 @@
                 <div class="pane-sections">
                   <ConfigForm sections={spec.sections} mode="job" source={app.wizard.activeJob} />
                 </div>
-                <div class="pane-platforms">
-                  {#each spec.platforms?.order || app.platforms as platform (platform)}
-                    <details class="platform-block">
-                      <summary>{platform}</summary>
-                      <ConfigForm
-                        sections={spec.platforms.sections}
-                        mode="job"
-                        source={app.wizard.activeJob}
-                        prefix={`platforms.${platform}.`}
-                      />
-                      <ConfigForm
-                        sections={[{
-                          id: `platforms.${platform}.options`,
-                          label: `${platform} options`,
-                          fields: spec.platforms.flat_fields[platform] || [],
-                        }]}
-                        mode="job"
-                        source={app.wizard.activeJob}
-                      />
-                    </details>
-                  {/each}
-                </div>
+                <PlatformSection spec={spec} mode="job" source={app.wizard.activeJob} />
               </div>
             {/if}
           {/key}
@@ -339,13 +304,6 @@
     border-color: var(--color-primary);
   }
 
-  .clip-thumb {
-    display: inline-flex;
-    padding: var(--space-2);
-    border-radius: var(--radius-sm);
-    background: var(--color-surface);
-  }
-
   .clip-main {
     display: grid;
   }
@@ -424,23 +382,9 @@
     white-space: nowrap;
   }
 
-  .platform-block {
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-    padding: var(--space-3) var(--space-4);
-    margin-bottom: var(--space-4);
-  }
-
   .resolution {
     margin: 0 0 var(--space-3);
     font-size: var(--text-xs);
-  }
-
-  .platform-block summary {
-    cursor: pointer;
-    display: flex;
-    gap: var(--space-3);
-    align-items: baseline;
   }
 
   .pane-head {

@@ -19,10 +19,13 @@
 {/if}
 
 <style>
+  /* U5: an unmistakable scrim — the token wash plus a blur plates the board
+     behind the dialog instead of leaving it readable through the top band. */
   .detail-scrim {
     position: fixed;
     inset: 0;
     background: var(--color-scrim);
+    backdrop-filter: blur(6px);
     z-index: 40;
   }
 

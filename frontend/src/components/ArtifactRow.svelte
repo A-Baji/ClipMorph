@@ -55,7 +55,9 @@
         }}
       />
     {:else}
-      <b>{artifact.display_name || artifact.kind} · r{artifact.revision}</b>
+      <b class="artifact-label">
+        <span class="truncate">{artifact.display_name || artifact.kind} · r{artifact.revision}</span>
+      </b>
       <small>
         {artifact.state} · {artifact.kind}
         {#if artifact.bytes !== undefined} · {formatBytes(artifact.bytes)}{/if}
@@ -74,11 +76,21 @@
       rel="noreferrer"
     >Preview</a>
     <a class="btn btn-ghost btn-sm" href={api.downloadUrl(jobId, artifact.id)}>Download</a>
-    <button class="btn btn-ghost btn-icon" aria-label="Rename artifact" onclick={beginRename}>
+    <button
+      class="btn btn-ghost btn-icon"
+      title="Rename artifact"
+      aria-label="Rename artifact"
+      onclick={beginRename}
+    >
       <Icon name="pencil" />
     </button>
     {#if !isSource}
-      <button class="btn btn-danger btn-icon" aria-label="Delete artifact" onclick={confirmDelete}>
+      <button
+        class="btn btn-danger btn-icon"
+        title="Delete artifact"
+        aria-label="Delete artifact"
+        onclick={confirmDelete}
+      >
         <Icon name="trash" />
       </button>
     {/if}
@@ -88,5 +100,11 @@
 <style>
   .artifact-name-input {
     padding: var(--space-1) var(--space-2);
+  }
+
+  /* U9: the shared one-line truncation for artifact names. */
+  .artifact-label {
+    display: flex;
+    min-width: 0;
   }
 </style>

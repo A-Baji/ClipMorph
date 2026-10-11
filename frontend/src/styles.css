@@ -73,6 +73,15 @@ a {
   color: var(--color-text-faint);
 }
 
+/* Shared one-line truncation for titles/filenames (issue #259 U9). Pair
+   with a flex/grid parent so ellipsis works inside every surface. */
+.truncate {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;
@@ -906,6 +915,7 @@ details.advanced .advanced-body {
 .detail-head .title {
   font-size: var(--text-lg);
   font-weight: var(--weight-semibold);
+  min-width: 0;
 }
 
 .list {

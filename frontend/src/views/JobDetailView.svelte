@@ -144,7 +144,7 @@
           <Icon name="arrowLeft" />
         </button>
         <div>
-          <div class="title">{title}</div>
+          <div class="title truncate">{title}</div>
           <div class="row faint">
             <Badge tone={statusTone(job.status)}>{humanize(job.status)}</Badge>
             <span class="mono">{job.configuration?.general?.source}</span>

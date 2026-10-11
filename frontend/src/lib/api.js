@@ -59,6 +59,8 @@ export const api = {
 
   // Sources
   listSources: () => request('/sources'),
+  /** The Phase 1 poster-frame endpoint (issue #259 C5), cached on disk. */
+  thumbnailUrl: (name) => `${BASE}/sources/${encodeURIComponent(name)}/thumbnail`,
   uploadSource: (file) => {
     const form = new FormData();
     form.append('file', file);

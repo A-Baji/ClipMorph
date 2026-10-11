@@ -1,7 +1,10 @@
 <script>
   import Icon from './Icon.svelte';
   import SelfConfigForm from './ConfigForm.svelte';
+  import { controlDescriptor } from '../lib/form.js';
+  import { toLocalInput, toUtcTimestamp } from '../lib/format.js';
   import {
+    app,
     batchHasOverride,
     batchValue,
     clearBatchField,
@@ -14,12 +17,18 @@
   } from '../lib/store.svelte.js';
 
   /**
-   * Recursive renderer for the generated configuration-form spec (issue #257).
-   * Every control is tri-state: inherit batch / inherit global default /
-   * custom. ``mode`` is "batch" for the shared block and "job" for a job's
-   * detail form; ``prefix`` namespaces per-platform paths. Sections render as
-   * collapsible ``<details>`` (issue #259 D9/U10): ``open`` is the initial
-   * state — batch sections may start expanded, per-job sections start
+   * Recursive renderer for the generated configuration-form spec (issue
+   * #257). Every control is tri-state: inherit batch / inherit global
+   * default / custom. ``mode`` is "batch" for the shared block and "job"
+   * for a job's detail form; ``prefix`` namespaces per-platform paths.
+   *
+   * Row anatomy (issue #259 D6, D7): boolean controls sit immediately left
+   * of their visible label inside one wrapping ``<label>``; text, number and
+   * select controls sit directly beneath their ``for``-associated label;
+   * free text survives only for content title/description/tags; object
+   * fields (the inline layout) never render — inline layout overrides live
+   * in the Layouts editor. Sections render as collapsible ``<details>``
+   * (D9/U10): batch sections may start expanded, per-job sections start
    * collapsed.
    */
   let {
@@ -31,8 +40,16 @@
     open = false,
   } = $props();
 
+  const layouts = $derived(app.layouts || []);
+
   function fullPath(field) {
     return prefix ? `${prefix}${field.path}` : field.path;
+  }
+
+  /** Explicit label CONTROL association id (D6): ``for`` + ``id`` pair. */
+  function fieldId(field) {
+    return `cf-${mode}-${source || 'batch'}-${fullPath(field)}`
+      .replace(/[^a-zA-Z0-9]+/g, '-');
   }
 
   function hasOverride(path) {
@@ -81,13 +98,6 @@
         raw.split(',').map((item) => item.trim()).filter(Boolean),
       );
     }
-    if (type === 'object') {
-      try {
-        return write(path, raw.trim() ? JSON.parse(raw) : {});
-      } catch {
-        return; // keep typing until the JSON is valid
-      }
-    }
     return write(path, raw);
   }
 </script>
@@ -99,85 +109,133 @@
     </summary>
     <div class="config-fields">
       {#each section.fields as field (field.path)}
+        {@const control = controlDescriptor(field, layouts)}
         {@const path = fullPath(field)}
         {@const value = resolved(path)}
         {@const overridden = hasOverride(path)}
-        {#if field.protected}
+        {@const fid = fieldId(field)}
+        {#if field.protected || control.kind === 'hidden'}
           <!-- Transcription keys drive the one shared transcript session; the
-               schema rejects a per-platform override, so it is not offered. -->
+               schema rejects a per-platform override, so it is not offered.
+               Object fields (the inline layout) are D7-removed: inline layout
+               overrides belong to the Layouts editor. -->
+        {:else if control.kind === 'checkbox'}
+          <div class="config-field" class:overridden>
+            <div class="config-label">
+              <label class="check" for={fid}>
+                <input
+                  type="checkbox"
+                  id={fid}
+                  checked={Boolean(value)}
+                  onchange={(event) => onInput(path, 'boolean', event.currentTarget.checked)}
+                />
+                <span>{field.label}</span>
+              </label>
+              <span class="badges">
+                {#if defaultDiffers(path)}
+                  <span class="badge badge-warning" title={`default: ${display(globalDefault(path))}`}>
+                    ≠ default
+                  </span>
+                {/if}
+                {#if batchDiffers(path)}
+                  <span class="badge badge-info" title={`batch: ${display(batchValue(path))}`}>
+                    ≠ batch
+                  </span>
+                {/if}
+                {#if overridden}
+                  <button
+                    type="button"
+                    class="btn btn-ghost btn-icon"
+                    title="Reset to inherited value"
+                    aria-label={`Reset ${field.label}`}
+                    onclick={() => reset(path)}
+                  >
+                    <Icon name="refresh" size={14} />
+                  </button>
+                {/if}
+              </span>
+            </div>
+            {#if field.hint}<small class="field-hint">{field.hint}</small>{/if}
+          </div>
         {:else}
-        <div class="config-field" class:overridden>
-          <div class="config-label">
-            <span>{field.label}</span>
-            <span class="badges">
-              {#if defaultDiffers(path)}
-                <span class="badge badge-warning" title={`default: ${display(globalDefault(path))}`}>
-                  ≠ default
-                </span>
+          <div class="config-field" class:overridden>
+            <label class="config-label" for={fid}>
+              <span>{field.label}</span>
+              <span class="badges">
+                {#if defaultDiffers(path)}
+                  <span class="badge badge-warning" title={`default: ${display(globalDefault(path))}`}>
+                    ≠ default
+                  </span>
+                {/if}
+                {#if batchDiffers(path)}
+                  <span class="badge badge-info" title={`batch: ${display(batchValue(path))}`}>
+                    ≠ batch
+                  </span>
+                {/if}
+                {#if overridden}
+                  <button
+                    type="button"
+                    class="btn btn-ghost btn-icon"
+                    title="Reset to inherited value"
+                    aria-label={`Reset ${field.label}`}
+                    onclick={() => reset(path)}
+                  >
+                    <Icon name="refresh" size={14} />
+                  </button>
+                {/if}
+              </span>
+            </label>
+            <div class="config-control">
+              {#if control.kind === 'select'}
+                <select
+                  id={fid}
+                  value={value === null || value === undefined ? '' : String(value)}
+                  onchange={(event) => onInput(path, 'string', event.currentTarget.value)}
+                >
+                  <option value="">inherit</option>
+                  {#each control.options as option (option.value)}
+                    <option value={option.value}>{option.label}</option>
+                  {/each}
+                </select>
+              {:else if control.kind === 'datetime'}
+                <input
+                  id={fid}
+                  type="datetime-local"
+                  value={toLocalInput(value)}
+                  oninput={(event) => onInput(path, 'datetime', toUtcTimestamp(event.currentTarget.value))}
+                />
+              {:else if control.kind === 'textarea'}
+                <textarea
+                  id={fid}
+                  rows="2"
+                  value={display(value)}
+                  oninput={(event) => onInput(path, 'string', event.currentTarget.value)}
+                ></textarea>
+              {:else if control.kind === 'string_list'}
+                <input
+                  id={fid}
+                  value={display(value)}
+                  placeholder="tag one, tag two"
+                  oninput={(event) => onInput(path, 'string_list', event.currentTarget.value)}
+                />
+              {:else if control.kind === 'number'}
+                <input
+                  id={fid}
+                  type="number"
+                  value={display(value)}
+                  oninput={(event) => onInput(path, field.type, event.currentTarget.value)}
+                />
+              {:else}
+                <input
+                  id={fid}
+                  type="text"
+                  value={display(value)}
+                  oninput={(event) => onInput(path, 'string', event.currentTarget.value)}
+                />
               {/if}
-              {#if batchDiffers(path)}
-                <span class="badge badge-info" title={`batch: ${display(batchValue(path))}`}>
-                  ≠ batch
-                </span>
-              {/if}
-            </span>
+            </div>
+            {#if field.hint}<small class="field-hint">{field.hint}</small>{/if}
           </div>
-          <div class="config-control">
-            {#if field.type === 'boolean'}
-              <input
-                type="checkbox"
-                aria-label={field.label}
-                checked={Boolean(value)}
-                onchange={(event) => onInput(path, 'boolean', event.currentTarget.checked)}
-              />
-            {:else if field.type === 'enum'}
-              <select
-                aria-label={field.label}
-                value={display(value)}
-                onchange={(event) => onInput(path, 'string', event.currentTarget.value)}
-              >
-                <option value="">inherit</option>
-                {#each field.options || [] as option (option)}
-                  <option value={option}>{option}</option>
-                {/each}
-              </select>
-            {:else if field.type === 'text'}
-              <textarea
-                aria-label={field.label}
-                rows="2"
-                value={display(value)}
-                oninput={(event) => onInput(path, 'string', event.currentTarget.value)}
-              ></textarea>
-            {:else if field.type === 'object'}
-              <textarea
-                aria-label={field.label}
-                rows="3"
-                spellcheck="false"
-                value={display(value)}
-                oninput={(event) => onInput(path, 'object', event.currentTarget.value)}
-              ></textarea>
-            {:else}
-              <input
-                aria-label={field.label}
-                type={field.type === 'integer' || field.type === 'number' ? 'number' : 'text'}
-                value={display(value)}
-                oninput={(event) => onInput(path, field.type, event.currentTarget.value)}
-              />
-            {/if}
-            {#if overridden}
-              <button
-                type="button"
-                class="btn btn-ghost btn-icon"
-                title="Reset to inherited value"
-                aria-label={`Reset ${field.label}`}
-                onclick={() => reset(path)}
-              >
-                <Icon name="refresh" size={14} />
-              </button>
-            {/if}
-          </div>
-          {#if field.hint}<small class="field-hint">{field.hint}</small>{/if}
-        </div>
         {/if}
       {/each}
     </div>
@@ -253,6 +311,11 @@
     background: var(--color-surface-raised, var(--color-surface));
   }
 
+  .config-label,
+  .config-field .check {
+    min-width: 0;
+  }
+
   .config-label {
     display: flex;
     align-items: center;
@@ -261,14 +324,25 @@
     font-size: var(--text-sm);
   }
 
+  .config-label > .check {
+    max-width: 100%;
+  }
+
+  .config-label > .check span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .badges {
     display: inline-flex;
+    align-items: center;
     gap: var(--space-1);
+    flex-shrink: 0;
   }
 
   .config-control {
-    display: flex;
-    align-items: center;
+    display: grid;
     gap: var(--space-2);
   }
 

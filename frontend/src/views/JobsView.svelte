@@ -3,6 +3,7 @@
   import Badge from '../components/Badge.svelte';
   import Tabs from '../components/Tabs.svelte';
   import Progress from '../components/Progress.svelte';
+  import Thumbnail from '../components/Thumbnail.svelte';
   import {
     app,
     cardAction,
@@ -160,45 +161,71 @@
             <div class="column-body">
               {#each jobs as job (job.job_id)}
                 {@const attempt = scheduledAttempt(job)}
+                {@const sourceName = job.configuration?.general?.source}
                 <article class="card">
-                  <button class="card-main" onclick={() => openJob(job.job_id)}>
-                    <span class="card-head">
-                      <span class="card-thumb"><Icon name="video" size={16} /></span>
-                      <span class="card-title">{jobTitle(job)}</span>
-                    </span>
-                    <span class="card-meta">
-                      <Badge tone={statusTone(job.status)}>{humanize(job.status)}</Badge>
-                      {#if job.current_checkpoint}
-                        <span class="badge">{humanize(job.current_checkpoint)}</span>
+                  <button
+                    class="card-main"
+                    aria-label={`Open ${jobTitle(job)}`}
+                    onclick={() => openJob(job.job_id)}
+                  >
+                    <!-- C5: real poster frame; the icon is the fallback only. -->
+                    <Thumbnail name={sourceName} size={48} alt="" />
+                    <span class="card-text">
+                      <span class="card-title truncate">{jobTitle(job)}</span>
+                      <span class="card-meta">
+                        <Badge tone={statusTone(job.status)}>{humanize(job.status)}</Badge>
+                        {#if job.current_checkpoint}
+                          <span class="badge">{humanize(job.current_checkpoint)}</span>
+                        {/if}
+                      </span>
+                      <span class="faint mono card-source truncate">{sourceName}</span>
+                      {#if job.status === 'completed'}
+                        <!-- B19: completed jobs never render progress bars. -->
+                      {:else if app.uploadProgress[job.job_id] && Object.keys(app.uploadProgress[job.job_id]).length}
+                        {#each Object.entries(app.uploadProgress[job.job_id]) as [platform, percent] (platform)}
+                          <Progress value={percent} small label={`${platform}: ${percent}%`} />
+                        {/each}
+                      {:else if attempt}
+                        <span class="faint mono card-source truncate">{soonestScheduledPublish(job)}</span>
                       {/if}
                     </span>
-                    <span class="faint mono card-source">{job.configuration?.general?.source}</span>
-                    {#if job.status === 'completed'}
-                      <!-- B19: completed jobs never render progress bars. -->
-                    {:else if app.uploadProgress[job.job_id] && Object.keys(app.uploadProgress[job.job_id]).length}
-                      {#each Object.entries(app.uploadProgress[job.job_id]) as [platform, percent] (platform)}
-                        <Progress value={percent} small label={`${platform}: ${percent}%`} />
-                      {/each}
-                    {:else if attempt}
-                      <span class="faint mono">{soonestScheduledPublish(job)}</span>
-                    {/if}
                   </button>
+                  <!-- C4: quick actions are one bottom row of compact icon
+                       buttons, each with a tooltip and an accessible name. -->
                   <div class="card-actions">
                     {#if canResume(job)}
-                      <button class="btn btn-ghost btn-sm" onclick={() => cardAction(job, 'resume')}>
-                        <Icon name="play" size={14} /> {resumeLabel(job)}
+                      <button
+                        class="btn btn-ghost btn-icon"
+                        title={`${resumeLabel(job)} ${jobTitle(job)}`}
+                        aria-label={`${resumeLabel(job)} ${jobTitle(job)}`}
+                        onclick={() => cardAction(job, 'resume')}
+                      >
+                        <Icon name="play" size={14} />
                       </button>
                     {/if}
                     {#if attempt}
-                      <button class="btn btn-ghost btn-sm" onclick={() => confirmCancelAttempt(job)}>
-                        Cancel attempt
+                      <button
+                        class="btn btn-ghost btn-icon"
+                        title="Cancel attempt"
+                        aria-label={`Cancel the scheduled attempt of ${jobTitle(job)}`}
+                        onclick={() => confirmCancelAttempt(job)}
+                      >
+                        <Icon name="calendarX" size={14} />
                       </button>
                     {/if}
                     {#if canCancel(job)}
-                      <button class="btn btn-ghost btn-sm" onclick={() => confirmCancel(job)}>Cancel</button>
+                      <button
+                        class="btn btn-ghost btn-icon"
+                        title={`Cancel ${jobTitle(job)}`}
+                        aria-label={`Cancel ${jobTitle(job)}`}
+                        onclick={() => confirmCancel(job)}
+                      >
+                        <Icon name="x" size={14} />
+                      </button>
                     {/if}
                     <button
-                      class="btn btn-ghost btn-sm"
+                      class="btn btn-ghost btn-icon"
+                      title={`Delete ${jobTitle(job)}`}
                       aria-label={`Delete ${jobTitle(job)}`}
                       onclick={() => confirmDelete(job)}
                     >
@@ -219,25 +246,36 @@
     {#if completedJobs.length}
       <div class="archive">
         {#each completedJobs as job (job.job_id)}
+          {@const sourceName = job.configuration?.general?.source}
           <article class="archive-row">
             <button class="archive-main" onclick={() => openJob(job.job_id)}>
-              <span class="archive-thumb"><Icon name="video" size={16} /></span>
+              <!-- C5: real poster frame; the icon is the fallback only. -->
+              <Thumbnail name={sourceName} size={48} alt="" />
               <span class="archive-main-text">
-                <b class="archive-title">{jobTitle(job)}</b>
-                <span class="faint mono archive-source">
-                  {job.configuration?.general?.source}
-                </span>
+                <b class="archive-title truncate">{jobTitle(job)}</b>
+                <span class="faint mono archive-source truncate">{sourceName}</span>
               </span>
               <span class="faint archive-time">completed {completedTime(job)}</span>
             </button>
-            <button
-              class="btn btn-ghost btn-sm"
-              disabled={!job.current_artifact_id}
-              title="Reveal the exported file in its folder"
-              onclick={() => openJobFolder(job)}
-            >
-              <Icon name="external" size={14} /> Open folder
-            </button>
+            <div class="archive-actions">
+              <button
+                class="btn btn-ghost btn-sm"
+                disabled={!job.current_artifact_id}
+                title="Reveal the exported file in its folder"
+                aria-label={`Open the folder of ${jobTitle(job)}`}
+                onclick={() => openJobFolder(job)}
+              >
+                <Icon name="external" size={14} /> Open folder
+              </button>
+              <button
+                class="btn btn-ghost btn-icon"
+                title={`Delete ${jobTitle(job)}`}
+                aria-label={`Delete ${jobTitle(job)}`}
+                onclick={() => confirmDelete(job)}
+              >
+                <Icon name="trash" size={14} />
+              </button>
+            </div>
           </article>
         {/each}
       </div>
@@ -334,16 +372,21 @@
     overflow-y: auto;
   }
 
+  /* C4: the fixed card anatomy — thumbnail left, title strong, status +
+     checkpoint badges, single-line muted source, then the compact icon
+     action row; everything on the 8px rhythm. */
   .card {
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
     background: var(--color-bg);
     display: grid;
+    gap: var(--space-2);
   }
 
   .card-main {
-    display: grid;
-    gap: var(--space-1);
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
     text-align: left;
     padding: var(--space-3);
     background: none;
@@ -352,43 +395,35 @@
     color: inherit;
   }
 
-  .card-head {
-    display: flex;
-    align-items: center;
+  .card-text {
+    min-width: 0;
+    flex: 1;
+    display: grid;
     gap: var(--space-2);
-  }
-
-  .card-thumb {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    padding: var(--space-1);
-    border-radius: var(--radius-sm);
-    background: var(--color-surface);
-    color: var(--color-text-muted);
+    justify-items: start;
   }
 
   .card-title {
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
+    max-width: 100%;
   }
 
   .card-meta {
     display: flex;
-    gap: var(--space-1);
+    gap: var(--space-2);
     flex-wrap: wrap;
   }
 
   .card-source {
     font-size: var(--text-xs);
-    overflow: hidden;
-    text-overflow: ellipsis;
+    max-width: 100%;
   }
 
   .card-actions {
     display: flex;
     flex-wrap: wrap;
-    gap: var(--space-1);
-    padding: 0 var(--space-2) var(--space-2);
+    gap: var(--space-2);
+    padding: 0 var(--space-3) var(--space-3);
   }
 
   .column-empty {
@@ -427,19 +462,9 @@
     padding: 0;
   }
 
-  .archive-thumb {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    padding: var(--space-1);
-    border-radius: var(--radius-sm);
-    background: var(--color-surface-hover);
-    color: var(--color-text-muted);
-  }
-
   .archive-main-text {
     display: grid;
-    gap: 2px;
+    gap: var(--space-1);
     min-width: 0;
     flex: 1;
   }
@@ -447,19 +472,23 @@
   .archive-title {
     font-size: var(--text-sm);
     font-weight: var(--weight-semibold);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    /* The text node truncates inside the flex row via .truncate. */
+    flex: 1;
   }
 
   .archive-source {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    max-width: 100%;
   }
 
   .archive-time {
     font-size: var(--text-xs);
+    flex-shrink: 0;
+  }
+
+  .archive-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
     flex-shrink: 0;
   }
 </style>
