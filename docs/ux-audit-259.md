@@ -465,7 +465,7 @@ mounted with Batch active by default.
 | E22 | PASS | verify_phase2c: no `{` in the modal's text on either gate; labeled `.composition-block` sections; the U17 code-grep class result re-run clean; built UI drops the "Job layout JSON" textarea |
 | F15 | PASS | DOM: variants select renders "All variants" + platform-list labels, zero 12-hex options; `· group <hex>` absent from review/publish surfaces |
 | F18 | PASS | Unit tests (tests/test_platform_instagram.py:179-217): shared `API_POLL_INTERVAL = 5` default inherited by Instagram/Twitter, TikTok 3 / YouTube 2 unchanged, derived pacing scales with the constant |
-| F21 | **PARTIAL** | Endpoint verified (reveal route on guarded artifact paths, Windows-only documented follow-up, test_web.py:349-393 + CLI_WEB_PARITY) and the Completed archive rows expose "Open folder" ([after-jobs-completed-states-desktop](ux-audit-259/evidence/after-jobs-completed-states-desktop.png)); **the modal artifact row — F21's named surface — still renders "Preview | Download | ✏ | 🗑" with no Open-folder affordance and no row menu** (see finding R1) |
+| F21 | **PASS** | Endpoint verified (reveal route on guarded artifact paths, Windows-only documented follow-up, test_web.py:349-393 + CLI_WEB_PARITY); Completed archive rows expose "Open folder" ([after-jobs-completed-states-desktop](ux-audit-259/evidence/after-jobs-completed-states-desktop.png)); the modal artifact row — F21's named surface — now renders "Open folder" too ([after-modal-artifacts-desktop](ux-audit-259/evidence/after-modal-artifacts-desktop.png)); R1 resolved in `dfc7cef` |
 | F23 | PASS | Endpoint + contract tests landed in #257 (test_web.py scheduled-attempt cancel) and verified shipping through mock-HTTP; DOM: scheduled cards expose the calendar-X "Cancel attempt" affordance and route it through the confirm dialog |
 
 ## Fix-here findings — resolved/not-resolved on before/after pairs
@@ -505,9 +505,15 @@ Topbar — recorded here for the maintainer to confirm ([after-settings-desktop]
   per-artifact reveal the Phase 1 endpoint (`POST
   /jobs/{id}/artifacts/{artifact_id}/open-folder`) supports. Repro: open any
   job with an artifact → Overview tab → Artifacts card ([after-modal-review-desktop](ux-audit-259/evidence/after-modal-review-desktop.png), row bottom right).
-  Fix is small and in-scope for F21: an "Open folder" button on the artifact
-  row wired to `api.openFolder(jobId, artifact.id)` (already exists in
-  `api.js`), with Download moved into the row's overflow/secondary affordance.
+  **RESOLVED in commit `dfc7cef`**: the modal artifact row's "Download" text
+  link became an "Open folder" button wired to `api.openFolder(jobId,
+  artifact.id)` (the existing Phase 1 endpoint), mirroring the archive row's
+  affordance; the F21 row now reads "Preview | Open folder | ✏ | 🗑"
+  ([after-modal-artifacts-desktop](ux-audit-259/evidence/after-modal-artifacts-desktop.png)).
+  Download is no longer a row affordance; a row-level download menu remains a
+  follow-up (see gap list). Regression gates re-run after the fix:
+  svelte-check 0 errors, `node tests/e2e/smoke.js` OK, `verify_phase2c.py`
+  32 passed.
 - **R2 (P3 polish, fold into U9): the detail modal scrolls horizontally
   inside itself at 1024×768** (`.detail-modal` scrollWidth 1572 vs client 940,
   `overflow-x: auto`; the two cards stay side by side instead of stacking).
@@ -517,8 +523,11 @@ Topbar — recorded here for the maintainer to confirm ([after-settings-desktop]
 
 ## Remaining gap list
 
-1. **F21's artifact-row half (R1)** — smallest open item; it complements the
-   landed endpoint instead of new backend work.
+1. ~~**F21's artifact-row half (R1)** — smallest open item; it complements the
+   landed endpoint instead of new backend work.~~ **Resolved in `dfc7cef`**
+   (see R1 above). A row-level *download* affordance is now absent by design
+   (F21 moved it into the row menu); filing it as a follow-up keeps the raw
+   download reachable without restoring the previous "Download" chord.
 2. **Follow-up issues to file (unchanged from Phase 0):** U19 tooltip pass,
    U9 shared truncation/responsiveness utility (now also covering R2), U6
    modal width utilization.
