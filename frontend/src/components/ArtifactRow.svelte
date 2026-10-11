@@ -6,6 +6,8 @@
     renameArtifact,
     deleteArtifact,
     requestConfirm,
+    notify,
+    report,
   } from '../lib/store.svelte.js';
   import { formatBytes } from '../lib/format.js';
 
@@ -37,6 +39,16 @@
       danger: true,
       onConfirm: () => deleteArtifact(artifact),
     });
+  }
+
+  /** F21: reveal the artifact file in its OS folder via the localhost endpoint. */
+  async function revealInFolder() {
+    try {
+      await api.openFolder(jobId, artifact.id);
+      notify('Folder opened');
+    } catch (error) {
+      report(error);
+    }
   }
 </script>
 
@@ -75,7 +87,16 @@
       target="_blank"
       rel="noreferrer"
     >Preview</a>
-    <a class="btn btn-ghost btn-sm" href={api.downloadUrl(jobId, artifact.id)}>Download</a>
+    <!-- F21: "Download" becomes "Open folder" (raw download is no longer a row
+         affordance; the localhost-only endpoint reveals the file in the OS). -->
+    <button
+      class="btn btn-ghost btn-sm"
+      title="Reveal the artifact file in its folder"
+      aria-label={`Open the folder of ${artifact.display_name || artifact.kind}`}
+      onclick={revealInFolder}
+    >
+      Open folder
+    </button>
     <button
       class="btn btn-ghost btn-icon"
       title="Rename artifact"
