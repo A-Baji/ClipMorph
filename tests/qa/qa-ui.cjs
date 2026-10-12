@@ -53,6 +53,18 @@ function log(...parts) {
 /** One state navigation per fresh page load with phase-mapped failures. */
 async function enterState(page, base, state) {
   log(state.name, 'goto');
+  if (state.offline) {
+    await page.addInitScript(() => {
+      const fetchApi = window.fetch.bind(window);
+      window.fetch = (input, init) => {
+        const url = typeof input === 'string' ? input : input.url;
+        if (url.startsWith('/api/v1/')) {
+          return Promise.reject(new TypeError('Failed to fetch'));
+        }
+        return fetchApi(input, init);
+      };
+    });
+  }
   await page.goto(base, { waitUntil: 'domcontentloaded' });
   try {
     await page.waitForSelector('.shell', { timeout: 15000 });
@@ -76,7 +88,9 @@ async function enterState(page, base, state) {
         await page.waitForTimeout(action.wait);
       } else if (action.click) {
         try {
-          await locatorFor(page, action.click).click();
+          const locator = locatorFor(page, action.click);
+          if (action.onlyIfVisible && !(await locator.isVisible())) continue;
+          await locator.click();
           log(state.name, `clicked ${action.click}`);
         } catch (error) {
           throw new Error(`[click ${action.click}] ${error.message.split('\n')[0]}`);

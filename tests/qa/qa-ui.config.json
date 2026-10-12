@@ -1,5 +1,5 @@
 {
-  "viewports": [[1920, 1080], [1366, 768], [1024, 768]],
+  "viewports": [[1920, 1080], [1366, 768], [1024, 768], [375, 812], [812, 375]],
   "axeViewport": 1366,
   "states": [
     {
@@ -7,6 +7,38 @@
       "scenario": "states",
       "ready": ".board article.card .card-main",
       "crops": [".jobs-head", "article.card"]
+    },
+    {
+      "name": "failed-status-mix",
+      "scenario": "states",
+      "ready": ".column-full .jcard",
+      "actions": [
+        { "click": "section.column[aria-label='Failed'] .column-head" },
+        { "wait": 400 }
+      ],
+      "crops": [".jobs-head", ".column-full"]
+    },
+    {
+      "name": "long-content",
+      "scenario": "long",
+      "ready": ".board article.card .card-main",
+      "crops": [".jobs-head", "article.card"]
+    },
+    {
+      "name": "large-board",
+      "scenario": "large",
+      "ready": ".board article.card .card-main",
+      "crops": [".jobs-head", "section.column[aria-label='Failed']"]
+    },
+    {
+      "name": "large-failed-grid",
+      "scenario": "large",
+      "ready": ".column-full .jcard",
+      "actions": [
+        { "click": "section.column[aria-label='Failed'] .column-head" },
+        { "wait": 400 }
+      ],
+      "crops": [".column-full"]
     },
     {
       "name": "column-full-grid",
@@ -88,10 +120,40 @@
       "scenario": "empty",
       "ready": ".empty strong",
       "actions": [
-        { "click": "text=Metrics" },
+        { "click": "button.menu-toggle", "onlyIfVisible": true },
+        { "click": "button.nav-item:has-text('Metrics')" },
         { "wait": 400 }
       ],
       "crops": [".empty"]
+    },
+    {
+      "name": "settings",
+      "scenario": "states",
+      "ready": ".content .grid-2",
+      "actions": [
+        { "click": "button.menu-toggle", "onlyIfVisible": true },
+        { "click": "button.nav-item:has-text('Settings')" },
+        { "wait": 400 }
+      ],
+      "crops": [".topbar", ".content"]
+    },
+    {
+      "name": "layouts",
+      "scenario": "states",
+      "ready": ".content .columns",
+      "actions": [
+        { "click": "button.menu-toggle", "onlyIfVisible": true },
+        { "click": "button.nav-item:has-text('Layouts')" },
+        { "wait": 400 }
+      ],
+      "crops": [".topbar", ".content"]
+    },
+    {
+      "name": "offline",
+      "scenario": "states",
+      "offline": true,
+      "ready": ".alert[role='alert']",
+      "crops": [".topbar", ".sidebar-foot", ".alert-slot"]
     }
   ]
 }
