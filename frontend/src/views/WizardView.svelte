@@ -174,10 +174,40 @@
     {#if !spec}
       <p class="faint">Configuration form is loading…</p>
     {:else}
-      <!-- D10: one right-hand rail (Batch first, then clips) driving exactly
-           one config pane on the left; never two config forms. sections start
-           collapsed per selection (D9); Batch sections may start expanded. -->
+      <!-- D10 (item 8): one LEFT-hand rail (Batch first when >1 clip, then
+           clips) driving exactly one config pane on the right; never two
+           config forms. Sections are expanded by default (item 7). -->
       <div class="wizard-body">
+        <aside class="rail" aria-label="Configuration targets">
+          {#if app.wizard.batchEntry}
+            <button
+              class="rail-item"
+              class:active={app.wizard.activeJob === 'batch'}
+              onclick={() => wizardSetActiveJob('batch')}
+            >
+              <span class="rail-name">Batch</span>
+              <span class="badge" class:badge-info={app.wizard.batch.overrides.length > 0}>
+                {app.wizard.batch.overrides.length}
+              </span>
+            </button>
+          {/if}
+          {#each selected as source (source)}
+            <button
+              class="rail-item"
+              class:active={app.wizard.activeJob === source}
+              onclick={() => wizardSetActiveJob(source)}
+            >
+              <span class="rail-name">{source}</span>
+              <span class="badge" class:badge-info={overrideCount(source) > 0}>
+                {overrideCount(source)}
+              </span>
+            </button>
+          {/each}
+          <button class="btn btn-ghost btn-sm" onclick={() => wizardGoStep(1)}>
+            <Icon name="plus" /> Add or remove clips
+          </button>
+        </aside>
+
         <div class="detail">
           {#key app.wizard.activeJob}
             {#if app.wizard.activeJob === 'batch'}
@@ -214,36 +244,6 @@
             {/if}
           {/key}
         </div>
-
-        <aside class="rail" aria-label="Configuration targets">
-          {#if app.wizard.batchEntry}
-            <button
-              class="rail-item"
-              class:active={app.wizard.activeJob === 'batch'}
-              onclick={() => wizardSetActiveJob('batch')}
-            >
-              <span class="rail-name">Batch</span>
-              <span class="badge" class:badge-info={app.wizard.batch.overrides.length > 0}>
-                {app.wizard.batch.overrides.length}
-              </span>
-            </button>
-          {/if}
-          {#each selected as source (source)}
-            <button
-              class="rail-item"
-              class:active={app.wizard.activeJob === source}
-              onclick={() => wizardSetActiveJob(source)}
-            >
-              <span class="rail-name">{source}</span>
-              <span class="badge" class:badge-info={overrideCount(source) > 0}>
-                {overrideCount(source)}
-              </span>
-            </button>
-          {/each}
-          <button class="btn btn-ghost btn-sm" onclick={() => wizardGoStep(1)}>
-            <Icon name="plus" /> Add or remove clips
-          </button>
-        </aside>
       </div>
     {/if}
   {/if}
@@ -343,7 +343,8 @@
 
   .wizard-body {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(220px, 260px);
+    /* Issue #261 item 8: the batch/jobs selection list sits on the LEFT. */
+    grid-template-columns: minmax(220px, 260px) minmax(0, 1fr);
     gap: var(--space-5);
     align-items: start;
   }

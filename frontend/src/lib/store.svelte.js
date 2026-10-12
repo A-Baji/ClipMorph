@@ -40,9 +40,10 @@ function emptyWizard() {
     extras: [], // [{ name, path }] transient out-of-folder clips
     batch: { values: {}, overrides: [] },
     jobs: {}, // source -> { values, overrides }
-    // Batch rail entry (issue #259 D10): created once more than one clip is
-    // configured, then kept for the rest of the wizard session even if the
-    // selection later drops to a single clip.
+    // Batch rail entry (issue #261 item 9): re-derived from the live
+    // selection on every change — Batch exists only while more than one clip
+    // is selected, so backing out of Configure and deselecting can never
+    // leave a ghost entry behind.
     batchEntry: false,
     activeJob: '',
     validation: null,
@@ -54,9 +55,6 @@ export const app = $state({
   ready: false,
   online: true,
   view: 'jobs',
-  // The Jobs tab's active sub-tab (issue #259 B20): "completed" (the archive)
-  // is the default surface; "queue" is the kanban board a create lands on.
-  jobsTab: 'completed',
   selectedJobId: '',
   detailTab: 'overview',
   mobileNav: false,
@@ -92,6 +90,7 @@ export const app = $state({
 
 let noticeTimer = null;
 let progressStream = null;
+let jobsStream = null;
 let validationTimer = null;
 
 /* --- E14 resume guard ------------------------------------------------------
@@ -206,16 +205,10 @@ export function setView(view) {
   app.view = view;
   if (view !== 'wizard') app.wizard.active = false;
   if (view !== 'jobs') app.selectedJobId = '';
-  if (view === 'jobs') app.jobsTab = 'completed'; // fresh entry lands on Completed (B20)
   if (view === 'metrics') loadMetrics();
   if (view === 'layouts') {
     api.listLayouts().then((items) => (app.layouts = items)).catch(report);
   }
-}
-
-/** Switch the Jobs tab's sub-tab (Completed archive / Queue board) (B20). */
-export function setJobsTab(tab) {
-  app.jobsTab = tab;
 }
 
 export function openJob(jobId) {
@@ -284,6 +277,10 @@ export async function loadWorkspace() {
     app.online = true;
     app.ready = true;
     restoreWizardDraft();
+    /* Issue #261 item 1: one listener keeps the board live; the manual
+       Refresh affordance is gone, so this stream is the status authority
+       between explicit actions. */
+    openJobsStream();
   } catch (error) {
     app.online = false;
     app.ready = true;
@@ -399,11 +396,50 @@ function openProgressStream(jobId) {
   progressStream = source;
 }
 
+/* --- Board-wide job stream (issue #261 item 1) ---------------------------- */
+
+function closeJobsStream() {
+  if (jobsStream) {
+    jobsStream.close();
+    jobsStream = null;
+  }
+}
+
+/**
+ * One EventSource over ``GET /events`` keeps every surface's statuses aligned
+ * with the live manifests the way hooks/listeners do; a post-message replaces
+ * the whole jobs list. EventSource reconnects on its own, so a transient
+ * backend restart self-heals without a manual Refresh button.
+ */
+function openJobsStream() {
+  closeJobsStream();
+  if (typeof EventSource === 'undefined') return;
+  const source = new EventSource(api.jobsEventsUrl());
+  source.onmessage = (event) => {
+    try {
+      const jobs = JSON.parse(event.data);
+      if (!Array.isArray(jobs)) return;
+      app.jobs = jobs.map((item) => {
+        // E14: keep the accepted -> queued passthrough unobservable here too.
+        settleResumeGuard(item);
+        return { ...item, status: displayStatus(item) };
+      });
+    } catch {
+      /* ignore malformed events */
+    }
+  };
+  source.onerror = () => {
+    /* EventSource retries automatically; leave the stream connected. */
+  };
+  jobsStream = source;
+}
+
 /* --- Wizard: selection --------------------------------------------------- */
 
 export function startWizard() {
+  // Issue #261 item 3: the wizard pops up as a modal over the Jobs board,
+  // so the view never leaves 'jobs'.
   app.wizard.active = true;
-  app.view = 'wizard';
   if (app.wizard.step !== 2) app.wizard.step = 1;
   else if (!wizardActiveInRail()) {
     // A restored draft landed back on step 2 with a rail entry that no
@@ -414,19 +450,13 @@ export function startWizard() {
 }
 
 export function discardWizard() {
-  // D24 (spec-review F2): the landing decision keys off what the draft still
-  // held, so capture it BEFORE the reset; the discard then clears the ENTIRE
-  // draft — the localStorage draft and the in-memory wizard state alike — so a
-  // later "New" opens an empty clip grid with no Batch entry, never a
-  // resurrected half-draft, matching the confirm dialog's own copy.
-  const hadClips = wizardSelected().length > 0;
+  // D24 (spec-review F2): clear the ENTIRE draft — the localStorage draft and
+  // the in-memory wizard state alike — so a later "New" opens an empty clip
+  // grid with no Batch entry, never a resurrected half-draft, matching the
+  // confirm dialog's own copy. The single Jobs board is the landing view.
   clearWizardDraft();
   app.wizard = emptyWizard();
   app.view = 'jobs';
-  // B20/D24 landing: a discard returns to the Completed sub-tab when the
-  // draft still had clips to configure; discarding with nothing left to
-  // configure lands on the Queue board instead.
-  app.jobsTab = hadClips ? 'completed' : 'queue';
 }
 
 /** Leave the wizard for the Jobs board while preserving the in-progress draft. */
@@ -434,7 +464,6 @@ export function leaveWizard() {
   persistWizardDraft();
   app.wizard.active = false;
   app.view = 'jobs';
-  app.jobsTab = 'completed';
 }
 
 export function wizardGoStep(step) {
@@ -444,9 +473,8 @@ export function wizardGoStep(step) {
   }
   app.wizard.step = step;
   if (step === 2) {
-    // D10: the batch rail entry exists only when more than one clip is
-    // configured, and it is the selected entry when the wizard starts.
-    if (wizardSelected().length > 1) app.wizard.batchEntry = true;
+    // D10 (re-derived, item 9): the batch rail entry is the selected entry
+    // when the wizard enters Configure with more than one clip.
     if (!wizardActiveInRail()) {
       app.wizard.activeJob = app.wizard.batchEntry ? 'batch' : wizardSelected()[0] || '';
     }
@@ -520,6 +548,9 @@ export function wizardSetActiveJob(source) {
 }
 
 function syncWizardJobs() {
+  // Issue #261 item 9: the Batch rail entry tracks the *current* selection,
+  // so a deselect that drops the count to one removes the ghost entry.
+  app.wizard.batchEntry = wizardSelected().length > 1;
   const keep = new Set(wizardSelected());
   for (const source of Object.keys(app.wizard.jobs)) {
     if (!keep.has(source)) delete app.wizard.jobs[source];
@@ -769,20 +800,16 @@ export async function createFromWizard() {
 
 /**
  * D24 rail-rebuild semantics: after creations the selected entry stays
- * selected if it still exists, otherwise it falls back to Batch (which
- * persists across dedents per D10), then to the first remaining clip. When
- * the rail's last clip is gone the wizard closes onto the Queue sub-tab.
+ * selected if it still exists, otherwise it falls back to Batch (when more
+ * than one clip remains, item 9), then to the first remaining clip. When the
+ * rail's last clip is gone the wizard closes onto the Jobs board.
  */
 function wizardMaybeRelocate() {
   if (!app.wizard.active) return;
-  // D24 landing keys off remaining CLIPS: the Batch entry persists per D10
-  // even after the selection drops to one clip, so a rail with only Batch
-  // still means "the rail's last clip is created" → Queue.
   if (!wizardSelected().length) {
     clearWizardDraft();
     app.wizard = emptyWizard();
-    app.view = 'jobs';
-    app.jobsTab = 'queue'; // D24: the last clip's create lands on Queue
+    app.view = 'jobs'; // D24: the last clip's create lands on the Jobs board
     loadWorkspace();
     return;
   }

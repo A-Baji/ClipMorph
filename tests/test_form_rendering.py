@@ -318,7 +318,9 @@ class Phase2CViewTests(unittest.TestCase):
         self.assertIn("createdNames", store)
         self.assertIn("app.wizard.selected.filter", store)
         self.assertIn("wizardMaybeRelocate", store)
-        self.assertIn("app.jobsTab = 'queue'; // D24: the last clip's create lands on Queue", store)
+        self.assertIn(
+            "app.view = 'jobs'; // D24: the last clip's create lands on the Jobs board",
+            store)
         config_form = source(CONFIG_FORM)
         self.assertIn("wizardFieldError", config_form)
         self.assertIn("field-error", config_form)

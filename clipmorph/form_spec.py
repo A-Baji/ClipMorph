@@ -24,6 +24,7 @@ from typing import Any, cast
 
 from clipmorph.configuration import DEFAULT_APP_CONFIGURATION
 from clipmorph.configuration import SCHEDULE_MODES
+from clipmorph.configuration import SCHEDULE_TIMEZONES
 from clipmorph.configuration import SUBTITLE_RENDERERS
 from clipmorph.platforms import SUPPORTED_PLATFORMS
 from clipmorph.platforms import build_platform_default_config
@@ -77,6 +78,7 @@ _FIELD_HINTS = {
     "general.clean": "Remove intermediate conversion files once a job finishes.",
     "conversion.layout_id": "Materialize a saved layout preset over the inline layout.",
     "upload.schedule.publish_at": "UTC ISO-8601 timestamp; a future instant defers publication.",
+    "upload.schedule.timezone": "Zone publish_at resolves in; unset = the platform's default timezone.",
     "upload.schedule.mode": "Who holds a future publication: ClipMorph or the platform.",
     "upload.content.tags": "Comma-separated list of tags.",
 }
@@ -87,6 +89,10 @@ _ENUM_OPTIONS = {
     "conversion.subtitles.renderer": sorted(SUBTITLE_RENDERERS),
     "upload.schedule.mode": sorted(
         mode for mode in SCHEDULE_MODES if mode is not None),
+    # Issue #261 item 13: publish timezone is a dropdown over the curated
+    # common zones; a config file may still set any IANA zone (the schema
+    # stays a nullable string).
+    "upload.schedule.timezone": list(SCHEDULE_TIMEZONES),
 }
 
 _TEXT_FIELDS = {"upload.content.description"}

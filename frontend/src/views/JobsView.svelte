@@ -1,19 +1,17 @@
 <script>
   import Icon from '../components/Icon.svelte';
   import Badge from '../components/Badge.svelte';
-  import Tabs from '../components/Tabs.svelte';
   import Progress from '../components/Progress.svelte';
   import Thumbnail from '../components/Thumbnail.svelte';
+  import EmptyState from '../components/EmptyState.svelte';
   import {
     app,
     cardAction,
     cancelScheduledAttempt,
-    loadWorkspace,
     openJob,
     openJobFolder,
     PRERUN_STATUSES,
     requestConfirm,
-    setJobsTab,
     startWizard,
   } from '../lib/store.svelte.js';
   import {
@@ -24,38 +22,74 @@
   } from '../lib/format.js';
 
   /**
-   * The Jobs tab (issue #259 B20): two sub-tabs — Completed (the archive,
-   * the default) and Queue (the kanban board). "New" lives above both
-   * sub-tabs. The board (B2/12/3) always renders its four columns; completed
-   * jobs never appear on it and never render progress bars (B19). The
-   * pre-run statuses are the store's shared list (E14) so the "queued N"
-   * sub-badge and the card chips see exactly what the board renders.
+   * The Jobs view (issue #261 items 4/5/6): one board whose columns are the
+   * real pipeline steps — Pending, Transcribe, Convert, Upload, Complete,
+   * Failed. Running / Awaiting review / Scheduled render as status badges on
+   * every card instead of columns. Clicking a column header expands that
+   * stage into a full-width card grid (the Medal-style completed card from
+   * item 2 lives here); "All stages" / Esc goes back. Statuses stay live via
+   * the store's SSE job stream (item 1), so there is no Refresh affordance.
    */
-  const COLUMNS = [
-    { id: 'running', label: 'Running', statuses: ['running', ...PRERUN_STATUSES] },
-    { id: 'awaiting_review', label: 'Awaiting review', statuses: ['awaiting_review'] },
-    { id: 'scheduled', label: 'Scheduled', statuses: ['scheduled'] },
-    { id: 'failed', label: 'Failed', statuses: ['failed', 'cancelled', 'partial_failure'] },
+
+  /** Stage → column resolution, in pipeline order. */
+  const STAGE_COLUMNS = [
+    { id: 'pending', label: 'Pending', hint: 'Accepted, not started yet' },
+    { id: 'transcribe', label: 'Transcribe', stage: 'transcript',
+      hint: 'Transcription running or awaiting review' },
+    { id: 'convert', label: 'Convert', stage: 'conversion',
+      hint: 'Conversion running or awaiting review' },
+    { id: 'upload', label: 'Upload', stage: 'upload',
+      hint: 'Uploads, including scheduled publishes' },
+    { id: 'complete', label: 'Complete', hint: 'Finished jobs' },
+    { id: 'failed', label: 'Failed', hint: 'Failed, cancelled, or partial' },
   ];
 
-  const jobsTabs = $derived([
-    { id: 'completed', label: 'Completed' },
-    // B20: the WIP count badge moved here from the sidebar item.
-    { id: 'queue', label: 'Queue', count: wipCount || null },
-  ]);
+  const FAILED_STATUSES = ['failed', 'cancelled', 'partial_failure'];
 
-  let collapsed = $state({});
+  /** How many cards a mini column previews before the full view takes over. */
+  const COLUMN_PREVIEW = 12;
 
-  const boardJobs = $derived(app.jobs.filter((job) => job.status !== 'completed'));
-  const wipCount = $derived(boardJobs.length);
-  const completedJobs = $derived(app.jobs.filter((job) => job.status === 'completed'));
-
-  function columnJobs(column) {
-    return boardJobs.filter((job) => column.statuses.includes(job.status));
+  /** The pipeline stage a job currently occupies: its furthest incomplete checkpoint. */
+  function jobColumnId(job) {
+    if (job.status === 'completed') return 'complete';
+    if (FAILED_STATUSES.includes(job.status)) return 'failed';
+    if (job.status === 'scheduled') return 'upload';
+    if (PRERUN_STATUSES.includes(job.status)) return 'pending';
+    const checkpoints = job.checkpoints || {};
+    for (const stage of ['transcript', 'conversion', 'upload']) {
+      const status = checkpoints[stage]?.status;
+      if (status && !['completed', 'skipped'].includes(status)) return stage;
+    }
+    return job.current_checkpoint || 'transcript';
   }
 
-  function columnQueuedCount(column) {
-    return columnJobs(column).filter((job) => PRERUN_STATUSES.includes(job.status)).length;
+  let focused = $state('');
+
+  function setFocused(id) {
+    focused = id;
+  }
+
+  function labelOf(id) {
+    return (STAGE_COLUMNS.find((column) => column.id === id) || {}).label || '';
+  }
+
+  function hintOf(id) {
+    return (STAGE_COLUMNS.find((column) => column.id === id) || {}).hint || '';
+  }
+
+  function stageJobs(id) {
+    return app.jobs.filter((job) => jobColumnId(job) === id);
+  }
+
+  function columnJobs(column) {
+    const jobs = stageJobs(column.id);
+    return column.id === 'complete' || column.id === 'failed'
+      ? jobs.slice(0, COLUMN_PREVIEW)
+      : jobs;
+  }
+
+  function needsFullView(column) {
+    return stageJobs(column.id).length > COLUMN_PREVIEW;
   }
 
   function jobTitle(job) {
@@ -121,172 +155,236 @@
     });
   }
 
-  function toggleColumn(id) {
-    collapsed = { ...collapsed, [id]: !collapsed[id] };
+  /** Esc returns to the Board from an expanded column when no modal is open. */
+  function onWindowKeydown(event) {
+    if (event.key !== 'Escape') return;
+    if (!focused || app.selectedJobId || app.wizard.active || app.confirm) return;
+    focused = '';
   }
 </script>
+
+<svelte:window onkeydown={onWindowKeydown} />
 
 <div class="content board-view">
   <div class="jobs-head">
     <div class="row">
-      <Tabs tabs={jobsTabs} active={app.jobsTab} onSelect={setJobsTab} />
+      {#if focused}
+        <button
+          class="btn btn-ghost btn-sm"
+          onclick={() => setFocused('')}
+          title="Back to all stages (Esc)"
+          aria-label="Back to all stages"
+        >
+          <Icon name="arrowLeft" size={14} /> All stages
+        </button>
+        <span class="focus-label">{labelOf(focused)}</span>
+      {:else}
+        <h1 class="board-hint">Pipeline</h1>
+      {/if}
     </div>
     <div class="row">
-      <button class="btn btn-ghost btn-sm" onclick={loadWorkspace}>
-        <Icon name="refresh" /> Refresh
-      </button>
+      <!-- Issue #261 item 1: the SSE job stream keeps everything live, so the
+           manual Refresh aria is removed; only New remains. -->
       <button class="btn btn-primary" onclick={startWizard}>
         <Icon name="plus" /> New
       </button>
     </div>
   </div>
 
-  {#if app.jobsTab === 'queue'}
+  {#if focused}
+    <div class="column-full" role="region" aria-label={`${labelOf(focused)} stage`}>
+      <p class="faint focus-hint">{hintOf(focused)} · {stageJobs(focused).length} job{stageJobs(focused).length === 1 ? '' : 's'}</p>
+      {#if stageJobs(focused).length}
+        <div class="card-grid">
+          {#each stageJobs(focused) as job (job.job_id)}
+            {@const sourceName = job.configuration?.general?.source}
+            {@const attempt = scheduledAttempt(job)}
+            <article class="jcard">
+              <button
+                class="jcard-main"
+                aria-label={`Open ${jobTitle(job)}`}
+                onclick={() => openJob(job.job_id)}
+              >
+                <span class="jcard-art" aria-hidden="true">
+                  <Thumbnail name={sourceName} size={110} alt="" />
+                </span>
+                <span class="jcard-title truncate">{jobTitle(job)}</span>
+                <span class="jcard-badges">
+                  <Badge tone={statusTone(job.status)}>{humanize(job.status)}</Badge>
+                  {#if attempt}
+                    <span class="badge">{humanize(attempt.platform)} · scheduled</span>
+                  {/if}
+                </span>
+                <span class="faint mono jcard-source truncate">{sourceName}</span>
+                <span class="faint jcard-time">
+                  {job.status === 'completed' ? `completed ${completedTime(job)}` : `${soonestScheduledPublish(job) || ''}`}
+                </span>
+              </button>
+              <div class="jcard-actions">
+                {#if job.status === 'completed'}
+                  <button
+                    class="btn btn-ghost btn-sm"
+                    disabled={!job.current_artifact_id}
+                    title="Reveal the exported file in its folder"
+                    aria-label={`Open the folder of ${jobTitle(job)}`}
+                    onclick={() => openJobFolder(job)}
+                  >
+                    <Icon name="external" size={14} /> Open folder
+                  </button>
+                {/if}
+                {#if canResume(job)}
+                  <button
+                    class="btn btn-ghost btn-icon"
+                    title={`${resumeLabel(job)} ${jobTitle(job)}`}
+                    aria-label={`${resumeLabel(job)} ${jobTitle(job)}`}
+                    onclick={() => cardAction(job, 'resume')}
+                  >
+                    <Icon name="play" size={14} />
+                  </button>
+                {/if}
+                {#if attempt}
+                  <button
+                    class="btn btn-ghost btn-icon"
+                    title="Cancel attempt"
+                    aria-label={`Cancel the scheduled attempt of ${jobTitle(job)}`}
+                    onclick={() => confirmCancelAttempt(job)}
+                  >
+                    <Icon name="calendarX" size={14} />
+                  </button>
+                {/if}
+                {#if canCancel(job)}
+                  <button
+                    class="btn btn-ghost btn-icon"
+                    title={`Cancel ${jobTitle(job)}`}
+                    aria-label={`Cancel ${jobTitle(job)}`}
+                    onclick={() => confirmCancel(job)}
+                  >
+                    <Icon name="x" size={14} />
+                  </button>
+                {/if}
+                <button
+                  class="btn btn-ghost btn-icon"
+                  title={`Delete ${jobTitle(job)}`}
+                  aria-label={`Delete ${jobTitle(job)}`}
+                  onclick={() => confirmDelete(job)}
+                >
+                  <Icon name="trash" size={14} />
+                </button>
+              </div>
+            </article>
+          {/each}
+        </div>
+      {:else}
+        <EmptyState
+          icon="queue"
+          title={`Nothing in ${labelOf(focused)}`}
+          message="Jobs land here as the pipeline moves them."
+        />
+      {/if}
+    </div>
+  {:else}
     <div class="board">
-      {#each COLUMNS as column (column.id)}
-        {@const jobs = columnJobs(column)}
-        {@const queuedCount = columnQueuedCount(column)}
-        <section class="column" class:collapsed={collapsed[column.id]} aria-label={column.label}>
+      {#each STAGE_COLUMNS as column (column.id)}
+        {@const jobs = stageJobs(column.id)}
+        {@const preview = columnJobs(column)}
+        <section class="column" aria-label={column.label}>
           <button
             type="button"
             class="column-head"
-            aria-expanded={!collapsed[column.id]}
-            onclick={() => toggleColumn(column.id)}
+            aria-expanded="false"
+            title={`Expand ${column.label}`}
+            onclick={() => setFocused(column.id)}
           >
             <span class="column-title">{column.label}</span>
-            {#if column.id === 'running' && queuedCount > 0}
-              <span class="badge queued-badge">queued {queuedCount}</span>
-            {/if}
             <span class="wip">{jobs.length}</span>
-            <Icon name={collapsed[column.id] ? 'chevronRight' : 'chevronDown'} size={14} />
+            <Icon name="chevronDown" size={14} />
           </button>
-          {#if !collapsed[column.id]}
-            <div class="column-body">
-              {#each jobs as job (job.job_id)}
-                {@const attempt = scheduledAttempt(job)}
-                {@const sourceName = job.configuration?.general?.source}
-                <article class="card">
-                  <button
-                    class="card-main"
-                    aria-label={`Open ${jobTitle(job)}`}
-                    onclick={() => openJob(job.job_id)}
-                  >
-                    <!-- C5: real poster frame; the icon is the fallback only. -->
-                    <Thumbnail name={sourceName} size={48} alt="" />
-                    <span class="card-text">
-                      <span class="card-title truncate">{jobTitle(job)}</span>
-                      <span class="card-meta">
-                        <Badge tone={statusTone(job.status)}>{humanize(job.status)}</Badge>
-                        {#if job.current_checkpoint}
-                          <span class="badge">{humanize(job.current_checkpoint)}</span>
-                        {/if}
-                      </span>
-                      <span class="faint mono card-source truncate">{sourceName}</span>
-                      {#if job.status === 'completed'}
-                        <!-- B19: completed jobs never render progress bars. -->
-                      {:else if app.uploadProgress[job.job_id] && Object.keys(app.uploadProgress[job.job_id]).length}
-                        {#each Object.entries(app.uploadProgress[job.job_id]) as [platform, percent] (platform)}
-                          <Progress value={percent} small label={`${platform}: ${percent}%`} />
-                        {/each}
-                      {:else if attempt}
-                        <span class="faint mono card-source truncate">{soonestScheduledPublish(job)}</span>
-                      {/if}
+          <div class="column-body">
+            {#each preview as job (job.job_id)}
+              {@const attempt = scheduledAttempt(job)}
+              {@const sourceName = job.configuration?.general?.source}
+              <article class="card">
+                <button
+                  class="card-main"
+                  aria-label={`Open ${jobTitle(job)}`}
+                  onclick={() => openJob(job.job_id)}
+                >
+                  <!-- C5: real poster frame; the icon is the fallback only. -->
+                  <Thumbnail name={sourceName} size={48} alt="" />
+                  <span class="card-text">
+                    <span class="card-title truncate">
+                      {jobTitle(job)}
                     </span>
-                  </button>
-                  <!-- C4: quick actions are one bottom row of compact icon
-                       buttons, each with a tooltip and an accessible name. -->
-                  <div class="card-actions">
-                    {#if canResume(job)}
-                      <button
-                        class="btn btn-ghost btn-icon"
-                        title={`${resumeLabel(job)} ${jobTitle(job)}`}
-                        aria-label={`${resumeLabel(job)} ${jobTitle(job)}`}
-                        onclick={() => cardAction(job, 'resume')}
-                      >
-                        <Icon name="play" size={14} />
-                      </button>
+                    <span class="card-meta">
+                      <Badge tone={statusTone(job.status)}>{humanize(job.status)}</Badge>
+                    </span>
+                    <span class="faint mono card-source truncate">{sourceName}</span>
+                    {#if job.status === 'completed'}
+                      <!-- B19: completed jobs never render progress bars. -->
+                    {:else if app.uploadProgress[job.job_id] && Object.keys(app.uploadProgress[job.job_id]).length}
+                      {#each Object.entries(app.uploadProgress[job.job_id]) as [platform, percent] (platform)}
+                        <Progress value={percent} small label={`${platform}: ${percent}%`} />
+                      {/each}
+                    {:else if attempt}
+                      <span class="faint mono card-source truncate">{soonestScheduledPublish(job)}</span>
                     {/if}
-                    {#if attempt}
-                      <button
-                        class="btn btn-ghost btn-icon"
-                        title="Cancel attempt"
-                        aria-label={`Cancel the scheduled attempt of ${jobTitle(job)}`}
-                        onclick={() => confirmCancelAttempt(job)}
-                      >
-                        <Icon name="calendarX" size={14} />
-                      </button>
-                    {/if}
-                    {#if canCancel(job)}
-                      <button
-                        class="btn btn-ghost btn-icon"
-                        title={`Cancel ${jobTitle(job)}`}
-                        aria-label={`Cancel ${jobTitle(job)}`}
-                        onclick={() => confirmCancel(job)}
-                      >
-                        <Icon name="x" size={14} />
-                      </button>
-                    {/if}
+                  </span>
+                </button>
+                <!-- C4: quick actions are one bottom row of compact icon
+                     buttons, each with a tooltip and an accessible name. -->
+                <div class="card-actions">
+                  {#if canResume(job)}
                     <button
                       class="btn btn-ghost btn-icon"
-                      title={`Delete ${jobTitle(job)}`}
-                      aria-label={`Delete ${jobTitle(job)}`}
-                      onclick={() => confirmDelete(job)}
+                      title={`${resumeLabel(job)} ${jobTitle(job)}`}
+                      aria-label={`${resumeLabel(job)} ${jobTitle(job)}`}
+                      onclick={() => cardAction(job, 'resume')}
                     >
-                      <Icon name="trash" size={14} />
+                      <Icon name="play" size={14} />
                     </button>
-                  </div>
-                </article>
-              {/each}
-              {#if !jobs.length}
-                <p class="faint column-empty">No jobs</p>
-              {/if}
-            </div>
-          {/if}
+                  {/if}
+                  {#if attempt}
+                    <button
+                      class="btn btn-ghost btn-icon"
+                      title="Cancel attempt"
+                      aria-label={`Cancel the scheduled attempt of ${jobTitle(job)}`}
+                      onclick={() => confirmCancelAttempt(job)}
+                    >
+                      <Icon name="calendarX" size={14} />
+                    </button>
+                  {/if}
+                  {#if canCancel(job)}
+                    <button
+                      class="btn btn-ghost btn-icon"
+                      title={`Cancel ${jobTitle(job)}`}
+                      aria-label={`Cancel ${jobTitle(job)}`}
+                      onclick={() => confirmCancel(job)}
+                    >
+                      <Icon name="x" size={14} />
+                    </button>
+                  {/if}
+                  <button
+                    class="btn btn-ghost btn-icon"
+                    title={`Delete ${jobTitle(job)}`}
+                    aria-label={`Delete ${jobTitle(job)}`}
+                    onclick={() => confirmDelete(job)}
+                  >
+                    <Icon name="trash" size={14} />
+                  </button>
+                </div>
+              </article>
+            {/each}
+            {#if needsFullView(column)}
+              <button class="btn btn-ghost btn-sm show-all" onclick={() => setFocused(column.id)}>
+                Show all {jobs.length}
+              </button>
+            {:else if !jobs.length}
+              <p class="faint column-empty">No jobs</p>
+            {/if}
+          </div>
         </section>
       {/each}
     </div>
-  {:else}
-    {#if completedJobs.length}
-      <div class="archive">
-        {#each completedJobs as job (job.job_id)}
-          {@const sourceName = job.configuration?.general?.source}
-          <article class="archive-row">
-            <button class="archive-main" onclick={() => openJob(job.job_id)}>
-              <!-- C5: real poster frame; the icon is the fallback only. -->
-              <Thumbnail name={sourceName} size={48} alt="" />
-              <span class="archive-main-text">
-                <b class="archive-title truncate">{jobTitle(job)}</b>
-                <span class="faint mono archive-source truncate">{sourceName}</span>
-              </span>
-              <span class="faint archive-time">completed {completedTime(job)}</span>
-            </button>
-            <div class="archive-actions">
-              <button
-                class="btn btn-ghost btn-sm"
-                disabled={!job.current_artifact_id}
-                title="Reveal the exported file in its folder"
-                aria-label={`Open the folder of ${jobTitle(job)}`}
-                onclick={() => openJobFolder(job)}
-              >
-                <Icon name="external" size={14} /> Open folder
-              </button>
-              <button
-                class="btn btn-ghost btn-icon"
-                title={`Delete ${jobTitle(job)}`}
-                aria-label={`Delete ${jobTitle(job)}`}
-                onclick={() => confirmDelete(job)}
-              >
-                <Icon name="trash" size={14} />
-              </button>
-            </div>
-          </article>
-        {/each}
-      </div>
-    {:else}
-      <div class="empty" role="status">
-        <p>Nothing completed yet — start with <strong>New</strong></p>
-      </div>
-    {/if}
   {/if}
 </div>
 
@@ -302,6 +400,22 @@
     justify-content: space-between;
     gap: var(--space-4);
     flex-wrap: wrap;
+  }
+
+  .board-hint {
+    font-size: var(--text-sm);
+    font-weight: var(--weight-semibold);
+    margin: 0;
+  }
+
+  .focus-label {
+    font-size: var(--text-md);
+    font-weight: var(--weight-semibold);
+  }
+
+  .focus-hint {
+    margin: 0 0 var(--space-2);
+    font-size: var(--text-xs);
   }
 
   /* --- Board (B3): fills the content area, columns share the full width,
@@ -321,7 +435,7 @@
     border: 1px solid var(--color-border);
     border-radius: var(--radius-md);
     flex: 1 1 0;
-    min-width: 280px;
+    min-width: 240px;
     min-height: 0;
     display: flex;
     flex-direction: column;
@@ -329,7 +443,7 @@
 
   @media (min-width: 1400px) {
     .column {
-      min-width: 220px;
+      min-width: 200px;
     }
   }
 
@@ -354,11 +468,6 @@
     white-space: nowrap;
   }
 
-  .queued-badge {
-    color: var(--color-text-muted);
-    flex-shrink: 0;
-  }
-
   .wip {
     font-family: var(--font-mono);
     font-size: var(--text-xs);
@@ -375,9 +484,13 @@
     overflow-y: auto;
   }
 
-  /* C4: the fixed card anatomy — thumbnail left, title strong, status +
-     checkpoint badges, single-line muted source, then the compact icon
-     action row; everything on the 8px rhythm. */
+  .show-all {
+    justify-self: center;
+  }
+
+  /* C4: the fixed card anatomy — thumbnail left, title strong, status badge,
+     single-line muted source, then the compact icon action row; everything on
+     the 8px rhythm. */
   .card {
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
@@ -434,64 +547,86 @@
     font-size: var(--text-xs);
   }
 
-  /* --- Completed archive (B20) --- */
-  .archive {
+  /* --- Expanded column: the full-width card grid (issue #261 items 2/6).
+         Vertical Medal-style cards: art on top, title, status badges, meta. --- */
+  .column-full {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: var(--space-3);
+    align-content: start;
+  }
+
+  .jcard {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-surface);
     display: grid;
     gap: var(--space-2);
     align-content: start;
   }
 
-  .archive-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    padding: var(--space-2) var(--space-3);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-    background: var(--color-surface);
-  }
-
-  .archive-main {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    flex: 1;
-    min-width: 0;
+  .jcard-main {
+    display: grid;
+    gap: var(--space-2);
+    padding: var(--space-2);
     background: none;
     border: none;
-    color: inherit;
     cursor: pointer;
+    color: inherit;
     text-align: left;
-    padding: 0;
-  }
-
-  .archive-main-text {
-    display: grid;
-    gap: var(--space-1);
     min-width: 0;
-    flex: 1;
   }
 
-  .archive-title {
-    font-size: var(--text-sm);
+  .jcard-art {
+    aspect-ratio: 16 / 9;
+    border-radius: var(--radius-sm);
+    background: var(--color-bg);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    width: 100%;
+  }
+
+  .jcard-art :global(.thumb) {
+    width: 100%;
+    height: 100%;
+    border-radius: 0;
+  }
+
+  .jcard-art :global(.thumb img) {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .jcard-title {
     font-weight: var(--weight-semibold);
-    /* The text node truncates inside the flex row via .truncate. */
-    flex: 1;
-  }
-
-  .archive-source {
     max-width: 100%;
   }
 
-  .archive-time {
-    font-size: var(--text-xs);
-    flex-shrink: 0;
+  .jcard-badges {
+    display: flex;
+    gap: var(--space-2);
+    flex-wrap: wrap;
   }
 
-  .archive-actions {
+  .jcard-source,
+  .jcard-time {
+    font-size: var(--text-xs);
+    max-width: 100%;
+  }
+
+  .jcard-actions {
     display: flex;
-    align-items: center;
+    flex-wrap: wrap;
     gap: var(--space-2);
-    flex-shrink: 0;
+    padding: 0 var(--space-2) var(--space-2);
   }
 </style>

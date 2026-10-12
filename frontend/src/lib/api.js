@@ -148,4 +148,6 @@ export const api = {
 
   // Live events
   eventsUrl: (id) => `${BASE}/jobs/${id}/events`,
+  /** One aggregate stream for the whole board (issue #261 item 1). */
+  jobsEventsUrl: () => `${BASE}/events`,
 };
