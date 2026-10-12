@@ -50,6 +50,12 @@
   const COLUMN_PREVIEW = 12;
 
   /** The pipeline stage a job currently occupies: its furthest incomplete checkpoint. */
+  const STAGE_OF_CHECKPOINT = {
+    transcript: 'transcribe',
+    conversion: 'convert',
+    upload: 'upload',
+  };
+
   function jobColumnId(job) {
     if (job.status === 'completed') return 'complete';
     if (FAILED_STATUSES.includes(job.status)) return 'failed';
@@ -58,9 +64,11 @@
     const checkpoints = job.checkpoints || {};
     for (const stage of ['transcript', 'conversion', 'upload']) {
       const status = checkpoints[stage]?.status;
-      if (status && !['completed', 'skipped'].includes(status)) return stage;
+      if (status && !['completed', 'skipped'].includes(status)) {
+        return STAGE_OF_CHECKPOINT[stage];
+      }
     }
-    return job.current_checkpoint || 'transcript';
+    return STAGE_OF_CHECKPOINT[job.current_checkpoint] || 'transcribe';
   }
 
   let focused = $state('');

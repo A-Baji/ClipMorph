@@ -101,16 +101,8 @@ async function main() {
       'the Topbar reads the Clip Queue header',
     );
 
-    // B20: the Completed sub-tab is the default archive view, seeded with rows.
-    assert.equal(
-      await page.getAttribute('button[role="tab"]:has-text("Completed")', 'aria-selected'),
-      'true',
-      'Completed is the default sub-tab',
-    );
-    await page.waitForSelector('article.archive-row .archive-title', { timeout: 15000 });
-
-    // Switch to the Queue sub-tab: the four-column board (B2/B12) renders.
-    await page.click('button[role="tab"]:has-text("Queue")');
+    // Issue #261: one board, no Completed/Queue sub-tabs — the six-column
+    // pipeline board is the default (items 4/5/6).
     await page.waitForSelector('div.board', { timeout: 15000 });
     const columnLabels = await page.$$eval(
       'section.column .column-title',
@@ -118,8 +110,8 @@ async function main() {
     );
     assert.deepEqual(
       columnLabels,
-      ['Running', 'Awaiting review', 'Scheduled', 'Failed'],
-      'the four board columns render in order',
+      ['Pending', 'Transcribe', 'Convert', 'Upload', 'Complete', 'Failed'],
+      'the six pipeline columns render in order',
     );
 
     // C4/C5: board cards carry the fixed anatomy — thumbnail, title, actions.
@@ -129,27 +121,23 @@ async function main() {
     const cardsBeforeBoardOnly = await page.$$eval('main.main article.card', (n) => n.length);
     assert.ok(cardsBeforeBoardOnly > 0, 'board cards are present');
 
-    // Create flow: the New action enters the clip-selection stepper.
+    // Create flow (item 3): the New action opens the wizard modal.
     await page.click('button:has-text("New")');
-    await page.waitForSelector('div.clip-grid', { timeout: 15000 });
+    await page.waitForSelector('.wizard-modal div.clip-grid', { timeout: 15000 });
 
     // Add one transient clip ("Add a clip from another folder") — the seeded
     // sources share a content hash, so a fresh file is the creation candidate.
     await page.fill('input[aria-label="Transient clip path"]', clip.file);
-    await page.click('button:has-text("Add")');
-    await page.click('button:has-text("Next: Configure")');
-    await page.waitForSelector('button:has-text("Create")', { timeout: 15000 });
-    await page.click('button:has-text("Create")');
+    await page.click('.wizard-modal button:has-text("Add")');
+    await page.click('.wizard-modal button:has-text("Next: Configure")');
+    await page.waitForSelector('.wizard-modal button:has-text("Create 1")', { timeout: 15000 });
+    await page.click('.wizard-modal button:has-text("Create 1")');
 
-    // D24/B20 landing: the last created clip leaves the rail and the app
-    // lands on the Queue sub-tab with the board visible.
-    await page.waitForSelector('div.board', { timeout: 30000 });
+    // D24 landing: the created clip leaves the rail and the modal closes
+    // onto the Jobs board (item 6). The board is live behind the overlay, so
+    // wait on the overlay's detach — not on the board.
+    await page.waitForSelector('.wizard-modal', { state: 'detached', timeout: 30000 });
     await page.waitForSelector('article.card', { timeout: 15000 });
-    assert.equal(
-      await page.getAttribute('button[role="tab"]:has-text("Queue")', 'aria-selected'),
-      'true',
-      'the create flow lands on the Queue sub-tab',
-    );
 
     assert.deepEqual(pageErrors, [], 'no uncaught page errors during the flow');
     console.log('smoke.js: fixtures -> board -> create flow OK');

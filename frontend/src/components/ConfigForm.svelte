@@ -9,19 +9,26 @@
     batchValue,
     clearBatchField,
     clearJobField,
+    clearReviewField,
     globalDefault,
     jobHasOverride,
     jobValue,
+    reviewHasOverride,
+    reviewValue,
     setBatchField,
     setJobField,
+    setReviewField,
     wizardFieldError,
   } from '../lib/store.svelte.js';
 
   /**
    * Recursive renderer for the generated configuration-form spec (issue
-   * #257). Every control is tri-state: inherit batch / inherit global
-   * default / custom. ``mode`` is "batch" for the shared block and "job"
-   * for a job's detail form; ``prefix`` namespaces per-platform paths.
+   * #257). Every control is tri-state via the reset button: inherit batch /
+   * inherit global default / custom. ``mode`` is "batch" for the shared
+   * block, "job" for a job's detail form, and "review" for the depot draft
+   * the conversion review editor edits (item 18; no tri-state badges — the
+   * reset button restores the manifest value). ``prefix`` namespaces
+   * per-platform paths.
    *
    * Row anatomy (issue #259 D6, D7): boolean controls sit immediately left
    * of their visible label inside one wrapping ``<label>``; text, number and
@@ -29,9 +36,9 @@
    * free text survives only for content title/description/tags; object
    * fields (the inline layout) never render — inline layout overrides live
    * in the Layouts editor. Sections render as collapsible ``<details>``
-   * (D9/U10): batch sections may start expanded, per-job sections start
-   * collapsed. Dry-run validation errors that name a field's config path
-   * also render inline under that field (D24).
+   * and are expanded by default (issue #261 item 7). Dry-run validation
+   * errors that name a field's config path also render inline under that
+   * field (D24).
    */
   let {
     sections = [],
@@ -48,6 +55,9 @@
 
   /** D24: the inline error for one field, mapped from its config path. */
   function fieldError(path) {
+    // Review mode has no wizard dry-run session; renderer failures surface
+    // through the shared error channel instead of per-field mapping.
+    if (mode === 'review') return '';
     return wizardFieldError(source, path, mode === 'job');
   }
 
@@ -62,20 +72,26 @@
   }
 
   function hasOverride(path) {
-    return mode === 'batch' ? batchHasOverride(path) : jobHasOverride(source, path);
+    if (mode === 'batch') return batchHasOverride(path);
+    if (mode === 'review') return reviewHasOverride(path);
+    return jobHasOverride(source, path);
   }
 
   function resolved(path) {
-    return mode === 'batch' ? batchValue(path) : jobValue(source, path);
+    if (mode === 'batch') return batchValue(path);
+    if (mode === 'review') return reviewValue(path);
+    return jobValue(source, path);
   }
 
   function write(path, value) {
     if (mode === 'batch') setBatchField(path, value);
+    else if (mode === 'review') setReviewField(path, value);
     else setJobField(source, path, value);
   }
 
   function reset(path) {
     if (mode === 'batch') clearBatchField(path);
+    else if (mode === 'review') clearReviewField(path);
     else clearJobField(source, path);
   }
 
@@ -87,6 +103,7 @@
   }
 
   function defaultDiffers(path) {
+    if (mode === 'review') return false; // no inheritance ladder on a created job
     const value = resolved(path);
     return JSON.stringify(value ?? null) !== JSON.stringify(globalDefault(path) ?? null);
   }

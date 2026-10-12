@@ -74,10 +74,8 @@ _review_tab = "text=Review"
 def open_job(page, url: str, title: str) -> None:
     page.goto(url, wait_until="domcontentloaded")
     _wait_ready(page)
-    page.get_by_text("Jobs", exact=True).first.click()
-    page.wait_for_timeout(120)
-    # Queue board contains the awaiting-review fixtures.
-    page.get_by_role("tab", name=re.compile("Queue")).click()
+    # Issue #261 item 6: the single Jobs board is the default surface and
+    # stage columns host the fixtures now (no Completed/Queue sub-tabs).
     page.wait_for_timeout(120)
     card = page.locator("article.card", has_text=title).first
     card.get_by_role("button").first.click()
@@ -184,11 +182,7 @@ def run_modal_checks(page, url: str, report: Reporter, evidence: Path) -> dict:
     page.get_by_text("Accept transcript", exact=True).click()
     # E14-DOM: sample the board while the accepted job's polls pass through;
     # a route-mocked queued passthrough must never surface as "Queued" chips
-    # or grow the Running column's "queued N" sub-badge.
-    badge_before = (
-        page.locator(".queued-badge").inner_text()
-        if page.locator(".queued-badge").count() else ""
-    )
+    # (issue #261 item 5: the legacy "queued N" sub-badge no longer exists).
     samples: list[dict] = []
 
     def sampler() -> None:
@@ -202,10 +196,7 @@ def run_modal_checks(page, url: str, report: Reporter, evidence: Path) -> dict:
             return
         badges = card.locator(".badge")
         chips = [badges.nth(i).inner_text() for i in range(badges.count())]
-        queued_badge = (
-            page.locator(".queued-badge").inner_text()
-            if page.locator(".queued-badge").count() else "")
-        samples.append({"chips": chips, "queued": queued_badge})
+        samples.append({"chips": chips})
 
     ticks = 0
     while True:
@@ -232,13 +223,10 @@ def run_modal_checks(page, url: str, report: Reporter, evidence: Path) -> dict:
     report.check(
         "E14: no poll iteration renders the accepted job as queued (board)",
         not bad_samples, json.dumps(bad_samples[:3]))
-    badge_after = (
-        page.locator(".queued-badge").inner_text()
-        if page.locator(".queued-badge").count() else "")
     report.check(
-        "E14: Running column's 'queued N' sub-badge never counts the accept",
-        not badge_after or badge_after == badge_before,
-        f"before={badge_before!r} after={badge_after!r}")
+        "E14: the legacy 'queued N' sub-badge never renders (item 5)",
+        page.locator(".queued-badge").count() == 0,
+        "queued-badge present")
 
     # --- Conversion gate (promoted fixture): player + structured data ------
     open_job(page, url, "Checkpoint fixture: awaiting_review")
@@ -321,6 +309,7 @@ def run_wizard_checks(page, url: str, report: Reporter, evidence: Path) -> dict:
     page.wait_for_timeout(150)
 
     page.get_by_role("button", name=re.compile("New")).click()
+    page.wait_for_selector(".wizard-modal", timeout=5_000)
     page.wait_for_selector(".clip-grid", timeout=5_000)
     clips = page.locator(".clip-card").all()
     names = []
@@ -374,18 +363,14 @@ def run_wizard_checks(page, url: str, report: Reporter, evidence: Path) -> dict:
     # Edit a batch-level field inside the YouTube platform node; the
     # debounced dry-run maps clip A's error to the named field inline (D24).
     # The batch pane aggregates the per-source validation set; YouTube's
-    # platform node has to be expanded for the mapped field to be on screen.
+    # platform node starts collapsed (item 7 left the outer Platform card
+    # expanded like every other section, but the rows keep their toggle).
     page.locator(".rail-item", has_text="Batch").click()
     page.wait_for_timeout(200)
-    page.locator("summary.config-summary", has_text="Platform").click()
     page.locator("button.platform-node-head", has_text="YouTube").click()
     page.wait_for_timeout(300)
-    # The per-platform options section starts collapsed (D8/D9).
-    page.locator(".platform-body summary.config-summary",
-                 has_text="YouTube options").click()
-    page.wait_for_timeout(300)
-    # A batch edit triggers the debounced dry-run; clip A's failure carries
-    # the named config path and maps inline beside the field (D24).
+    # Issue #261 item 7: config sections render expanded, so the mapped
+    # field is directly reachable.
     privacy = (page.locator(".platform-body .config-field",
                             has_text="Privacy status").first
                .locator("select"))
@@ -420,26 +405,21 @@ def run_wizard_checks(page, url: str, report: Reporter, evidence: Path) -> dict:
                  len(created_seen) == 1, f"bulk calls={len(created_seen)}")
     rail_second = page.locator(".rail-item .rail-name").all_inner_texts()
     report.check("D24: the invalid job stays on the config step",
-                 a in rail_second, f"rail={rail_second}")
-    # D24 reselection: the invalid clip is reselected; its mapped error is
-    # still reachable from the (aggregating) Batch pane after re-expanding
-    # the platform node (every reselection re-mounts the pane collapsed).
-    page.locator(".rail-item", has_text="Batch").click()
+                 a in rail_second and len(rail_second) == 1,
+                 f"rail={rail_second}")
+    # D24 reselection (item 9): one clip remains, so the Batch entry is gone —
+    # the remaining entry stays selectable and keeps its mapped inline error.
+    page.locator(".rail-item", has_text=a).click()
     page.wait_for_timeout(300)
-    page.locator("summary.config-summary", has_text="Platform").click()
     page.locator("button.platform-node-head", has_text="YouTube").click()
     page.wait_for_timeout(200)
-    page.locator(".platform-body summary.config-summary",
-                 has_text="YouTube options").click()
-    page.wait_for_timeout(200)
     report.check("D24: reselection keeps the remaining entry selectable",
-                 page.locator(".rail-item.active",
-                              has_text="Batch").count() >= 1
+                 page.locator(".rail-item.active", has_text=a).count() >= 1
                  and page.locator(".field-error").count() > 0,
-                 "batch pane or field error missing")
+                 "entry or field error missing")
 
     # Make it valid, create the last clip: the rail empties and the app
-    # lands on the Queue sub-tab (D24 last-clip landing).
+    # lands on the Jobs board (D24 last-clip landing, item 6 single view).
     page.unroute("**/api/v1/jobs/validate")
 
     def validate_all(route):
@@ -451,15 +431,17 @@ def run_wizard_checks(page, url: str, report: Reporter, evidence: Path) -> dict:
     page.wait_for_timeout(1_000)
     report.check("D24: the final valid clip is submitted once",
                  len(created_seen) == 2, f"bulk calls={len(created_seen)}")
-    report.check("D24: last clip's create lands on the Queue sub-tab",
-                 page.locator("button.tab[aria-selected='true']"
-                              ).filter(has_text="Queue").count() >= 1,
-                 "active tab is not Queue")
+    report.check("D24: last clip's create lands on the Jobs board",
+                 page.locator(".wizard-modal").count() == 0
+                 and page.locator(".board").count() >= 1,
+                 "wizard-modal or board missing")
     report.check("D24: the wizard exited the config step",
                  page.locator(".rail").count() == 0)
 
-    # Discard landing: a wizard with remaining clips discards onto Completed.
+    # Discard landing: a draft with remaining clips discards and the New
+    # modal closes onto the Jobs board.
     page.get_by_role("button", name=re.compile("New")).click()
+    page.wait_for_selector(".wizard-modal", timeout=5_000)
     page.wait_for_selector(".clip-grid", timeout=5_000)
     page.locator(".clip-card").first.click()
     page.get_by_text("Next: Configure").click()
@@ -467,10 +449,9 @@ def run_wizard_checks(page, url: str, report: Reporter, evidence: Path) -> dict:
     page.get_by_text("Discard draft").first.click()
     page.get_by_role("button", name="Discard draft").last.click()  # confirm
     page.wait_for_timeout(400)
-    report.check("D24/B20: a discard with clips left returns to Completed",
-                 page.locator("button.tab[aria-selected='true']"
-                              ).filter(has_text="Completed").count() >= 1,
-                 "active tab is not Completed")
+    report.check("D24: a discard with clips left closes the New modal",
+                 page.locator(".wizard-modal").count() == 0,
+                 "new modal still open after discard")
 
     if evidence:
         page.locator("div.content").first.screenshot(

@@ -1,28 +1,32 @@
-"""Issue #259 board / scroll-model / empty-state verification (finding F3).
+"""Issue #261 board / scroll-model / empty-state verification.
 
-Turns the Phase 3 re-audit's hand-driven DOM numbers from
-docs/ux-audit-259.md into committed, re-runnable assertions:
+Re-derivable assertions over the seeded fixtures (tests/e2e/harness.py
+--scenario empty|states), updated for the merged Jobs view:
 
-- B2  the empty fixture renders exactly the four columns with "No jobs"
-       placeholders inside each.
+- B2  the empty fixture renders exactly the six pipeline columns (Pending,
+      Transcribe, Convert, Upload, Complete, Failed — item 4) with a
+      "No jobs" placeholder in each.
 - B3  no page-level horizontal scrollbar at 1920 / 1366 / 1024; at >=1400px
-       the board container itself does not scroll horizontally, below 1400px
-       it scrolls internally.
-- B12 no "Queued" column; the states fixture renders queued jobs under
-       Running with a "queued N" sub-badge.
-- B19 completed jobs render with no `.progress` elements (Completed archive).
-- A1  the remaining empty-state prompts render: Completed archive, clip
-       selection grid, Metrics, and Layouts.
+      the board container itself does not scroll horizontally, below 1400px
+      it scrolls internally.
+- B12 the states fixture hallows no legacy columns: Running / Awaiting
+      review / Scheduled do not exist as columns (item 5 — they are card
+      badges now), and pre-run jobs render under Pending.
+- B19 completed jobs render with no `.progress` elements in the Complete
+      column (B19 held after the item 2/6 card-grid migration).
+- A1  the remaining empty-state prompts render: the expanded empty column
+      (the old Completed archive default), Metrics, Layouts, and the New
+      modal's empty clip grid.
 - D10 a single-clip selection yields a rail with exactly one entry and no
-      Batch entry.
+      Batch entry, and (item 9) deselecting back to one clip from two drops
+      the Batch entry.
 - F1  the modal artifact row's "more" menu keeps the raw download (F21's
       "Download stays in the row menu" while "Open folder" is the affordance).
-- F2  a discarded draft does not resurrect: "New" after a discard opens an
-      empty (unchecked) clip grid, and a fresh single-clip selection still
-      has no Batch entry.
+- F2  a discarded draft does not resurrect: "New" (a modal pop-up, item 3)
+      after a discard opens an empty, unchecked clip grid, and a fresh
+      single-clip selection still has no Batch entry.
 
-Driven against the same seeded fixtures as the audit
-(``tests/e2e/harness.py --scenario states|empty``). Run:
+Run:
 
     python tests/e2e/verify_board.py
 """
@@ -40,7 +44,8 @@ for candidate in (str(TESTS_DIR), str(Path(__file__).resolve().parent)):
 
 import harness  # noqa: E402
 
-COLUMNS = ["Running", "Awaiting review", "Scheduled", "Failed"]
+COLUMNS = [
+    "Pending", "Transcribe", "Convert", "Upload", "Complete", "Failed"]
 VIEWPORTS = {
     "desktop": {"width": 1920, "height": 1080},
     "laptop": {"width": 1366, "height": 768},
@@ -69,11 +74,6 @@ def _wait_ready(page):
     )
 
 
-def _open_queue_tab(page) -> None:
-    page.get_by_role("tab", name=re.compile("^Queue")).first.click()
-    page.wait_for_timeout(150)
-
-
 def _page_scrolls(page) -> bool:
     return page.evaluate(
         "() => document.documentElement.scrollWidth"
@@ -89,26 +89,31 @@ def _board_scrolls(page):
     )
 
 
+def _column(page, label: str):
+    return page.locator(f"section.column[aria-label='{label}']")
+
+
 def run_empty_board(page, url: str, report: Reporter) -> None:
     page.goto(url, wait_until="domcontentloaded")
     _wait_ready(page)
-    _open_queue_tab(page)
     titles = page.locator("section.column .column-title").all_inner_texts()
-    report.check("B2 empty: exactly the four columns render",
+    report.check("B2 empty: exactly the six pipeline columns render",
                  titles == COLUMNS, f"titles={titles}")
     empties = page.locator("section.column .column-empty",
                            has_text="No jobs").count()
     report.check("B2 empty: each column shows its 'No jobs' placeholder",
-                 empties == 4, f"empties={empties}")
-    report.check("B12 empty: no 'Queued' column exists",
-                 page.locator("section.column", has_text="Queued").count() == 0,
-                 "queued column present")
+                 empties == 6, f"empties={empties}")
+    report.check("B2 empty: no legacy status columns render",
+                 page.locator(
+                     "section.column[aria-label='Running'], "
+                     "section.column[aria-label='Awaiting review'], "
+                     "section.column[aria-label='Scheduled']").count() == 0,
+                 "legacy columns present")
 
 
 def run_scroll_model(page, url: str, report: Reporter) -> None:
     page.goto(url, wait_until="domcontentloaded")
     _wait_ready(page)
-    _open_queue_tab(page)
     for vp_name, vp in VIEWPORTS.items():
         page.set_viewport_size(vp)
         page.wait_for_timeout(150)
@@ -128,32 +133,32 @@ def run_scroll_model(page, url: str, report: Reporter) -> None:
 def run_board_state_checks(page, url: str, report: Reporter) -> None:
     page.goto(url, wait_until="domcontentloaded")
     _wait_ready(page)
-    _open_queue_tab(page)
-    badge = page.locator("section.column .queued-badge").first
-    report.check("B12 states: queued jobs render under Running with a "
-                 "'queued N' sub-badge",
-                 badge.count() >= 1
-                 and re.fullmatch(r"queued \d+", badge.inner_text().strip())
-                 is not None,
-                 f"badge={badge.count() and badge.inner_text()}")
-    # B19: the Completed archive renders completed jobs without progress bars.
-    page.get_by_role("tab", name=re.compile("^Completed")).first.click()
-    page.wait_for_timeout(150)
-    report.check("B19: completed archive rows render no progress bars",
-                 page.locator(".archive .progress").count() == 0,
-                 ".progress found in archive")
-    report.check("A1 archive: Completed default shows the archive",
-                 page.locator(".archive-row").count() >= 1,
-                 "no archive rows")
+    # Item 5: the states fixture renders a card badge per job status chip
+    # inside each stage column; pre-run jobs live under Pending.
+    pending = _column(page, "Pending")
+    report.check("B12 states: pre-run jobs render in the Pending column",
+                 pending.locator(".card-main").count() >= 1,
+                 "no pre-run card in Pending")
+    report.check("B12 states: no 'queued N' sub-badge remains on cards",
+                 page.locator(".queued-badge").count() == 0,
+                 "queued-badge present")
+    # B19: completed jobs render in the Complete column with no progress
+    # bars (they render as chips + actions, B19's letter).
+    complete = _column(page, "Complete")
+    report.check("B19: the Complete column renders completed jobs "
+                 "with no progress bars",
+                 complete.locator(".card-main").count() >= 1
+                 and complete.locator(".progress").count() == 0,
+                 "progress bar on a completed card")
 
 
 def run_artifact_row_menu(page, url: str, report: Reporter) -> None:
     """F1/F21: the modal artifact row keeps raw download in its "more" menu."""
     page.goto(url, wait_until="domcontentloaded")
     _wait_ready(page)
-    # The Completed archive's first row opens the detail modal on Overview,
+    # The Complete column's first card opens the detail modal on Overview,
     # whose Artifacts card hosts the row.
-    page.locator("article.archive-row button.archive-main").first.click()
+    _column(page, "Complete").locator(".card-main").first.click()
     page.wait_for_selector("div.detail-modal", timeout=5_000)
     page.wait_for_timeout(200)
     page.locator("button.tab", has_text="Overview").click()
@@ -171,12 +176,33 @@ def run_artifact_row_menu(page, url: str, report: Reporter) -> None:
                      "no Download item in the row menu")
 
 
+def run_column_expand_and_back(page, url: str, report: Reporter) -> None:
+    """Item 6: header-click expands the column into the full card grid; the
+    back affordance (header button, Esc) returns to the All view."""
+    page.goto(url, wait_until="domcontentloaded")
+    _wait_ready(page)
+    _column(page, "Complete").locator(".column-head").click()
+    page.wait_for_timeout(200)
+    report.check("item 6: the expanded column shows the full card grid",
+                 page.locator(".jcard").count() >= 1, "no cards in full view")
+    report.check("item 6: the expanded view carries the back affordance",
+                 page.get_by_role("button",
+                                  name="Back to all stages").count() == 1,
+                 "back button missing")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(200)
+    report.check("item 6: Esc returns to the All view",
+                 page.locator(".board").count() >= 1, "board not restored")
+
+
 def run_empty_prompts(page, url: str, report: Reporter) -> None:
     page.goto(url, wait_until="domcontentloaded")
     _wait_ready(page)
-    report.check("A1 archive: empty-Completed prompt renders",
-                 page.get_by_text("Nothing completed yet").count() >= 1,
-                 "prompt missing")
+    _column(page, "Complete").locator(".column-head").click()
+    page.wait_for_timeout(200)
+    report.check("A1 complete: the expanded empty column prompts the user",
+                 page.get_by_text("Nothing in Complete").count() >= 1,
+                 "expanded-column empty prompt missing")
     page.get_by_text("Metrics", exact=True).first.click()
     page.wait_for_timeout(150)
     report.check("A1 metrics: empty state prompts the user",
@@ -190,6 +216,7 @@ def run_empty_prompts(page, url: str, report: Reporter) -> None:
     page.get_by_text("Jobs", exact=True).first.click()
     page.wait_for_timeout(150)
     page.get_by_role("button", name=re.compile("New")).first.click()
+    page.wait_for_selector(".wizard-modal", timeout=5_000)
     page.wait_for_timeout(150)
     report.check("A1 clips: empty clip grid prompts the user",
                  page.get_by_text("No clips in your source folder yet")
@@ -202,33 +229,46 @@ def run_single_clip_and_discard(page, url: str, report: Reporter) -> None:
     page.goto(url, wait_until="domcontentloaded")
     _wait_ready(page)
     page.get_by_role("button", name=re.compile("New")).first.click()
+    page.wait_for_selector(".wizard-modal", timeout=5_000)
     page.wait_for_timeout(150)
-    # D10: a single-clip selection has no Batch rail entry.
+    # D10 + item 9: the rail tracks the live selection. Start with two clips
+    # (a Batch entry exists), then drop to one from the clips step.
     page.get_by_role("button", name="Clear").first.click()
-    first_clip = page.locator("label.clip-card input").first
-    first_clip.check()
+    clips = page.locator("label.clip-card input")
+    clips.first.check()
+    clips.nth(1).check()
     page.wait_for_timeout(80)
     page.get_by_role("button", name=re.compile(r"Next: Configure")).click()
     page.wait_for_timeout(300)
     names = page.locator(".rail-item .rail-name").all_inner_texts()
-    report.check("D10: single-clip rail has exactly one entry",
-                 len(names) == 1, f"rail={names}")
-    report.check("D10: single-clip rail has no Batch entry",
-                 page.locator(".rail-item", has_text="Batch").count() == 0,
-                 "Batch present")
+    report.check("item 9: two clips produce a Batch entry plus both clips",
+                 len(names) == 3, f"rail={names}")
+
+    # Item 9: returning to clips and deselecting removes the ghost entry.
+    page.get_by_role("button", name=re.compile(r"Back to clips")).click()
+    page.wait_for_timeout(150)
+    page.locator("label.clip-card.selected input").first.uncheck()
+    page.wait_for_timeout(150)
+    page.get_by_role("button", name=re.compile(r"Next: Configure")).click()
+    page.wait_for_timeout(300)
+    names = page.locator(".rail-item .rail-name").all_inner_texts()
+    report.check("item 9: deselecting back to one clip drops the Batch entry",
+                 len(names) == 1
+                 and not any("Batch" in name for name in names),
+                 f"rail after deselect={names}")
 
     # F2: discard must clear the WHOLE draft — in-memory and local — so a
     # later "New" opens an empty clip grid with nothing pre-checked.
     page.get_by_role("button", name="Discard draft").first.click()
     page.wait_for_timeout(150)
     page.locator(".modal").get_by_role("button", name="Discard draft").click()
-    page.wait_for_selector(".step-panel", state="detached", timeout=10_000)
-    report.check("F2: discard returns to the Jobs view",
-                 page.locator("label.clip-card").count() == 0
+    page.wait_for_selector(".wizard-modal", state="detached", timeout=10_000)
+    report.check("F2: discard closes the New modal",
+                 page.locator(".wizard-modal").count() == 0
                  and page.locator(".rail").count() == 0,
                  "wizard still open after discard")
     page.get_by_role("button", name=re.compile("New")).first.click()
-    page.wait_for_selector(".step-panel", timeout=10_000)
+    page.wait_for_selector(".wizard-modal", timeout=10_000)
     selected = page.locator("label.clip-card.selected").count()
     report.check("F2: 'New' after discard shows an empty, unchecked clip grid",
                  selected == 0, f"pre-checked cards={selected}")
@@ -258,6 +298,7 @@ def main() -> int:
             page = browser.new_page(viewport=dict(VIEWPORTS["desktop"]))
             run_scroll_model(page, server.url, report)
             run_board_state_checks(page, server.url, report)
+            run_column_expand_and_back(page, server.url, report)
             run_single_clip_and_discard(page, server.url, report)
             run_artifact_row_menu(page, server.url, report)
             page.close()

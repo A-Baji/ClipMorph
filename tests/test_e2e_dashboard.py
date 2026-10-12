@@ -83,18 +83,19 @@ class DashboardBrowserTests(unittest.TestCase):
                         page = browser.new_page(viewport=viewport)
                         page.goto(f"http://127.0.0.1:{self.port}/")
                         page.wait_for_load_state("networkidle")
-                        # Step 1: clip selection only, from the board's New button.
+                        # Step 1: clip selection only, from the board's New
+                        # button — now a modal pop-up (issue #261 item 3).
                         page.get_by_role("button", name="New").click()
+                        page.locator(".wizard-modal").wait_for()
                         page.get_by_label("wizard.mp4").check()
                         page.get_by_role("button", name="Next: Configure").click()
                         # Step 2: the spec-driven single config pane (issue
-                        # #259 D10). Sections start collapsed (D9); expand the
-                        # Upload section to reach Title. Editing a field
-                        # triggers debounced live validation.
-                        sections = page.locator(".detail .pane-sections")
-                        # D9: sections start collapsed; expand Upload > Content.
-                        sections.locator("summary", has_text="Upload").first.click()
-                        sections.locator("summary", has_text="Content").first.click()
+                        # #259 D10, rail left per item 8). Sections are
+                        # expanded by default (item 7), so Content's Title is
+                        # directly reachable. Editing a field triggers
+                        # debounced live validation.
+                        sections = page.locator(
+                            ".wizard-modal .detail .pane-sections")
                         job_form = sections
                         with page.expect_response(
                                 lambda response: response.url.endswith(
@@ -116,6 +117,9 @@ class DashboardBrowserTests(unittest.TestCase):
             wizard_source.unlink(missing_ok=True)
 
     def test_review_ui_edits_transcript_and_upload_draft(self):
+        """The merged Review tab (issue #261 items 16/19): both gates drive
+        the same tab — the transcript editor via Save edits, and the upload
+        draft directly in the tab that used to be Publish."""
         service = self.app.state.job_service
         manifest = service.create_job("clip.mp4", {})
         session = create_edit_session(
@@ -126,78 +130,104 @@ class DashboardBrowserTests(unittest.TestCase):
             manifest.job_id, session, expected_revision=0,
             expected_checkpoint_revision=manifest.checkpoints["transcript"]["revision"])
 
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch()
-            try:
-                page = browser.new_page(viewport=DESKTOP_VIEWPORT)
-                page.goto(f"http://127.0.0.1:{self.port}/")
-                page.wait_for_load_state("networkidle")
-                # Depth is one deliberate step: the fresh entry is the
-                # Completed sub-tab (issue #259 B20); the new job lives on the
-                # Queue board, so switch, then open the card modal, then Review.
-                page.get_by_role("tab", name="Queue").click()
-                page.locator(".card-main").first.click()
-                page.get_by_role("tab", name="Review").click()
-                page.get_by_label("Segment 1 start time").fill("0.25")
-                page.get_by_label("Segment 1 end time").fill("1.5")
-                page.get_by_label("Transcript segment 1").fill("After")
-                page.locator(".segment-typography summary").click()
-                page.get_by_label("Segment 1 font size").fill("32")
-                page.get_by_label("Segment 1 italic").check()
-                with page.expect_response(
-                        lambda response: response.url.endswith(
-                            f"/api/v1/jobs/{manifest.job_id}/transcript")
-                        and response.request.method == "PUT") as transcript_response:
-                    page.get_by_role("button", name="Save transcript revision").click()
-                saved_session = transcript_response.value.json()
-                self.assertEqual(saved_session["segments"][0]["start"], 0.25)
-                self.assertEqual(saved_session["segments"][0]["typography"]["size"], 32)
-                self.assertTrue(saved_session["segments"][0]["typography"]["italic"])
+        draft_source = self.source_dir / "draft.mp4"
+        draft_source.write_bytes(b"draft source")
+        try:
+            draft_manifest = service.create_job("draft.mp4", {
+                # The conversion stage is skipped, so the pipeline's next
+                # review gate is the upload draft itself.
+                "conversion": {"skip": True, "subtitles": {"skip": True}},
+            })
+            draft = service.get_job(draft_manifest.job_id)
+            # upload: pending -> awaiting_review is a legal transition; the
+            # gate is what the merged Review tab renders (item 19).
+            draft.transition_checkpoint(
+                "upload", "awaiting_review",
+                draft.checkpoints["upload"]["revision"], service.jobs_dir)
+            draft.set_status("awaiting_review", service.jobs_dir)
 
-                # E22 (#259): there is no "Job layout JSON" raw composition
-                # editor on any review surface; the composition card renders
-                # labeled structured sections instead.
-                self.assertNotIn("Job layout JSON",
-                                 page.locator(".detail-modal").inner_text())
-                self.assertNotIn(
-                    "Save job composition",
-                    page.locator(".detail-modal").inner_text())
-                self.assertEqual(
-                    page.locator(".composition-block").count(), 0)
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch()
+                try:
+                    page = browser.new_page(viewport=DESKTOP_VIEWPORT)
+                    page.goto(f"http://127.0.0.1:{self.port}/")
+                    page.wait_for_load_state("networkidle")
+                    # Single Jobs view (item 6): no Completed/Queue tabs —
+                    # the board is the default surface; open the card modal.
+                    page.locator(".card-main", has_text="clip").first.click()
+                    page.get_by_role("tab", name="Review").click()
+                    page.get_by_label("Segment 1 start time").fill("0.25")
+                    page.get_by_label("Segment 1 end time").fill("1.5")
+                    page.get_by_label("Transcript segment 1").fill("After")
+                    page.locator(".segment-typography summary").click()
+                    page.get_by_label("Segment 1 font size").fill("32")
+                    page.get_by_label("Segment 1 italic").check()
+                    with page.expect_response(
+                            lambda response: response.url.endswith(
+                                f"/api/v1/jobs/{manifest.job_id}/transcript")
+                            and response.request.method == "PUT") as transcript_response:
+                        page.get_by_role("button", name="Save edits").click()
+                    saved_session = transcript_response.value.json()
+                    self.assertEqual(saved_session["segments"][0]["start"], 0.25)
+                    self.assertEqual(saved_session["segments"][0]["typography"]["size"], 32)
+                    self.assertTrue(saved_session["segments"][0]["typography"]["italic"])
 
-                # The transcript gate's accept action stays the accent button
-                # (E16) and completes the review (E13: it closes the modal).
-                accept_class = page.get_by_text(
-                    "Accept transcript", exact=True).get_attribute("class")
-                self.assertTrue(accept_class and "btn btn-primary" in accept_class)
+                    # E22 (#259): there is no "Job layout JSON" raw composition
+                    # editor on any review surface; the composition card renders
+                    # labeled structured sections instead.
+                    self.assertNotIn("Job layout JSON",
+                                     page.locator(".detail-modal").inner_text())
+                    self.assertNotIn(
+                        "Save job composition",
+                        page.locator(".detail-modal").inner_text())
+                    self.assertEqual(
+                        page.locator(".composition-block").count(), 0)
 
-                page.get_by_role("tab", name="Publish").click()
-                page.get_by_label("Upload description").fill("Upload description")
-                page.get_by_label("Upload tags").fill("one, two")
-                page.get_by_label("Upload schedule for").fill("2027-03-04T05:06")
-                self.assertEqual(page.get_by_label("Upload description").input_value(),
-                                 "Upload description")
-                checkpoint = service.get_job(manifest.job_id).checkpoints["upload"]
-                with page.expect_response(
-                        lambda response: response.url.endswith(
-                            f"/api/v1/jobs/{manifest.job_id}/checkpoints/upload")
-                        and response.request.method == "PUT") as draft_response:
-                    page.get_by_role("button", name="Save draft").click()
-                self.assertEqual(draft_response.value.status, 200)
-                saved_job = service.get_job(manifest.job_id)
-                self.assertEqual(saved_job.configuration["upload"]["content"][
-                    "description"], "Upload description")
-                self.assertEqual(saved_job.configuration["upload"]["content"][
-                    "tags"], ["one", "two"])
-                # The browser sends UTC; this checks the local-time round trip.
-                scheduled = saved_job.configuration["upload"]["schedule"]["publish_at"]
-                self.assertEqual(
-                    datetime.fromisoformat(scheduled).astimezone().strftime(
-                        "%Y-%m-%dT%H:%M"), "2027-03-04T05:06")
-                self.assertGreaterEqual(
-                    saved_job.checkpoints["upload"]["revision"], checkpoint["revision"])
-            finally:
-                browser.close()
+                    # The transcript gate's accept action stays the accent
+                    # button (E16).
+                    accept_class = page.get_by_text(
+                        "Accept transcript", exact=True).get_attribute("class")
+                    self.assertTrue(
+                        accept_class and "btn btn-primary" in accept_class)
+
+                    # Item 19: the upload draft gate renders inside the
+                    # Review tab — no Publish tab exists any more.
+                    self.assertEqual(
+                        page.locator("button.tab", has_text="Publish").count(), 0)
+                    page.keyboard.press("Escape")  # close the detail modal
+                    page.locator(".detail-modal").wait_for(state="detached")
+                    page.locator(".card-main", has_text="draft").first.click()
+                    page.get_by_role("tab", name="Review").click()
+                    page.get_by_label("Upload description").fill("Upload description")
+                    page.get_by_label("Upload tags").fill("one, two")
+                    page.get_by_label("Upload schedule for").fill("2027-03-04T05:06")
+                    self.assertEqual(
+                        page.get_by_label("Upload description").input_value(),
+                        "Upload description")
+                    checkpoint = service.get_job(
+                        draft_manifest.job_id).checkpoints["upload"]
+                    with page.expect_response(
+                            lambda response: response.url.endswith(
+                                f"/api/v1/jobs/{draft_manifest.job_id}/checkpoints/upload")
+                            and response.request.method == "PUT") as draft_response:
+                        page.get_by_role("button", name="Save draft").click()
+                    self.assertEqual(draft_response.value.status, 200)
+                    saved_job = service.get_job(draft_manifest.job_id)
+                    self.assertEqual(saved_job.configuration["upload"]["content"][
+                        "description"], "Upload description")
+                    self.assertEqual(saved_job.configuration["upload"]["content"][
+                        "tags"], ["one", "two"])
+                    # The browser sends UTC; this checks the local-time round trip.
+                    scheduled = saved_job.configuration["upload"]["schedule"]["publish_at"]
+                    self.assertEqual(
+                        datetime.fromisoformat(scheduled).astimezone().strftime(
+                            "%Y-%m-%dT%H:%M"), "2027-03-04T05:06")
+                    self.assertGreaterEqual(
+                        saved_job.checkpoints["upload"]["revision"], checkpoint["revision"])
+                finally:
+                    browser.close()
+        finally:
+            draft_source.unlink(missing_ok=True)
 
 
     def test_metrics_view_renders_cross_job_table_with_deltas(self):

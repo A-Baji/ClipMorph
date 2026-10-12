@@ -257,6 +257,14 @@
     gap: var(--space-4);
     margin-bottom: var(--space-5);
     flex-wrap: wrap;
+    /* The wizard lives in the New modal (issue #261 item 3) whose body
+       scrolls; the action header (Back / Discard / Create) stays reachable
+       while the panes scroll beneath it. */
+    position: sticky;
+    top: calc(-1 * var(--space-6));
+    padding: var(--space-4) 0;
+    background: var(--color-bg);
+    z-index: 2;
   }
 
   .steps {

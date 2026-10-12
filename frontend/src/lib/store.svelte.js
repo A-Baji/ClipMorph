@@ -74,6 +74,7 @@ export const app = $state({
   platformSummaries: {},
   uploadProgress: {},
   transcript: null,
+  reviewDraft: { values: {}, overrides: [] },
   wizard: emptyWizard(),
   publish: {
     draft: emptyDraft(),
@@ -214,6 +215,7 @@ export function setView(view) {
 export function openJob(jobId) {
   app.selectedJobId = jobId;
   app.detailTab = 'overview';
+  resetReviewDraft(); // item 18: the conversion draft is per job
   loadJobDetails().catch(report);
 }
 
@@ -982,6 +984,68 @@ export async function acceptCheckpoint(stage, group) {
   } catch (error) {
     report(error);
     return false;
+  }
+}
+
+/* --- Review: editable conversion draft (issue #261 item 18) ---------------- */
+
+function resetReviewDraft() {
+  app.reviewDraft = { values: {}, overrides: [] };
+}
+
+export function reviewHasOverride(path) {
+  return app.reviewDraft.overrides.includes(path);
+}
+
+/** The review editor's resolved value: the local draft override, else the
+    job's current configuration. A created job has no batch tri-state — its
+    configuration is already materialized. */
+export function reviewValue(path) {
+  if (app.reviewDraft.overrides.includes(path)) {
+    return getPath(app.reviewDraft.values, path);
+  }
+  return getPath(selectedJob()?.configuration, path);
+}
+
+export function setReviewField(path, value) {
+  upsert(app.reviewDraft, path, value);
+}
+
+export function clearReviewField(path) {
+  removeOverride(app.reviewDraft, path);
+}
+
+export function reviewDirty() {
+  return app.reviewDraft.overrides.length > 0;
+}
+
+/**
+ * "Apply changes & re-render" (item 18): PATCH the edited conversion slice
+ * into the job (hash-guarded, validated server-side, and the invalidation
+ * cascade stales + bumps the conversion checkpoint), then re-render. The gate
+ * re-lands on awaiting_review with the new artifact — the SSE stream keeps
+ * every surface live — and Accept advances from the new revision.
+ */
+export async function renderReview(group) {
+  const job = selectedJob();
+  if (!job) return;
+  try {
+    if (reviewDirty()) {
+      const conversion = clone(job.configuration?.conversion || {});
+      for (const path of app.reviewDraft.overrides) {
+        setPath(conversion, path, getPath(app.reviewDraft.values, path));
+      }
+      const updated = await api.patchJobConfiguration(job.job_id, {
+        patch: { conversion },
+        expected_configuration_hash: job.current_configuration_hash,
+      });
+      acceptFetchedJob(updated);
+      resetReviewDraft();
+      notify('Conversion config applied');
+    }
+    await jobAction('render', group);
+  } catch (error) {
+    report(error);
   }
 }
 
