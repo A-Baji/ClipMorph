@@ -1376,8 +1376,22 @@ details.advanced .advanced-body {
     border: 1px solid var(--color-border);
     border-radius: var(--radius-md);
     padding: var(--space-3) var(--space-4);
-    margin: 0 0 var(--space-3);
+    margin: 0;
     background: var(--color-surface);
+  }
+
+  /* Issue #261 review P2-5: the section-card gap lives on the container, so
+     top-level panes, per-platform rows, and the review editor's nested
+     config share one rhythm. */
+  .pane-sections,
+  .config-stack,
+  .config-subsections {
+    display: grid;
+    gap: var(--space-3);
+  }
+
+  .config-subsections {
+    margin-top: var(--space-2);
   }
 
   .config-summary {

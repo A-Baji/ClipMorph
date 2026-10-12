@@ -309,14 +309,16 @@
       {/each}
     </div>
     {#if section.sections}
-      <SelfConfigForm
-        sections={section.sections}
-        {mode}
-        {source}
-        {prefix}
-        depth={depth + 1}
-        {open}
-      />
+      <div class="config-subsections">
+        <SelfConfigForm
+          sections={section.sections}
+          {mode}
+          {source}
+          {prefix}
+          depth={depth + 1}
+          {open}
+        />
+      </div>
     {/if}
   </details>
 {/each}

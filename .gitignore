@@ -5,6 +5,8 @@
 .vscode/
 frontend/node_modules/
 docs/audit/
+# The qa:ui gate screenshots its states; only the script + config are tracked.
+tests/qa/qa-out/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

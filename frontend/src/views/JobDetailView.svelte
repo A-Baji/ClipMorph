@@ -501,7 +501,9 @@
                    names what the draft edits. -->
               <div class="composition-block">
                 <div class="composition-title">Conversion config</div>
-                <ConfigForm sections={reviewFormSections} mode="review" />
+                <div class="config-stack">
+                  <ConfigForm sections={reviewFormSections} mode="review" />
+                </div>
               </div>
             {/if}
 

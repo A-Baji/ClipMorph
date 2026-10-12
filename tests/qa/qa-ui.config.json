@@ -1,0 +1,97 @@
+{
+  "viewports": [[1920, 1080], [1366, 768], [1024, 768]],
+  "axeViewport": 1366,
+  "states": [
+    {
+      "name": "board",
+      "scenario": "states",
+      "ready": ".board article.card .card-main",
+      "crops": [".jobs-head", "article.card"]
+    },
+    {
+      "name": "column-full-grid",
+      "scenario": "states",
+      "ready": ".jcard .jcard-title",
+      "actions": [
+        { "click": "section.column[aria-label='Complete'] .column-head" },
+        { "wait": 400 }
+      ],
+      "crops": [".jobs-head", ".jcard"]
+    },
+    {
+      "name": "new-modal-clips",
+      "scenario": "states",
+      "ready": ".wizard-modal div.clip-grid",
+      "actions": [{ "click": "main.main button:has-text('New')" }],
+      "crops": [".wizard-modal .wizard-head", ".wizard-modal .transient"]
+    },
+    {
+      "name": "new-modal-configure",
+      "scenario": "states",
+      "ready": ".wizard-modal .rail-item",
+      "actions": [
+        { "click": "main.main button:has-text('New')" },
+        { "click": "label.clip-card" },
+        { "wait": 150 },
+        { "click": ".wizard-modal button:has-text('Next: Configure')" },
+        { "wait": 400 }
+      ],
+      "crops": [".wizard-modal .wizard-body", ".wizard-modal .rail"]
+    },
+    {
+      "name": "review-transcript",
+      "scenario": "states",
+      "ready": ".detail-modal .segment",
+      "actions": [
+        { "click": "article.card:has-text('Status fixture: awaiting_review') .card-main" },
+        { "wait": 300 },
+        { "click": ".detail-modal button.tab:has-text('Review')" },
+        { "wait": 400 }
+      ],
+      "crops": [".detail-modal .action-bar", ".detail-modal .segment"]
+    },
+    {
+      "name": "review-conversion",
+      "scenario": "states",
+      "promote": true,
+      "ready": ".detail-modal video.review-player",
+      "actions": [
+        { "click": "article.card:has-text('Checkpoint fixture: awaiting_review') .card-main" },
+        { "wait": 600 },
+        { "click": ".detail-modal button.tab:has-text('Review')" },
+        { "wait": 500 }
+      ],
+      "crops": [
+        ".detail-modal .action-bar",
+        ".review-player",
+        ".detail-modal .composition-block"
+      ]
+    },
+    {
+      "name": "empty-board",
+      "scenario": "empty",
+      "ready": ".board section.column",
+      "crops": [".jobs-head", "section.column"]
+    },
+    {
+      "name": "empty-expanded-column",
+      "scenario": "empty",
+      "ready": ".column-full",
+      "actions": [
+        { "click": "section.column[aria-label='Complete'] .column-head" },
+        { "wait": 400 }
+      ],
+      "crops": [".jobs-head", ".detail-modal, .column-full"]
+    },
+    {
+      "name": "empty-metrics",
+      "scenario": "empty",
+      "ready": ".empty strong",
+      "actions": [
+        { "click": "text=Metrics" },
+        { "wait": 400 }
+      ],
+      "crops": [".empty"]
+    }
+  ]
+}

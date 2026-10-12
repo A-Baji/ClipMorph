@@ -204,3 +204,10 @@ jobs:
 
       - name: Run Phase 2C modal and wizard verification
         run: python tests/e2e/verify_phase2c.py
+
+      # Issue #261: the automated UI gate (states x viewports + axe-core)
+      # against the same seeded harness workspaces.
+      - name: Run the qa:ui gate
+        run: npm --prefix frontend run qa:ui
+        env:
+          CLIPMORPH_PYTHON: python
