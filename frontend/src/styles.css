@@ -1368,3 +1368,147 @@ details.advanced .advanced-body {
     transition-duration: 0.001ms !important;
   }
 }
+
+/* --- Generated configuration-form fields (moved from ConfigForm.svelte,
+   issue #261 items 7/10: one source for the wizard panes, the per-platform
+   section, and the review editor's reuse of the same row anatomy). --- */
+.config-section {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    padding: var(--space-3) var(--space-4);
+    margin: 0;
+    background: var(--color-surface);
+  }
+
+  /* Issue #261 review P2-5: the section-card gap lives on the container, so
+     top-level panes, per-platform rows, and the review editor's nested
+     config share one rhythm. */
+  .pane-sections,
+  .config-stack,
+  .config-subsections {
+    display: grid;
+    gap: var(--space-3);
+  }
+
+  .config-subsections {
+    margin-top: var(--space-2);
+  }
+
+  .config-summary {
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .config-summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .config-summary::before {
+    content: '\203A';
+    display: inline-block;
+    transition: transform var(--duration-fast) var(--ease-standard);
+    color: var(--color-text-faint);
+  }
+
+  .config-section[open] > .config-summary::before {
+    transform: rotate(90deg);
+  }
+
+  .config-legend {
+    font-size: var(--text-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--color-text-muted);
+  }
+
+  .config-fields {
+    display: grid;
+    gap: var(--space-3);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .config-field {
+    display: grid;
+    gap: var(--space-1);
+    grid-template-columns: minmax(0, 1fr);
+    padding: var(--space-2);
+    border-radius: var(--radius-sm);
+    border: 1px solid transparent;
+  }
+
+  .config-field.overridden {
+    border-color: var(--color-border);
+    background: var(--color-surface-raised, var(--color-surface));
+  }
+
+  /* D24: a field that carries a mapped dry-run error marks itself. */
+  .config-field.invalid {
+    border-color: color-mix(in srgb, var(--color-danger) 45%, transparent);
+  }
+
+  .config-label,
+  .config-field .check {
+    min-width: 0;
+  }
+
+  .config-label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
+  }
+
+  .config-label > .check {
+    max-width: 100%;
+  }
+
+  /* F6 (spec review): the non-checkbox row's label is text-only (no nested
+     interactive reset button); it truncates like the checkbox label. */
+  .config-label > label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .config-label > .check span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .badges {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex-shrink: 0;
+  }
+
+  .config-control {
+    display: grid;
+    gap: var(--space-2);
+  }
+
+  .config-control input,
+  .config-control select,
+  .config-control textarea {
+    width: 100%;
+  }
+
+  @media (max-width: 700px) {
+    .config-fields {
+      grid-template-columns: 1fr;
+    }
+  }
+
+/* Issue #261 item 12: the datetime picker glyph is legible on the dark
+   surface, and the whole field is the open target. */
+.config-control input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.72);
+  cursor: pointer;
+  opacity: 1;
+}

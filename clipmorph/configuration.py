@@ -37,6 +37,36 @@ APP_CONFIG_VERSION = 2
 # the registry in clipmorph.platforms, so no per-platform mode map exists.
 SCHEDULE_MODES = {None, "local", "platform"}
 
+# Issue #261 item 13: the publish-timezone form is a dropdown over the zones
+# that cover the overwhelming majority of users; the field stays a free IANA
+# string in the schema (configs keep working), so this list drives the dropdown
+# options only (synced into the form spec via clipmorph.form_spec).
+SCHEDULE_TIMEZONES = [
+    "UTC",
+    "America/Los_Angeles",
+    "America/Denver",
+    "America/Chicago",
+    "America/New_York",
+    "America/Sao_Paulo",
+    "Europe/London",
+    "Europe/Paris",
+    "Europe/Berlin",
+    "Europe/Moscow",
+    "Africa/Cairo",
+    "Africa/Johannesburg",
+    "Asia/Dubai",
+    "Asia/Karachi",
+    "Asia/Kolkata",
+    "Asia/Bangkok",
+    "Asia/Shanghai",
+    "Asia/Hong_Kong",
+    "Asia/Tokyo",
+    "Asia/Seoul",
+    "Asia/Singapore",
+    "Australia/Sydney",
+    "Pacific/Auckland",
+]
+
 # Caption renderer backends the subtitles/layout schema accepts. The form spec
 # imports this so its renderer enum cannot drift from the validator.
 SUBTITLE_RENDERERS = {"overlay", "stacked"}

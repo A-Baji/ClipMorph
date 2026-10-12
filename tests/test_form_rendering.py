@@ -134,16 +134,20 @@ class PlatformGroupingTests(unittest.TestCase):
         self.assertIn("<PlatformSection", wizard)
         self.assertEqual(wizard.count("pane-platforms"), 0)
 
-    def test_platform_node_collapsed_by_default_with_level_toggle(self):
+    def test_platform_node_expanded_with_level_toggle(self):
         section = source(PLATFORM_SECTION)
         # A single collapsible container labelled Platform.
         self.assertIn('platform-group', section)
         self.assertIn(">Platform</span>", section)
-        # No `open` attribute: the group and its per-platform nodes start
-        # collapsed (D8), unlike the batch pane's own sections (D9).
-        self.assertNotIn(" open", section.split(".platform-nodes")[0])
-        # The enable toggle rides the platform node summary, inverted against
-        # the underlying per-platform upload.skip flag.
+        # Issue #261 item 7 + 10: the Platform group card is expanded by
+        # default and styled exactly like General/Conversion/Upload (the
+        # .config-section card styles moved to the global stylesheet).
+        self.assertIn(
+            '<details class="config-section platform-group" open>', section)
+        # The per-platform rows keep their manual collapsed toggle; the
+        # enable toggle rides the platform node summary, inverted against the
+        # underlying per-platform upload.skip flag.
+        self.assertIn("aria-expanded={Boolean(expanded[platform])}", section)
         self.assertIn("upload.skip", section)
         self.assertIn("return !skip;", section)
         self.assertIn("checked={enabled(platform)}", section)
@@ -186,8 +190,11 @@ class CardCompositionTests(unittest.TestCase):
 
     def test_status_chips_are_humanized_never_raw_keys(self):
         jobs = source(JOBS_VIEW)
-        self.assertIn("{humanize(job.status)}", jobs)
-        self.assertIn("{humanize(job.current_checkpoint)}", jobs)
+        # Issue #261 item 5: both card anatomies render the humanized status
+        # badge — status lives on the card chips, not in a column (item 4).
+        self.assertEqual(jobs.count("{humanize(job.status)}"), 2)
+        # The stage lives in the pipeline column, not in a redundant chip.
+        self.assertNotIn("{humanize(job.current_checkpoint)}", jobs)
         # No raw enum key reaches a card chip.
         self.assertNotIn("{job.status}", jobs)
 
@@ -318,7 +325,9 @@ class Phase2CViewTests(unittest.TestCase):
         self.assertIn("createdNames", store)
         self.assertIn("app.wizard.selected.filter", store)
         self.assertIn("wizardMaybeRelocate", store)
-        self.assertIn("app.jobsTab = 'queue'; // D24: the last clip's create lands on Queue", store)
+        self.assertIn(
+            "app.view = 'jobs'; // D24: the last clip's create lands on the Jobs board",
+            store)
         config_form = source(CONFIG_FORM)
         self.assertIn("wizardFieldError", config_form)
         self.assertIn("field-error", config_form)

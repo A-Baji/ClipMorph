@@ -96,6 +96,9 @@ export const api = {
       method: 'POST',
       body: { expected_revision: expectedRevision, ...(group ? { group } : {}) },
     }),
+  /** Item 18: the editable conversion review re-uses the hash-guarded patch. */
+  patchJobConfiguration: (id, payload) =>
+    request(`/jobs/${id}/configuration`, { method: 'PATCH', body: payload }),
 
   // Transcript
   getTranscript: (id) => request(`/jobs/${id}/transcript`),
@@ -148,4 +151,6 @@ export const api = {
 
   // Live events
   eventsUrl: (id) => `${BASE}/jobs/${id}/events`,
+  /** One aggregate stream for the whole board (issue #261 item 1). */
+  jobsEventsUrl: () => `${BASE}/events`,
 };

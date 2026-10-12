@@ -6,8 +6,8 @@
   import ErrorAlert from './components/ErrorAlert.svelte';
   import ConfirmDialog from './components/ConfirmDialog.svelte';
   import JobDetailModal from './components/JobDetailModal.svelte';
+  import WizardModal from './components/WizardModal.svelte';
   import JobsView from './views/JobsView.svelte';
-  import WizardView from './views/WizardView.svelte';
   import MetricsView from './views/MetricsView.svelte';
   import LayoutsView from './views/LayoutsView.svelte';
   import SettingsView from './views/SettingsView.svelte';
@@ -40,37 +40,30 @@
   <Sidebar />
 
   <main class="main">
-    {#if app.view === 'wizard'}
-      <div class="alert-slot">
-        <Notice />
-        <ErrorAlert />
-      </div>
-      <WizardView />
-    {:else}
-      <Topbar title={page.title} subtitle={page.subtitle}>
-        {#if !app.online}
-          <span class="badge badge-danger">offline</span>
-        {/if}
-      </Topbar>
-      <div class="alert-slot">
-        <Notice />
-        <ErrorAlert />
-      </div>
-      {#if !app.ready}
-        <div class="content"><p class="faint">Loading workspace…</p></div>
-      {:else if app.view === 'metrics'}
-        <MetricsView />
-      {:else if app.view === 'layouts'}
-        <LayoutsView />
-      {:else if app.view === 'settings'}
-        <SettingsView />
-      {:else}
-        <JobsView />
+    <Topbar title={page.title} subtitle={page.subtitle}>
+      {#if !app.online}
+        <span class="badge badge-danger">offline</span>
       {/if}
+    </Topbar>
+    <div class="alert-slot">
+      <Notice />
+      <ErrorAlert />
+    </div>
+    {#if !app.ready}
+      <div class="content"><p class="faint">Loading workspace…</p></div>
+    {:else if app.view === 'metrics'}
+      <MetricsView />
+    {:else if app.view === 'layouts'}
+      <LayoutsView />
+    {:else if app.view === 'settings'}
+      <SettingsView />
+    {:else}
+      <JobsView />
     {/if}
   </main>
 </div>
 
+<WizardModal />
 <JobDetailModal />
 <ConfirmDialog />
 

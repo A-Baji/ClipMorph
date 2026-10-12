@@ -36,6 +36,21 @@ except ImportError:
 SUPPORTED_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm"}
 
 
+def job_event_frames(job_service: "JobService", interval: float = 1.0):
+    """Yield ``data:`` SSE frames carrying every job manifest (issue #261 item 1).
+
+    The dashboard listens on ``GET /events`` and renders board statuses live,
+    replacing the manual Refresh affordance. Payloads reuse the list-jobs body
+    so the stream cannot drift from ``GET /jobs`` (the E14 pre-run passthrough
+    stays a frontend rendering rule, not a server one). The generator runs
+    until cancelled by the server — one connection, one loop.
+    """
+    while True:
+        jobs = [asdict(item) for item in job_service.list_jobs()]
+        yield f"data: {json.dumps(jobs)}\n\n"
+        time.sleep(interval)
+
+
 def create_app(data_dir: str | Path | None = None,
                app_config_path: str | Path | None = None):
     """Create one app.yml-backed API instance with shared job service behavior."""
@@ -806,6 +821,12 @@ def create_app(data_dir: str | Path | None = None,
         return compare_metrics(service.jobs_dir,
                                platform=platform.lower() if platform else None,
                                limit=limit)
+
+    @app.get("/api/v1/events")
+    def all_job_events():
+        """One SSE stream carrying every job's manifest (issue #261 item 1)."""
+        return StreamingResponse(job_event_frames(service),
+                                 media_type="text/event-stream")
 
     @app.get("/api/v1/jobs/{job_id}/events")
     def job_events(job_id: str):

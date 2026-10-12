@@ -1,3 +1,4 @@
+import contextlib
 from datetime import datetime, timedelta, timezone
 from subprocess import CompletedProcess
 from types import SimpleNamespace
@@ -613,6 +614,39 @@ class WebApiTests(unittest.TestCase):
                 # The polling fallback carries the same field.
                 job = client.get(f"/api/v1/jobs/{job_id}").json()
                 self.assertEqual(job["upload_progress"], {"youtube": 42})
+
+    def test_aggregate_events_stream_carries_every_job(self):
+        """Issue #261 item 1: the /events SSE stream boards every job.
+
+        ``job_event_frames`` is an unbounded generator (the dashboard listens
+        until the server cancels it), so the test drives the generator directly:
+        the first frame is yielded before the interval sleep runs, so the test
+        is deterministic and never blocks.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            (data_dir / "sources").mkdir(parents=True)
+            source = data_dir / "sources" / "clip.mp4"
+            source.write_bytes(b"source")
+            service = JobService(data_dir)
+            manifest = service.create_job(source.name, {
+                "conversion": {"skip": True, "subtitles": {"skip": True}},
+                "upload": {"skip": True},
+                "platforms": {"youtube": {"upload": {"skip": False}}},
+            })
+            service.close()
+
+            try:
+                from clipmorph.web import job_event_frames
+                frames = job_event_frames(service)
+                frame = next(frames)
+                self.assertTrue(frame.startswith("data: "))
+                payload = json.loads(frame[len("data: "):].strip())
+                self.assertEqual(
+                    {job["job_id"] for job in payload}, {manifest.job_id})
+            finally:
+                with contextlib.suppress(Exception):
+                    frames.close()
 
     def test_final_attempt_result_carries_progress_percent(self):
         with tempfile.TemporaryDirectory() as temp_dir:

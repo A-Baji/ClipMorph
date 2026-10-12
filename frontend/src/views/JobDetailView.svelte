@@ -7,6 +7,7 @@
   import EmptyState from '../components/EmptyState.svelte';
   import PlatformMark from '../components/PlatformMark.svelte';
   import SegmentEditor from '../components/SegmentEditor.svelte';
+  import ConfigForm from '../components/ConfigForm.svelte';
   import ArtifactRow from '../components/ArtifactRow.svelte';
   import SuggestionCard from '../components/SuggestionCard.svelte';
   import AttemptRow from '../components/AttemptRow.svelte';
@@ -28,6 +29,8 @@
     pullMetrics,
     requestConfirm,
     pruneArtifacts,
+    renderReview,
+    reviewDirty,
   } from '../lib/store.svelte.js';
   import {
     statusTone,
@@ -43,8 +46,9 @@
 
   const TABS = [
     { id: 'overview', label: 'Overview' },
+    // Issue #261 item 19: the publish gate is a review gate — it renders
+    // under Review, not as its own tab.
     { id: 'review', label: 'Review' },
-    { id: 'publish', label: 'Publish' },
     { id: 'metrics', label: 'Metrics' },
   ];
 
@@ -117,11 +121,22 @@
    * renders as labeled text ("anything without a widget renders as labeled
    * text"); no raw JSON blob exists on any review surface.
    */
+  /**
+   * E22: composition data as readable sections — every conversion value
+   * renders as labeled text ("anything without a widget renders as labeled
+   * text"); no raw JSON blob exists on any review surface. Issue #261 item
+   * 18: unset leaves render too (as —), so the layout config is complete
+   * instead of only its set keys.
+   */
   function labeledRows(value, label = '', rows = [], depth = 0) {
-    if (value === null || value === undefined || value === '') return rows;
+    if (value === undefined) return rows;
+    if (value === null || value === '') {
+      rows.push({ label, value: '—' });
+      return rows;
+    }
     if (Array.isArray(value)) {
       if (value.every((item) => item === null || typeof item !== 'object')) {
-        rows.push({ label, value: value.filter((item) => item !== null).join(', ') });
+        rows.push({ label, value: value.filter((item) => item !== null).join(', ') || '—' });
       } else {
         value.forEach((item, index) => {
           labeledRows(item, label ? `${label} ${index + 1}` : `Item ${index + 1}`, rows, depth);
@@ -157,6 +172,31 @@
     if (app.detailTab === 'review' && job?.active_transcript && !app.transcript) {
       loadTranscript().catch((error) => (app.errors = [error.message]));
     }
+  });
+
+  /**
+   * Issue #261 item 18: the conversion review is EDITABLE. The editor renders
+   * the form spec's conversion section (the whole layout config, not only the
+   * caption keys) bound to a per-job draft; the transcription fields are
+   * filtered out because a change there invalidates the accepted transcript
+   * rather than the render under review. Re-render applies the draft through
+   * the hash-guarded configuration PATCH, so the button renders something new.
+   */
+  function stripTranscriptionFields(section) {
+    const fields = (section.fields || []).filter(
+      (field) => !field.path.startsWith('conversion.subtitles.transcription'),
+    );
+    return {
+      ...section,
+      fields,
+      sections: (section.sections || []).map(stripTranscriptionFields),
+    };
+  }
+
+  const reviewFormSections = $derived.by(() => {
+    if (!app.formSpec) return null;
+    const conversion = app.formSpec.sections.find((item) => item.id === 'conversion');
+    return conversion ? [stripTranscriptionFields(conversion)] : null;
   });
 
   const title = $derived(
@@ -326,8 +366,7 @@
 
     {:else if app.detailTab === 'review'}
       <!-- E17: review affordances for the current gate only. -->
-      {#if reviewGate === 'transcript'}
-        <Card title="Transcript" description="Edit timing and text, then save a new revision.">
+      {#if reviewGate === 'transcript'}        <Card title="Transcript" description="Edit timing and text, then save a new revision.">
           <!-- E11: one standard action bar, primary/secondary separated. -->
           <div class="action-bar action-lead-row">
             <span class="action-lead faint">
@@ -338,7 +377,7 @@
                 class="btn btn-secondary"
                 disabled={!app.transcript}
                 onclick={saveTranscript}
-              >Save transcript revision</button>
+              >Save edits</button>
             </div>
             <div class="action-group">
               <button
@@ -348,6 +387,11 @@
               >Accept transcript</button>
             </div>
           </div>
+          <!-- Issue #261 item 16: the two buttons were indistinguishable; the
+               hint states the difference in one line. -->
+          <small class="field-hint">
+            Save keeps your edits as a revision without approving; Accept approves the current revision and resumes the pipeline.
+          </small>
           {#if app.transcript}
             <div class="stack">
               {#each app.transcript.segments as segment, index (index)}
@@ -414,14 +458,26 @@
                 </span>
               {/if}
               <div class="action-group">
-                <button class="btn btn-secondary" onclick={() => jobAction('render', renderGroup)}>
-                  <Icon name="refresh" /> Render
+                <!-- Issue #261 item 18: the button is no longer a no-op —
+                     edited config is PATCHed into the job (hash-guarded) and
+                     the re-render produces the new output; with no edits it
+                     is the plain re-render. -->
+                <button
+                  class="btn btn-secondary"
+                  disabled={app.busy}
+                  onclick={() => renderReview(renderGroup)}
+                >
+                  <Icon name="refresh" />
+                  {reviewDirty() ? 'Apply changes & re-render' : 'Re-render'}
                 </button>
               </div>
               <div class="action-group">
                 <button
                   class="btn btn-primary"
-                  disabled={job.checkpoints?.conversion?.status !== 'awaiting_review'}
+                  disabled={job.checkpoints?.conversion?.status !== 'awaiting_review' || reviewDirty()}
+                  title={reviewDirty()
+                    ? 'Apply changes & re-render first — the acceptance reviews the edited conversion'
+                    : ''}
                   onclick={() => acceptCheckpoint('conversion')}
                 >Accept composition</button>
               </div>
@@ -439,6 +495,18 @@
               </div>
             {/if}
 
+            {#if reviewFormSections}
+              <!-- Item 18: the editable conversion config — General-free,
+                   conversion-only, transcription keys filtered; the header
+                   names what the draft edits. -->
+              <div class="composition-block">
+                <div class="composition-title">Conversion config</div>
+                <div class="config-stack">
+                  <ConfigForm sections={reviewFormSections} mode="review" />
+                </div>
+              </div>
+            {/if}
+
             {#each compositionSections as section (section.title)}
               <div class="composition-block">
                 <div class="composition-title">{section.title}</div>
@@ -453,26 +521,10 @@
           </Card>
         </div>
 
-      {:else}
-        <EmptyState
-          icon="check"
-          title={uploadAwaitingReview
-            ? 'The next review is the upload draft'
-            : 'No review pending'}
-          message={uploadAwaitingReview
-            ? 'The upload draft review lives on the Publish tab.'
-            : 'When the pipeline lands on a review gate, its review controls appear here.'}
-        >
-          {#if uploadAwaitingReview}
-            <button class="btn btn-secondary" onclick={() => (app.detailTab = 'publish')}>
-              Go to Publish
-            </button>
-          {/if}
-        </EmptyState>
-      {/if}
-
-    {:else if app.detailTab === 'publish'}
-      <div class="grid-2">
+      {:else if uploadAwaitingReview}
+        <!-- Issue #261 item 19: the publish gate is a review gate — it renders
+             here, and its separate tab is gone. -->
+        <div class="grid-2">
         <Card title="Upload draft" description="What each selected platform will receive.">
           <div class="stack">
             <Field label="Title">
@@ -620,6 +672,14 @@
         {/if}
       </Card>
 
+      {:else}
+        <EmptyState
+          icon="check"
+          title="No review pending"
+          message="When the pipeline lands on a review gate, its review controls appear here."
+        />
+      {/if}
+
     {:else if app.detailTab === 'metrics'}
       <Card
         title="Engagement"
@@ -690,7 +750,20 @@
     margin-bottom: var(--space-4);
   }
 
+  /* Issue #261 item 17: the rendered clip previews at the size a desktop
+     short-form platform player uses — a narrow 9:16 box not the whole
+     column. */
+  .review-player {
+    display: block;
+    width: 100%;
+    max-width: 320px;
+    margin: 0 auto;
+    background: var(--color-bg);
+    border-radius: var(--radius-md);
+  }
+
   @media (max-width: 860px) {
+
     .grid-2.filters {
       grid-template-columns: 1fr;
     }

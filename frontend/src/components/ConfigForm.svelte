@@ -9,19 +9,26 @@
     batchValue,
     clearBatchField,
     clearJobField,
+    clearReviewField,
     globalDefault,
     jobHasOverride,
     jobValue,
+    reviewHasOverride,
+    reviewValue,
     setBatchField,
     setJobField,
+    setReviewField,
     wizardFieldError,
   } from '../lib/store.svelte.js';
 
   /**
    * Recursive renderer for the generated configuration-form spec (issue
-   * #257). Every control is tri-state: inherit batch / inherit global
-   * default / custom. ``mode`` is "batch" for the shared block and "job"
-   * for a job's detail form; ``prefix`` namespaces per-platform paths.
+   * #257). Every control is tri-state via the reset button: inherit batch /
+   * inherit global default / custom. ``mode`` is "batch" for the shared
+   * block, "job" for a job's detail form, and "review" for the depot draft
+   * the conversion review editor edits (item 18; no tri-state badges — the
+   * reset button restores the manifest value). ``prefix`` namespaces
+   * per-platform paths.
    *
    * Row anatomy (issue #259 D6, D7): boolean controls sit immediately left
    * of their visible label inside one wrapping ``<label>``; text, number and
@@ -29,9 +36,9 @@
    * free text survives only for content title/description/tags; object
    * fields (the inline layout) never render — inline layout overrides live
    * in the Layouts editor. Sections render as collapsible ``<details>``
-   * (D9/U10): batch sections may start expanded, per-job sections start
-   * collapsed. Dry-run validation errors that name a field's config path
-   * also render inline under that field (D24).
+   * and are expanded by default (issue #261 item 7). Dry-run validation
+   * errors that name a field's config path also render inline under that
+   * field (D24).
    */
   let {
     sections = [],
@@ -39,13 +46,18 @@
     source = '',
     prefix = '',
     depth = 0,
-    open = false,
+    /* Issue #261 item 7: every config section is expanded by default — the
+       collapse-by-default decision (D9) is walked back. */
+    open = true,
   } = $props();
 
   const layouts = $derived(app.layouts || []);
 
   /** D24: the inline error for one field, mapped from its config path. */
   function fieldError(path) {
+    // Review mode has no wizard dry-run session; renderer failures surface
+    // through the shared error channel instead of per-field mapping.
+    if (mode === 'review') return '';
     return wizardFieldError(source, path, mode === 'job');
   }
 
@@ -60,20 +72,26 @@
   }
 
   function hasOverride(path) {
-    return mode === 'batch' ? batchHasOverride(path) : jobHasOverride(source, path);
+    if (mode === 'batch') return batchHasOverride(path);
+    if (mode === 'review') return reviewHasOverride(path);
+    return jobHasOverride(source, path);
   }
 
   function resolved(path) {
-    return mode === 'batch' ? batchValue(path) : jobValue(source, path);
+    if (mode === 'batch') return batchValue(path);
+    if (mode === 'review') return reviewValue(path);
+    return jobValue(source, path);
   }
 
   function write(path, value) {
     if (mode === 'batch') setBatchField(path, value);
+    else if (mode === 'review') setReviewField(path, value);
     else setJobField(source, path, value);
   }
 
   function reset(path) {
     if (mode === 'batch') clearBatchField(path);
+    else if (mode === 'review') clearReviewField(path);
     else clearJobField(source, path);
   }
 
@@ -85,6 +103,7 @@
   }
 
   function defaultDiffers(path) {
+    if (mode === 'review') return false; // no inheritance ladder on a created job
     const value = resolved(path);
     return JSON.stringify(value ?? null) !== JSON.stringify(globalDefault(path) ?? null);
   }
@@ -106,6 +125,28 @@
       );
     }
     return write(path, raw);
+  }
+
+  /**
+   * Issue #261 item 11: selects never offer a generic "inherit" entry — the
+   * reset button is the one tri-state mechanism, and the select shows the
+   * resolved value. A schema-null field (unset schedule timezone) renders one
+   * domain-labeled unset option so the empty state stays readable; a config
+   * value outside the curated options still shows truthfully.
+   */
+  const UNSET_LABELS = {
+    'upload.schedule.timezone': 'Platform default',
+  };
+
+  function unsetLabel(path) {
+    return UNSET_LABELS[path] || 'Not set';
+  }
+
+  function valueOutsideOptions(control, value) {
+    return (
+      value !== null && value !== undefined && value !== '' &&
+      !control.options.some((option) => String(option.value) === String(value))
+    );
   }
 </script>
 
@@ -200,18 +241,33 @@
                 <select
                   id={fid}
                   value={value === null || value === undefined ? '' : String(value)}
-                  onchange={(event) => onInput(path, 'string', event.currentTarget.value)}
+                  onchange={(event) => {
+                    // Issue #261 item 11: choosing an unset option writes
+                    // null (the reset button remains the tri-state
+                    // mechanism); any other choice writes the real value.
+                    const next = event.currentTarget.value;
+                    onInput(path, 'string', next === '' ? null : next);
+                  }}
                 >
-                  <option value="">inherit</option>
+                  {#if value === null || value === undefined || value === ''}
+                    <option value="">{unsetLabel(fullPath(field))}</option>
+                  {/if}
                   {#each control.options as option (option.value)}
                     <option value={option.value}>{option.label}</option>
                   {/each}
+                  {#if valueOutsideOptions(control, value)}
+                    <option value={String(value)}>{String(value)}</option>
+                  {/if}
                 </select>
               {:else if control.kind === 'datetime'}
+                <!-- Issue #261 item 12: the whole field is the click target —
+                     a click anywhere calls showPicker, not just the tiny
+                     calendar glyph. -->
                 <input
                   id={fid}
                   type="datetime-local"
                   value={toLocalInput(value)}
+                  onclick={(event) => event.currentTarget.showPicker?.()}
                   oninput={(event) => onInput(path, 'datetime', toUtcTimestamp(event.currentTarget.value))}
                 />
               {:else if control.kind === 'textarea'}
@@ -253,135 +309,16 @@
       {/each}
     </div>
     {#if section.sections}
-      <SelfConfigForm
-        sections={section.sections}
-        {mode}
-        {source}
-        {prefix}
-        depth={depth + 1}
-        {open}
-      />
+      <div class="config-subsections">
+        <SelfConfigForm
+          sections={section.sections}
+          {mode}
+          {source}
+          {prefix}
+          depth={depth + 1}
+          {open}
+        />
+      </div>
     {/if}
   </details>
 {/each}
-
-<style>
-  .config-section {
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-    padding: var(--space-3) var(--space-4);
-    margin: 0 0 var(--space-3);
-    background: var(--color-surface);
-  }
-
-  .config-summary {
-    cursor: pointer;
-    list-style: none;
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-  }
-
-  .config-summary::-webkit-details-marker {
-    display: none;
-  }
-
-  .config-summary::before {
-    content: '\203A';
-    display: inline-block;
-    transition: transform var(--duration-fast) var(--ease-standard);
-    color: var(--color-text-faint);
-  }
-
-  .config-section[open] > .config-summary::before {
-    transform: rotate(90deg);
-  }
-
-  .config-legend {
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--color-text-muted);
-  }
-
-  .config-fields {
-    display: grid;
-    gap: var(--space-3);
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .config-field {
-    display: grid;
-    gap: var(--space-1);
-    grid-template-columns: minmax(0, 1fr);
-    padding: var(--space-2);
-    border-radius: var(--radius-sm);
-    border: 1px solid transparent;
-  }
-
-  .config-field.overridden {
-    border-color: var(--color-border);
-    background: var(--color-surface-raised, var(--color-surface));
-  }
-
-  /* D24: a field that carries a mapped dry-run error marks itself. */
-  .config-field.invalid {
-    border-color: color-mix(in srgb, var(--color-danger) 45%, transparent);
-  }
-
-  .config-label,
-  .config-field .check {
-    min-width: 0;
-  }
-
-  .config-label {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-2);
-    font-size: var(--text-sm);
-  }
-
-  .config-label > .check {
-    max-width: 100%;
-  }
-
-  /* F6 (spec review): the non-checkbox row's label is text-only (no nested
-     interactive reset button); it truncates like the checkbox label. */
-  .config-label > label {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .config-label > .check span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .badges {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-1);
-    flex-shrink: 0;
-  }
-
-  .config-control {
-    display: grid;
-    gap: var(--space-2);
-  }
-
-  .config-control input,
-  .config-control select,
-  .config-control textarea {
-    width: 100%;
-  }
-
-  @media (max-width: 700px) {
-    .config-fields {
-      grid-template-columns: 1fr;
-    }
-  }
-</style>

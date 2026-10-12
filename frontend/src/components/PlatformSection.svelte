@@ -65,7 +65,7 @@
   }
 </script>
 
-<details class="config-section platform-group">
+<details class="config-section platform-group" open>
   <summary class="config-summary">
     <span class="config-legend">Platform</span>
   </summary>
