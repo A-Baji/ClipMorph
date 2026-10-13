@@ -147,6 +147,34 @@ async function assertReviewActionLayout(page, title, secondaryLabel, primaryLabe
   await page.waitForSelector('.detail-modal', { state: 'detached', timeout: 15000 });
 }
 
+async function assertEmptyUploadState(page) {
+  await page.locator(
+    "article.card:has-text('Status fixture: completed') .card-main",
+  ).click();
+  await page.waitForSelector('.detail-modal', { timeout: 15000 });
+  await page.click('.detail-modal button.tab:has-text("Review")');
+  for (const checkbox of await page.locator('.detail-modal .checks input').all()) {
+    await checkbox.setChecked(false);
+  }
+  const state = await page.evaluate(() => {
+    const button = document.querySelector('.detail-modal .review-action-bar .btn-primary');
+    const hint = document.querySelector('.detail-modal .upload-platform-hint');
+    const title = [...document.querySelectorAll('.detail-modal .field > span')]
+      .find((item) => item.textContent.trim() === 'Title')?.parentElement;
+    const checks = document.querySelector('.detail-modal .checks');
+    return {
+      disabled: button.disabled,
+      hintToTitle: title.getBoundingClientRect().top - hint.getBoundingClientRect().bottom,
+      columnGap: parseFloat(getComputedStyle(checks).columnGap),
+    };
+  });
+  assert.equal(state.disabled, true, 'upload is disabled without selected platforms');
+  assert.ok(state.hintToTitle >= 8, `empty-platform hint needs separation from fields; got ${state.hintToTitle}px`);
+  assert.ok(state.columnGap >= 8, `platform checkboxes need separation; got ${state.columnGap}px`);
+  await page.keyboard.press('Escape');
+  await page.waitForSelector('.detail-modal', { state: 'detached', timeout: 15000 });
+}
+
 async function main() {
   const server = await startServer({ scenario: 'states' });
   // The harness reports the base URL with a trailing slash; API paths below
@@ -216,6 +244,7 @@ async function main() {
         'Save draft',
         'Submit upload',
       );
+      await assertEmptyUploadState(page);
     }
     await page.setViewportSize(server.viewports.desktop);
 
@@ -257,6 +286,21 @@ async function main() {
     // wait on the overlay's detach — not on the board.
     await page.waitForSelector('.wizard-modal', { state: 'detached', timeout: 30000 });
     await page.waitForSelector('article.card', { timeout: 15000 });
+
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.click('button.menu-toggle');
+    await page.click("button.nav-item:has-text('Settings')");
+    const settingsSave = page.locator('header.topbar button:has-text("Save app.yml")');
+    await settingsSave.waitFor({ timeout: 15000 });
+    const saveMetrics = await settingsSave.evaluate((button) => ({
+      height: button.getBoundingClientRect().height,
+      whiteSpace: getComputedStyle(button).whiteSpace,
+    }));
+    assert.ok(
+      saveMetrics.height <= 44,
+      `Settings Save should stay a single-line toolbar action, height ${saveMetrics.height}px`,
+    );
+    assert.equal(saveMetrics.whiteSpace, 'nowrap', 'Settings Save stays on one line');
 
     assert.deepEqual(pageErrors, [], 'no uncaught page errors during the flow');
     console.log('smoke.js: fixtures -> board -> create flow OK');

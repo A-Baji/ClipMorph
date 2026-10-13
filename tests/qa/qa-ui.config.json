@@ -103,6 +103,23 @@
       "crops": [".detail-modal .review-action-bar", ".detail-modal .checks"]
     },
     {
+      "name": "review-upload-no-platforms",
+      "scenario": "states",
+      "promote": true,
+      "ready": ".detail-modal .review-action-bar button:has-text('Submit upload')",
+      "actions": [
+        { "click": "article.card:has-text('Status fixture: completed') .card-main" },
+        { "click": ".detail-modal button.tab:has-text('Review')" },
+        { "wait": 400 },
+        { "click": ".detail-modal label.check:has-text('YouTube')" },
+        { "click": ".detail-modal label.check:has-text('Instagram')" },
+        { "click": ".detail-modal label.check:has-text('TikTok')" },
+        { "click": ".detail-modal label.check:has-text('Twitter / X')" },
+        { "click": ".detail-modal label.check:has-text('Facebook')" }
+      ],
+      "crops": [".detail-modal .review-action-bar", ".detail-modal .checks"]
+    },
+    {
       "name": "review-conversion",
       "scenario": "states",
       "promote": true,

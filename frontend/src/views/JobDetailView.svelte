@@ -534,11 +534,18 @@
               <button class="btn btn-secondary" onclick={saveUploadDraft}>
                 <Icon name="check" /> Save draft
               </button>
-              <button class="btn btn-primary" disabled={app.busy} onclick={submitUpload}>
+              <button
+                class="btn btn-primary"
+                disabled={app.busy || !app.publish.selectedPlatforms.length}
+                onclick={submitUpload}
+              >
                 <Icon name="upload" /> Submit upload
               </button>
             </div>
           </div>
+          {#if !app.publish.selectedPlatforms.length}
+            <p class="faint upload-platform-hint" role="status">Choose at least one platform to enable upload.</p>
+          {/if}
           <div class="stack">
             <Field label="Title">
               <input aria-label="Upload title" bind:value={app.publish.draft.title} />
@@ -761,6 +768,16 @@
     margin: 0 auto;
     background: var(--color-bg);
     border-radius: var(--radius-md);
+  }
+
+  .upload-platform-hint {
+    margin: 0 0 var(--space-3);
+  }
+
+  .checks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2) var(--space-4);
   }
 
   @media (max-width: 860px) {

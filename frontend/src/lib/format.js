@@ -119,6 +119,25 @@ export function nextStepAction(job) {
   return null;
 }
 
+/** Whether the effective job configuration targets at least one upload platform. */
+export function hasUploadTargets(job, platformNames, defaults = {}) {
+  const jobConfiguration = job?.configuration || {};
+  const jobPlatforms = jobConfiguration.platforms || {};
+  const defaultPlatforms = defaults.platforms || {};
+  const platforms = new Set(platformNames || []);
+
+  for (const platform of platforms) {
+    const skip =
+      jobPlatforms[platform]?.upload?.skip ??
+      jobConfiguration.upload?.skip ??
+      defaultPlatforms[platform]?.upload?.skip ??
+      defaults.upload?.skip ??
+      false;
+    if (skip !== true) return true;
+  }
+  return false;
+}
+
 export function artifactLabel(artifact) {
   if (!artifact) return '';
   return artifact.display_name || artifact.kind || artifact.id;

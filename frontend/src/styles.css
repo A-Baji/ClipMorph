@@ -638,6 +638,10 @@ details.advanced > summary {
   gap: var(--space-2);
 }
 
+.topbar-actions .btn {
+  white-space: nowrap;
+}
+
 details.advanced > summary::-webkit-details-marker {
   display: none;
 }
@@ -1135,6 +1139,10 @@ details.advanced .advanced-body {
 .review-player {
   display: block;
   width: 100%;
+  max-width: 320px;
+  max-height: min(568px, 70vh);
+  aspect-ratio: 9 / 16;
+  object-fit: contain;
   background: var(--color-bg);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);

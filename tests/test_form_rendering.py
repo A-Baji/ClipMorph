@@ -290,6 +290,39 @@ class Phase2CViewTests(unittest.TestCase):
         self.assertIn('controls', player)
         self.assertIn('api.previewUrl', player)
         self.assertIn('reviewArtifact', player)
+        styles = (FRONTEND_SRC / "styles.css").read_text(encoding="utf-8")
+        player_styles = styles[styles.index(".review-player {"):styles.index(".composition-block {")]
+        self.assertIn("aspect-ratio: 9 / 16", player_styles)
+        self.assertIn("object-fit: contain", player_styles)
+
+    def test_upload_requires_at_least_one_selected_platform(self):
+        """AP-023: the review and one-click upload actions reject empty targets."""
+        detail = source(self.DETAIL)
+        self.assertIn("disabled={app.busy || !app.publish.selectedPlatforms.length}", detail)
+        self.assertIn("Choose at least one platform to enable upload.", detail)
+        store = source(self.STORE)
+        self.assertIn("if (!app.publish.selectedPlatforms.length)", store)
+        self.assertIn("Choose at least one platform to enable upload.", store)
+        jobs = source(JOBS_VIEW)
+        self.assertIn("hasUploadTargets(job, app.platforms", jobs)
+
+    def test_resume_poll_exhaustion_marks_status_unconfirmed(self):
+        """AP-024: an expected Running status remains visible without a stuck spinner."""
+        store = source(self.STORE)
+        self.assertIn("statusUpdateUnavailable", store)
+        self.assertIn("updateResumeStatusUnavailable", store)
+        jobs = source(JOBS_VIEW)
+        self.assertIn("job.statusUpdateUnavailable", jobs)
+        self.assertIn("Status unconfirmed", jobs)
+
+    def test_settings_save_is_in_the_topbar_action_slot(self):
+        """AP-026: Settings save stays in the page header, not a separate row."""
+        app = source(FRONTEND_SRC / "App.svelte")
+        settings = source(FRONTEND_SRC / "views" / "SettingsView.svelte")
+        self.assertIn("bind:saveAction={settingsSaveAction}", app)
+        self.assertIn("saveAction = $bindable(null)", settings)
+        self.assertNotIn('class="section-head head-end"', settings)
+        self.assertIn("Save app.yml", app)
 
     def test_no_raw_json_on_any_review_surface(self):
         """E22: composition data renders as labeled sections, never JSON."""

@@ -19,6 +19,7 @@
     statusTone,
     statusLabel,
     humanize,
+    hasUploadTargets,
     nextStepAction,
     soonestScheduledPublish,
     formatDateTime,
@@ -135,7 +136,9 @@
   /** Tooltip / accessible name for the approve button of a review gate. */
   function stepLabel(job, step) {
     return step.kind === 'upload'
-      ? `Upload ${jobTitle(job)}`
+      ? hasUploadTargets(job, app.platforms, app.configuration.job_defaults || {})
+        ? `Upload ${jobTitle(job)}`
+        : `Upload ${jobTitle(job)} unavailable: no platforms selected`
       : `Approve ${step.stage} of ${jobTitle(job)}`;
   }
 
@@ -252,14 +255,23 @@
                   </button>
                 {/if}
                 {#if step?.kind === 'processing'}
-                  <span
+                  {#if job.statusUpdateUnavailable}
+                    <span
+                      class="badge badge-warning"
+                      role="status"
+                      title="Status updates are unavailable; showing the expected status Running."
+                      aria-label={`Status updates unavailable for ${jobTitle(job)}; expected status Running`}
+                    >Status unconfirmed</span>
+                  {:else}
+                    <span
                     class="btn btn-ghost btn-icon step-busy"
                     role="status"
                     title="Processing"
                     aria-label={`Processing ${jobTitle(job)}`}
-                  >
-                    <span class="spinner"></span>
-                  </span>
+                    >
+                      <span class="spinner"></span>
+                    </span>
+                  {/if}
                 {:else if step?.kind === 'accept'}
                   <button
                     class="btn btn-primary btn-icon"
@@ -274,7 +286,8 @@
                     class="btn btn-primary btn-icon"
                     title={stepLabel(job, step)}
                     aria-label={stepLabel(job, step)}
-                    onclick={() => advanceJob(job, step)}
+                  disabled={!hasUploadTargets(job, app.platforms, app.configuration.job_defaults || {})}
+                  onclick={() => advanceJob(job, step)}
                   >
                     <Icon name="arrowUp" size={14} />
                   </button>
@@ -381,14 +394,23 @@
                      buttons, each with a tooltip and an accessible name. -->
                 <div class="card-actions">
                   {#if step?.kind === 'processing'}
-                    <span
+                    {#if job.statusUpdateUnavailable}
+                      <span
+                        class="badge badge-warning"
+                        role="status"
+                        title="Status updates are unavailable; showing the expected status Running."
+                        aria-label={`Status updates unavailable for ${jobTitle(job)}; expected status Running`}
+                      >Status unconfirmed</span>
+                    {:else}
+                      <span
                       class="btn btn-ghost btn-icon step-busy"
                       role="status"
                       title="Processing"
                       aria-label={`Processing ${jobTitle(job)}`}
-                    >
-                      <span class="spinner"></span>
-                    </span>
+                      >
+                        <span class="spinner"></span>
+                      </span>
+                    {/if}
                   {:else if step?.kind === 'accept'}
                     <button
                       class="btn btn-primary btn-icon"
@@ -403,6 +425,7 @@
                       class="btn btn-primary btn-icon"
                       title={stepLabel(job, step)}
                       aria-label={stepLabel(job, step)}
+                      disabled={!hasUploadTargets(job, app.platforms, app.configuration.job_defaults || {})}
                       onclick={() => advanceJob(job, step)}
                     >
                       <Icon name="arrowUp" size={14} />
