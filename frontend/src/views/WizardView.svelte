@@ -267,6 +267,10 @@
     z-index: 2;
   }
 
+  .wizard-head > .row:last-child {
+    margin-left: auto;
+  }
+
   .steps {
     display: flex;
     gap: var(--space-4);
@@ -422,6 +426,13 @@
   @media (max-width: 860px) {
     .wizard-body {
       grid-template-columns: 1fr;
+    }
+  }
+
+  @media (max-width: 520px) {
+    .transient input {
+      min-width: 0;
+      flex: 1 1 0;
     }
   }
 </style>
