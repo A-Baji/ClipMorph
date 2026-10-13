@@ -1,6 +1,6 @@
 # UI autopilot findings
 
-Base: `2e4bd8c995570868c0b44e43a734e729e8973633`  
+Base: `2e4bd8c995570868c0b44e43a734e729e8973633`
 Scope: 16 configured states × 5 viewports. The gate ran 80 state/viewport combinations and captured 240 images; the manifest selected 80 for visual review and skipped 160.
 
 ## Gate
