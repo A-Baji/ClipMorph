@@ -228,6 +228,17 @@ async function main() {
       'the Topbar reads the Clip Queue header',
     );
 
+    // AP-037: one h1 per page. AP-036: the title sits beside the menu button.
+    assert.equal(await page.locator('h1').count(), 1, 'the board has a single h1');
+    await page.setViewportSize({ width: 812, height: 375 });
+    const titleGap = await page.evaluate(() => {
+      const menu = document.querySelector('.topbar .menu-toggle').getBoundingClientRect();
+      const title = document.querySelector('.topbar-title').getBoundingClientRect();
+      return title.left - menu.right;
+    });
+    assert.ok(titleGap <= 24, `topbar title floats ${titleGap}px from the menu button`);
+    await page.setViewportSize(server.viewports.desktop);
+
     // Issue #261: one board, no Completed/Queue sub-tabs — the six-column
     // pipeline board is the default (items 4/5/6).
     await page.waitForSelector('div.board', { timeout: 15000 });
@@ -328,6 +339,10 @@ async function main() {
     await page.click('.wizard-modal button:has-text("Add")');
     await page.click('.wizard-modal button:has-text("Next: Configure")');
     await page.waitForSelector('.wizard-modal button:has-text("Create 1")', { timeout: 15000 });
+    // AP-035: the override count hint stays on one line.
+    const hintLines = await page.$$eval('.wizard-modal .pane-head .faint', (nodes) =>
+      nodes.map((node) => node.getBoundingClientRect().height / parseFloat(getComputedStyle(node).lineHeight)));
+    assert.ok(hintLines.length > 0 && hintLines.every((n) => n < 1.5), `override hint wraps: ${hintLines}`);
     await page.click('.wizard-modal button:has-text("Create 1")');
 
     // D24 landing: the created clip leaves the rail and the modal closes
@@ -350,6 +365,19 @@ async function main() {
       `Settings Save should stay a single-line toolbar action, height ${saveMetrics.height}px`,
     );
     assert.equal(saveMetrics.whiteSpace, 'nowrap', 'Settings Save stays on one line');
+
+    // AP-031: a failed job-list load shows a load-error state with Retry,
+    // not six "No jobs" columns.
+    const failing = await browserRef.newPage({ viewport: server.viewports.desktop });
+    await failing.route('**/api/v1/jobs', (route) => route.abort());
+    await failing.goto(base, { waitUntil: 'domcontentloaded' });
+    await failing.waitForSelector('[data-load-error]', { timeout: 15000 });
+    assert.equal(await failing.locator('section.column').count(), 0, 'no empty columns on load error');
+    await failing.unroute('**/api/v1/jobs');
+    await failing.click('[data-load-error] button:has-text("Retry")');
+    await failing.waitForSelector('section.column', { timeout: 15000 });
+    assert.equal(await failing.locator('[data-load-error]').count(), 0, 'load error clears after Retry');
+    await failing.close();
 
     assert.deepEqual(pageErrors, [], 'no uncaught page errors during the flow');
     console.log('smoke.js: fixtures -> board -> create flow OK');

@@ -443,7 +443,13 @@
     display: flex;
     justify-content: space-between;
     align-items: baseline;
+    gap: var(--space-2);
     margin-bottom: var(--space-2);
+  }
+
+  .pane-head .faint {
+    flex-shrink: 0;
+    white-space: nowrap;
   }
 
   .job-error {

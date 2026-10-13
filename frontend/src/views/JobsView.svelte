@@ -10,6 +10,7 @@
     advanceJob,
     cardAction,
     cancelScheduledAttempt,
+    loadWorkspace,
     openJob,
     openJobFolder,
     PRERUN_STATUSES,
@@ -208,7 +209,7 @@
         </button>
         <span class="focus-label">{labelOf(focused)}</span>
       {:else}
-        <h1 class="board-hint">Pipeline</h1>
+        <h2 class="board-hint">Pipeline</h2>
       {/if}
     </div>
     <div class="row">
@@ -220,7 +221,13 @@
     </div>
   </div>
 
-  {#if focused}
+  {#if !app.online && !app.jobs.length}
+    <div class="column-full" data-load-error>
+      <EmptyState icon="queue" title="Couldn't load jobs" message="The local service didn't respond, so the job list is unknown.">
+        <button class="btn btn-primary" onclick={loadWorkspace}>Retry</button>
+      </EmptyState>
+    </div>
+  {:else if focused}
     <div class="column-full" role="region" aria-label={`${labelOf(focused)} stage`}>
       <p class="faint focus-hint">{hintOf(focused)} · {stageJobs(focused).length} job{stageJobs(focused).length === 1 ? '' : 's'}</p>
       {#if stageJobs(focused).length}
