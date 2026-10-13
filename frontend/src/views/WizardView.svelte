@@ -323,6 +323,7 @@
   .clip-main b {
     display: -webkit-box;
     overflow: hidden;
+    overflow-wrap: anywhere;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
     line-clamp: 2;
