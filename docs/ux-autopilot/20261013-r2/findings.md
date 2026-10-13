@@ -51,3 +51,10 @@ Unsupported-upload-target actions disabled (smoke `assertEmptyUploadState`); rev
 - Measured, no defect: board is an intentional horizontal scroll container (scrollWidth 1500 vs clientWidth) at <=1366; keyboard trap/Escape/focus return OK; unnamed controls 0.
 - Visual-only reviewer remarks not measured or filed (modal-bottom cutoff is AP-030; truncated titles have tooltips; native checkbox/date-picker contrast, card-icon alignment, review-conversion label truncation): listed under not verified.
 - Gates after fixes: build, check (0 errors), qa:ui exit 0 (95 combos), 718 unittests OK, compileall, check_structure, check_docs, smoke, gate-guard OK.
+
+## Coverage close-out (measurement of the open reviewer remarks)
+
+- AP-038 (P2, measured, objective bug, fixed test-first): the upload-review "Upload schedule for" datetime picker icon was black (luminance 0) on a luminance-20 field, about 1.2:1. The earlier lightening rule only covered `.config-control`; it now applies to every `input[type=datetime-local]`. Smoke asserts the rule; red without the CSS, green with it. Evidence: tests/qa/qa-out/review-upload__1920.png (reviewer-flagged), pixel check of the element crop.
+- Poll exhaustion (faithful reproduction, event stream blocked, accept mocked, job GET forced to queued): spinner and "Processing" status while polling; after 10 GETs the "Status unconfirmed" badge shows, spinner cleared, no Approve button, one accept POST. Now a smoke regression. The earlier "false positive" reading was the real stream settling the guard.
+- Dismissed after measurement: card action icons use `space-evenly` (positions equal for equal icon counts; design); "All stages" back link shares x with the hint, the 13px icon offset is button padding; native checkboxes use the teal accent-color; modal bodies are scrollable (AP-030).
+- Still not measured: real screen-reader output, live uploads, review-conversion label truncation at 1024/1366, zoom/text-scaling, reduced-motion.

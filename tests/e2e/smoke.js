@@ -191,6 +191,20 @@ async function assertPlatformSummary(page) {
     };
   }));
   assert.ok(rows.length > 0, 'per-platform summary lists participating platforms');
+  // AP-038: the schedule picker glyph is lightened on the dark surface.
+  const pickerFilter = await page.evaluate(() => {
+    const input = document.querySelector('.detail-modal input[type="datetime-local"]');
+    if (!input) return null;
+    for (const sheet of document.styleSheets) {
+      for (const rule of sheet.cssRules) {
+        if (!rule.selectorText?.includes('::-webkit-calendar-picker-indicator')) continue;
+        const base = rule.selectorText.replace('::-webkit-calendar-picker-indicator', '');
+        if (input.matches(base) && rule.style.filter) return rule.style.filter;
+      }
+    }
+    return 'none';
+  });
+  assert.ok(pickerFilter && pickerFilter !== 'none', `upload schedule picker icon is not lightened (filter: ${pickerFilter})`);
   for (const row of rows) {
     assert.ok(row.clipped <= 0, `platform summary subline is clipped by ${row.clipped}px`);
     assert.match(row.configId, /^[0-9a-f]{12}$/, 'platform summary shows its config id');
@@ -378,6 +392,37 @@ async function main() {
     await failing.waitForSelector('section.column', { timeout: 15000 });
     assert.equal(await failing.locator('[data-load-error]').count(), 0, 'load error clears after Retry');
     await failing.close();
+
+    // Poll exhaustion: spinner while polling, then "Status unconfirmed" with
+    // no Approve button (no duplicate approval) once the poll gives up.
+    const stuck = await browserRef.newPage({ viewport: server.viewports.desktop });
+    await stuck.route('**/api/v1/events*', (route) => route.abort());
+    await stuck.route('**/api/v1/jobs/*/events*', (route) => route.abort());
+    await stuck.goto(base, { waitUntil: 'domcontentloaded' });
+    await stuck.waitForSelector('article.card', { timeout: 15000 });
+    let stuckJob = null;
+    let stuckPosts = 0;
+    stuck.on('request', (request) => {
+      const match = request.url().match(/jobs\/([0-9a-f]+)\/checkpoints/);
+      if (match) { stuckJob = match[1]; stuckPosts += 1; }
+    });
+    await stuck.route('**/checkpoints/*/accept', (route) => route.fulfill({
+      status: 200, contentType: 'application/json', body: '{"resumed":true,"checkpoints":{}}',
+    }));
+    await stuck.route(/\/api\/v1\/jobs\/[0-9a-f]+$/, async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      if (body.job_id === stuckJob) body.status = 'queued';
+      return route.fulfill({ response, json: body });
+    });
+    const stuckCard = stuck.locator("article.card:has-text('Status fixture: awaiting_review')").first();
+    await stuckCard.locator('button.btn-primary.btn-icon').click();
+    await stuckCard.locator('.spinner').waitFor({ timeout: 5000 });
+    await stuckCard.locator('.badge-warning:has-text("Status unconfirmed")').waitFor({ timeout: 15000 });
+    assert.equal(await stuckCard.locator('.spinner').count(), 0, 'spinner clears when the poll gives up');
+    assert.equal(await stuckCard.locator('button.btn-primary.btn-icon').count(), 0, 'no Approve button after poll exhaustion');
+    assert.equal(stuckPosts, 1, 'poll exhaustion sends no duplicate approval');
+    await stuck.close();
 
     assert.deepEqual(pageErrors, [], 'no uncaught page errors during the flow');
     console.log('smoke.js: fixtures -> board -> create flow OK');

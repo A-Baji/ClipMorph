@@ -1615,7 +1615,7 @@ details.advanced .advanced-body {
 
 /* Issue #261 item 12: the datetime picker glyph is legible on the dark
    surface, and the whole field is the open target. */
-.config-control input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+input[type="datetime-local"]::-webkit-calendar-picker-indicator {
   filter: invert(0.72);
   cursor: pointer;
   opacity: 1;
