@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Canary page</title>
+<style>
+  body { margin: 0; padding: 24px 32px; font-family: Arial, sans-serif; color: #1a1a1a; background: #fff; }
+  h1 { font-size: 22px; margin: 0 0 16px; }
+  h2 { font-size: 14px; margin: 24px 0 8px; text-transform: uppercase; letter-spacing: .04em; color: #444; }
+  section { max-width: 760px; }
+  button { font: inherit; padding: 8px 16px; border: 1px solid #555; background: #f4f4f4; }
+  .row { display: flex; gap: 0; }
+  .row.ok { gap: 12px; margin-top: 12px; }
+  .field { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+  .field label { width: 92px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .field input, .field select { width: 180px; padding: 6px; }
+  .thumb { display: block; width: 300px; height: 56px; border: 1px solid #ccc; }
+  .item { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+  .ic { width: 16px; height: 16px; border-radius: 50%; background: #333; display: inline-block; margin-top: 12px; }
+  .faint { color: #c9c9c9; font-size: 12px; margin: 0; }
+  .normal { font-size: 14px; margin: 0 0 6px; }
+  .cards { display: flex; gap: 16px; }
+  .card { border: 1px solid #bbb; background: #fafafa; font-size: 14px; flex: 1; }
+  .card.a, .card.c { padding: 24px; }
+  .card.b { padding: 4px; }
+</style>
+</head>
+<body>
+<h1>Account settings</h1>
+<section>
+  <h2>Actions</h2>
+  <div class="row"><button>Save draft</button><button>Publish</button></div>
+  <div class="row ok"><button>Cancel</button><button>Back</button></div>
+
+  <h2>Settings form</h2>
+  <div class="field"><label for="t">Title</label><input id="t" value="Weekly update"></div>
+  <div class="field"><label for="r">Caption renderer (burned-in subtitles)</label>
+    <select id="r"><option>Default</option><option>High contrast</option></select></div>
+
+  <h2>Preview</h2>
+  <svg class="thumb" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Clip thumbnail">
+    <rect width="100" height="100" fill="#dfe8f5"/><circle cx="50" cy="50" r="38" fill="#2a5db0"/><rect x="44" y="30" width="12" height="40" fill="#fff"/>
+  </svg>
+
+  <h2>Downloads</h2>
+  <div class="item"><span class="ic"></span><span>Download report</span></div>
+
+  <h2>Sync status</h2>
+  <p class="normal">Status: ready</p>
+  <p class="faint">Last synced 2 minutes ago from the primary workspace</p>
+
+  <h2>Summary cards</h2>
+  <div class="cards">
+    <div class="card a">Clips processed<br><strong>128</strong></div>
+    <div class="card b">Pending review<br><strong>7</strong></div>
+    <div class="card c">Failed uploads<br><strong>2</strong></div>
+  </div>
+</section>
+</body>
+</html>

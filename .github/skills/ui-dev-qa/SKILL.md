@@ -83,6 +83,15 @@ Before finishing, scan the diff for: raw px/hex values, missing hover/focus/disa
 
 Start a fresh session or subagent that did not build the screens, ideally on a different vision-capable model, and give it only the screenshots plus `references/review-rubric.md`. It lists defects with locations and severities; it does not approve or reject. Fix every P0 and P1, rerun the gate, regenerate screenshots, and re-review the screens that changed. If no second session is available, tell the user the review step was skipped.
 
+## Autopilot mode (hands-off)
+
+When the user wants a fully hands-off round ("run a UI round", "autopilot", or the `/ui-round`
+prompt), follow `references/autopilot.md` end to end instead of stopping for triage. It defines
+the triage policy, fix loop, stop conditions, and final report, so you never need to ask the
+user anything. Supporting scripts: `scripts/canary.mjs` (reviewer calibration),
+`scripts/review-manifest.mjs` (screenshot batching), `scripts/gate-guard.mjs` (stops the gate
+from being weakened).
+
 ## Standards and limits
 
 - The script follows WCAG 2.2 Level AA where it can be automated. Target size uses the real SC 2.5.8 rule: 24x24 CSS px, or the spacing exception (a 24px circle around the target touches no other target); inline links and native checkboxes/radios are exempt.
@@ -106,3 +115,7 @@ Keep it short and factual:
 - `scripts/qa-ui.config.example.json` — starting config
 - `references/common-defects.md` — the checklist of small defects to look for
 - `references/review-rubric.md` — instructions for the independent reviewer
+- `references/autopilot.md` — the hands-off loop, triage policy, and stop conditions
+- `scripts/canary.mjs`, `canary/canary.html` — plants six known defects to test a reviewer model
+- `scripts/review-manifest.mjs` — builds capped screenshot batches for the reviewer
+- `scripts/gate-guard.mjs` — fails if thresholds, states, or the gate script were weakened
