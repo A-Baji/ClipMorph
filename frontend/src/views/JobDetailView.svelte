@@ -596,21 +596,19 @@
             {#each app.platforms as platform (platform)}
               {@const summary = app.platformSummaries[platform] || {}}
               {#if summary.participates}
-                <div class="list-row">
+                <div class="list-row platform-summary-row">
                   <PlatformMark {platform} />
                   <div class="grow">
                     <b>{platformLabel(platform)} · {summary.kind || 'clip'}</b>
                     <small>
                       {summary.conversion?.skip ? 'uploads the source file' : 'uploads the rendered vertical'}
-                      {#if summary.group_id}
-                        <!-- F15: the group renders as its platform list, never a hash. -->
-                        {@const members = groupPlatforms(summary.group_id)}
-                        · {members.length > 1
-                          ? `one render variant shared by ${platformListLabel(members)}`
-                          : 'its own render variant'}
-                      {/if}
                     </small>
                   </div>
+                  {#if summary.group_id}
+                    <span title="Platforms with the same config id share one render variant">
+                      <Badge>config <span class="config-id mono">{summary.group_id}</span></Badge>
+                    </span>
+                  {/if}
                 </div>
               {/if}
             {/each}

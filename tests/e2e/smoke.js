@@ -175,6 +175,30 @@ async function assertEmptyUploadState(page) {
   await page.waitForSelector('.detail-modal', { state: 'detached', timeout: 15000 });
 }
 
+async function assertPlatformSummary(page) {
+  await page.locator(
+    "article.card:has-text('Status fixture: completed') .card-main",
+  ).click();
+  await page.waitForSelector('.detail-modal', { timeout: 15000 });
+  await page.click('.detail-modal button.tab:has-text("Review")');
+  const rows = await page.evaluate(() => [
+    ...document.querySelectorAll('.detail-modal .platform-summary-row'),
+  ].map((row) => {
+    const note = row.querySelector('small');
+    return {
+      clipped: note.scrollWidth - note.clientWidth,
+      configId: row.querySelector('.config-id')?.textContent.trim() || '',
+    };
+  }));
+  assert.ok(rows.length > 0, 'per-platform summary lists participating platforms');
+  for (const row of rows) {
+    assert.ok(row.clipped <= 0, `platform summary subline is clipped by ${row.clipped}px`);
+    assert.match(row.configId, /^[0-9a-f]{12}$/, 'platform summary shows its config id');
+  }
+  await page.keyboard.press('Escape');
+  await page.waitForSelector('.detail-modal', { state: 'detached', timeout: 15000 });
+}
+
 async function main() {
   const server = await startServer({ scenario: 'states' });
   // The harness reports the base URL with a trailing slash; API paths below
@@ -244,6 +268,7 @@ async function main() {
         'Save draft',
         'Submit upload',
       );
+      await assertPlatformSummary(page);
       await assertEmptyUploadState(page);
     }
     await page.setViewportSize(server.viewports.desktop);
