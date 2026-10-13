@@ -97,6 +97,28 @@ export function humanize(value) {
   return String(value).replace(/_/g, ' ');
 }
 
+/** A status as a sentence-case label ("awaiting_review" -> "Awaiting review"). */
+export function statusLabel(value) {
+  const text = humanize(value);
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/**
+ * The one-click action that moves a job to its next state, or null when the
+ * card keeps its Run/Resume button: running work shows a spinner, and a job
+ * waiting on a review gate shows that gate's approval (the earliest gate first).
+ */
+export function nextStepAction(job) {
+  if (job.status === 'running') return { kind: 'processing' };
+  if (job.status !== 'awaiting_review') return null;
+  const checkpoints = job.checkpoints || {};
+  for (const stage of ['transcript', 'conversion']) {
+    if (checkpoints[stage]?.status === 'awaiting_review') return { kind: 'accept', stage };
+  }
+  if (checkpoints.upload?.status === 'awaiting_review') return { kind: 'upload' };
+  return null;
+}
+
 export function artifactLabel(artifact) {
   if (!artifact) return '';
   return artifact.display_name || artifact.kind || artifact.id;

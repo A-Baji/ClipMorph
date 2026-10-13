@@ -2,7 +2,7 @@
   import Badge from './Badge.svelte';
   import PlatformMark from './PlatformMark.svelte';
   import { app, retryUpload } from '../lib/store.svelte.js';
-  import { statusTone, humanize, scheduleLabel, formatDateTime } from '../lib/format.js';
+  import { statusTone, statusLabel, scheduleLabel, formatDateTime } from '../lib/format.js';
 
   /** One upload attempt row in the publish history. */
   let { attempt, jobId } = $props();
@@ -30,7 +30,7 @@
   <PlatformMark platform={attempt.platform} />
   <div class="grow">
     <b class="attempt-label">
-      <Badge tone={statusTone(attempt.status)}>{humanize(attempt.status)}</Badge>
+      <Badge tone={statusTone(attempt.status)}>{statusLabel(attempt.status)}</Badge>
       <span class="truncate">{label}</span>
     </b>
     <small>{artifactName}{scheduleLabel(attempt) ? ` · ${scheduleLabel(attempt)}` : ''}</small>

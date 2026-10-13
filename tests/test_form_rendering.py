@@ -192,11 +192,23 @@ class CardCompositionTests(unittest.TestCase):
         jobs = source(JOBS_VIEW)
         # Issue #261 item 5: both card anatomies render the humanized status
         # badge — status lives on the card chips, not in a column (item 4).
-        self.assertEqual(jobs.count("{humanize(job.status)}"), 2)
+        self.assertEqual(jobs.count("{statusLabel(job.status)}"), 2)
+        self.assertNotIn("{humanize(job.status)}", jobs)
         # The stage lives in the pipeline column, not in a redundant chip.
         self.assertNotIn("{humanize(job.current_checkpoint)}", jobs)
         # No raw enum key reaches a card chip.
         self.assertNotIn("{job.status}", jobs)
+
+    def test_primary_action_follows_the_job_state(self):
+        jobs = source(JOBS_VIEW)
+        # AP-021: both card anatomies render the state-driven primary action.
+        self.assertEqual(jobs.count("nextStepAction(job)"), 2)
+        for kind in ("processing", "accept", "upload"):
+            self.assertEqual(jobs.count(f"step?.kind === '{kind}'"), 2, kind)
+        self.assertIn('class="spinner"', jobs)
+        self.assertIn('role="status"', jobs)
+        self.assertIn('name="arrowUp"', jobs)
+        self.assertIn("arrowUp", source(ICON))
 
     def test_calendarX_icon_exists_for_the_cancel_attempt_action(self):
         self.assertIn("calendarX", source(ICON))

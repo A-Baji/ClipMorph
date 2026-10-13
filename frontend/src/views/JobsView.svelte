@@ -6,6 +6,7 @@
   import EmptyState from '../components/EmptyState.svelte';
   import {
     app,
+    advanceJob,
     cardAction,
     cancelScheduledAttempt,
     openJob,
@@ -16,7 +17,9 @@
   } from '../lib/store.svelte.js';
   import {
     statusTone,
+    statusLabel,
     humanize,
+    nextStepAction,
     soonestScheduledPublish,
     formatDateTime,
   } from '../lib/format.js';
@@ -129,6 +132,13 @@
     return PRERUN_STATUSES.includes(job.status) ? 'Run' : 'Resume';
   }
 
+  /** Tooltip / accessible name for the approve button of a review gate. */
+  function stepLabel(job, step) {
+    return step.kind === 'upload'
+      ? `Upload ${jobTitle(job)}`
+      : `Approve ${step.stage} of ${jobTitle(job)}`;
+  }
+
   function confirmDelete(job) {
     requestConfirm({
       title: 'Delete this job?',
@@ -207,6 +217,7 @@
           {#each stageJobs(focused) as job (job.job_id)}
             {@const sourceName = job.configuration?.general?.source}
             {@const attempt = scheduledAttempt(job)}
+            {@const step = nextStepAction(job)}
             <article class="jcard">
               <button
                 class="jcard-main"
@@ -218,7 +229,7 @@
                 </span>
                 <span class="jcard-title truncate" title={jobTitle(job)}>{jobTitle(job)}</span>
                 <span class="jcard-badges">
-                  <Badge tone={statusTone(job.status)}>{humanize(job.status)}</Badge>
+                  <Badge tone={statusTone(job.status)}>{statusLabel(job.status)}</Badge>
                   {#if attempt}
                     <span class="badge">{humanize(attempt.platform)} · scheduled</span>
                   {/if}
@@ -240,7 +251,34 @@
                     <Icon name="external" size={14} /> Open folder
                   </button>
                 {/if}
-                {#if canResume(job)}
+                {#if step?.kind === 'processing'}
+                  <span
+                    class="btn btn-ghost btn-icon step-busy"
+                    role="status"
+                    title="Processing"
+                    aria-label={`Processing ${jobTitle(job)}`}
+                  >
+                    <span class="spinner"></span>
+                  </span>
+                {:else if step?.kind === 'accept'}
+                  <button
+                    class="btn btn-primary btn-icon"
+                    title={stepLabel(job, step)}
+                    aria-label={stepLabel(job, step)}
+                    onclick={() => advanceJob(job, step)}
+                  >
+                    <Icon name="check" size={14} />
+                  </button>
+                {:else if step?.kind === 'upload'}
+                  <button
+                    class="btn btn-primary btn-icon"
+                    title={stepLabel(job, step)}
+                    aria-label={stepLabel(job, step)}
+                    onclick={() => advanceJob(job, step)}
+                  >
+                    <Icon name="arrowUp" size={14} />
+                  </button>
+                {:else if canResume(job)}
                   <button
                     class="btn btn-ghost btn-icon"
                     title={`${resumeLabel(job)} ${jobTitle(job)}`}
@@ -310,6 +348,7 @@
           <div class="column-body">
             {#each preview as job (job.job_id)}
               {@const attempt = scheduledAttempt(job)}
+              {@const step = nextStepAction(job)}
               {@const sourceName = job.configuration?.general?.source}
               <article class="card">
                 <button
@@ -318,13 +357,13 @@
                   onclick={() => openJob(job.job_id)}
                 >
                   <!-- C5: real poster frame; the icon is the fallback only. -->
-                  <Thumbnail name={sourceName} size={48} alt="" />
+                  <Thumbnail name={sourceName} size={64} alt="" />
                   <span class="card-text">
                     <span class="card-title truncate" title={jobTitle(job)}>
                       {jobTitle(job)}
                     </span>
                     <span class="card-meta">
-                      <Badge tone={statusTone(job.status)}>{humanize(job.status)}</Badge>
+                      <Badge tone={statusTone(job.status)}>{statusLabel(job.status)}</Badge>
                     </span>
                     <span class="faint mono card-source truncate">{sourceName}</span>
                     {#if job.status === 'completed'}
@@ -341,7 +380,34 @@
                 <!-- C4: quick actions are one bottom row of compact icon
                      buttons, each with a tooltip and an accessible name. -->
                 <div class="card-actions">
-                  {#if canResume(job)}
+                  {#if step?.kind === 'processing'}
+                    <span
+                      class="btn btn-ghost btn-icon step-busy"
+                      role="status"
+                      title="Processing"
+                      aria-label={`Processing ${jobTitle(job)}`}
+                    >
+                      <span class="spinner"></span>
+                    </span>
+                  {:else if step?.kind === 'accept'}
+                    <button
+                      class="btn btn-primary btn-icon"
+                      title={stepLabel(job, step)}
+                      aria-label={stepLabel(job, step)}
+                      onclick={() => advanceJob(job, step)}
+                    >
+                      <Icon name="check" size={14} />
+                    </button>
+                  {:else if step?.kind === 'upload'}
+                    <button
+                      class="btn btn-primary btn-icon"
+                      title={stepLabel(job, step)}
+                      aria-label={stepLabel(job, step)}
+                      onclick={() => advanceJob(job, step)}
+                    >
+                      <Icon name="arrowUp" size={14} />
+                    </button>
+                  {:else if canResume(job)}
                     <button
                       class="btn btn-ghost btn-icon"
                       title={`${resumeLabel(job)} ${jobTitle(job)}`}
@@ -387,7 +453,7 @@
                 Show all {jobs.length}
               </button>
             {:else if !jobs.length}
-              <p class="faint column-empty">No jobs</p>
+              <EmptyState compact icon="queue" title="No jobs" />
             {/if}
           </div>
         </section>
@@ -509,21 +575,25 @@
 
   .card-main {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     gap: var(--space-3);
     text-align: left;
-    padding: var(--space-3);
+    padding: calc(var(--space-3) / 2);
     background: none;
     border: none;
     cursor: pointer;
     color: inherit;
   }
 
+  .card-main :global(.thumb) {
+    flex: none;
+  }
+
   .card-text {
     min-width: 0;
     flex: 1;
     display: grid;
-    gap: var(--space-2);
+    gap: var(--space-1);
     justify-items: start;
   }
 
@@ -543,16 +613,34 @@
     max-width: 100%;
   }
 
-  .card-actions {
+  .card-actions,
+  .jcard-actions {
     display: flex;
     flex-wrap: wrap;
+    justify-content: space-evenly;
     gap: var(--space-2);
-    padding: 0 var(--space-3) var(--space-3);
+    padding: 0 calc(var(--space-3) / 2) calc(var(--space-3) / 2);
   }
 
-  .column-empty {
-    padding: var(--space-2);
-    font-size: var(--text-xs);
+  /* AP-021: running jobs show a spinner where the Run/Resume button was. */
+  .step-busy {
+    cursor: default;
+    pointer-events: none;
+  }
+
+  .spinner {
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--color-border-strong);
+    border-top-color: var(--color-primary);
+    border-radius: 50%;
+    animation: step-spin 0.8s linear infinite;
+  }
+
+  @keyframes step-spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   /* --- Expanded column: the full-width card grid (issue #261 items 2/6).
@@ -582,7 +670,7 @@
   .jcard-main {
     display: grid;
     gap: var(--space-2);
-    padding: var(--space-2);
+    padding: var(--space-1);
     background: none;
     border: none;
     cursor: pointer;
@@ -629,12 +717,5 @@
   .jcard-time {
     font-size: var(--text-xs);
     max-width: 100%;
-  }
-
-  .jcard-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-2);
-    padding: 0 var(--space-2) var(--space-2);
   }
 </style>

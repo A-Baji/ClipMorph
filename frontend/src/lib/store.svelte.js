@@ -957,7 +957,29 @@ export async function retryCheckpoint(stage) {
 }
 
 export async function acceptCheckpoint(stage, group) {
-  const job = selectedJob();
+  return acceptJobCheckpoint(selectedJob(), stage, group);
+}
+
+/** A job card's approve button: accept the gate, or upload with the draft's defaults. */
+export async function advanceJob(job, step) {
+  if (step.kind === 'accept') {
+    await acceptJobCheckpoint(job, step.stage);
+    return;
+  }
+  try {
+    const submitted = await api.submitUpload(job.job_id, {});
+    await refreshJob(job.job_id);
+    notify(
+      submitted.scheduled
+        ? 'Upload attempts scheduled for the chosen time'
+        : 'Upload attempts started',
+    );
+  } catch (error) {
+    report(error);
+  }
+}
+
+async function acceptJobCheckpoint(job, stage, group) {
   if (!job) return false;
   try {
     const result = await api.acceptCheckpoint(

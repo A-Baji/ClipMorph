@@ -34,6 +34,7 @@
   } from '../lib/store.svelte.js';
   import {
     statusTone,
+    statusLabel,
     humanize,
     formatDateTime,
     groupMetricPosts,
@@ -271,7 +272,7 @@
         <div>
           <div class="title truncate">{title}</div>
           <div class="row faint">
-            <Badge tone={statusTone(job.status)}>{humanize(job.status)}</Badge>
+            <Badge tone={statusTone(job.status)}>{statusLabel(job.status)}</Badge>
             <span class="mono">{job.configuration?.general?.source}</span>
             <span>· updated {formatDateTime(job.updated_at)}</span>
           </div>
@@ -312,7 +313,7 @@
                 <div class="name">{stage.charAt(0).toUpperCase() + stage.slice(1)}</div>
                 <div class="row">
                   <!-- U7: the badge is the row's single status render. -->
-                  <Badge tone={statusTone(checkpoint.status)}>{humanize(checkpoint.status) || 'pending'}</Badge>
+                  <Badge tone={statusTone(checkpoint.status)}>{statusLabel(checkpoint.status) || 'Pending'}</Badge>
                   {#if checkpoint.status === 'failed'}
                     <button class="btn btn-ghost btn-sm" onclick={() => retryCheckpoint(stage)}>Retry</button>
                   {/if}
@@ -337,7 +338,7 @@
                 </div>
                 <div class="verdict">
                   {#if attempt}
-                    <Badge tone={statusTone(attempt.status)}>{humanize(attempt.status)}</Badge>
+                    <Badge tone={statusTone(attempt.status)}>{statusLabel(attempt.status)}</Badge>
                   {:else}
                     <Badge>{summary.participates === false ? 'skipped' : 'pending'}</Badge>
                   {/if}

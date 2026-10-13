@@ -42,7 +42,7 @@
   <main class="main">
     <Topbar title={page.title} subtitle={page.subtitle}>
       {#if !app.online}
-        <span class="badge badge-danger">offline</span>
+        <span class="badge badge-danger">Offline</span>
       {/if}
     </Topbar>
     <div class="alert-slot">

@@ -35,3 +35,7 @@ Completed on branch `ui/autopilot-20261012`. Stop condition: the three-pass revi
 ## Gate integrity
 
 No UI-QA states, viewports, thresholds, or allowlist entries were changed. `gate-guard.mjs` passed; no allowlist entries were added.
+
+## Follow-up: approved Q&A items
+
+Implemented after user review: AP-021 (spinner / one-click approve / upload arrow on job cards), AP-007 (card spacing, 64px thumbnail, evenly spread actions), AP-008 (compact empty column), AP-009 (sentence-case status labels), AP-010 (tighter page spacing), AP-011 (alert alignment), AP-012 (helper text size), AP-013 (Metrics empty state text size), AP-016 to AP-019 (wizard). AP-014 and AP-020 rejected as fine. qa:ui passed, gate-guard OK, 715 unit tests pass.
