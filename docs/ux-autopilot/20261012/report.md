@@ -2,7 +2,7 @@
 
 ## Result
 
-Completed on branch `ui/autopilot-20261012`. Stop condition: the three-pass reviewer limit was reached. The round comprises five commits, including this documentation cleanup.
+Completed on branch `ui/autopilot-20261012`. Stop condition: the three-pass reviewer limit was reached. The round comprises six commits, including this base-hash correction.
 
 ## Fixed
 
@@ -16,7 +16,7 @@ Completed on branch `ui/autopilot-20261012`. Stop condition: the three-pass revi
 - `npm --prefix frontend run qa:ui` — passed, all 80 state/viewport combinations, 0 gate errors. The 1,626 warnings were expected seeded-thumbnail 404s.
 - `python -m unittest discover -s tests -v` in the activated `clipmorph` Conda environment — passed, 714 tests.
 - `python scripts/check_docs.py` — passed.
-- `node .github/skills/ui-dev-qa/scripts/gate-guard.mjs --base 2e4bd8c995570868c0b44e3a734e729e8973633` — passed. The base commit has no UI-QA config, so the guard noted that config comparison was unavailable.
+- `node .github/skills/ui-dev-qa/scripts/gate-guard.mjs --base 2e4bd8c995570868c0b44e43a734e729e8973633` — passed against the recorded base commit.
 - Browser regression probes failed before each fix and passed after: mobile modal `scrollWidth` changed from 330px vs 303px available to 303px vs 303px; both previously overflowing desktop clip labels now fit, with full titles preserved.
 
 ## Deferred and human attention

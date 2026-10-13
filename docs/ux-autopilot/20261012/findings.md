@@ -7,7 +7,7 @@ Scope: 16 configured states × 5 viewports. The gate ran 80 state/viewport combi
 
 - **measured — PASS:** 0 errors across all 80 combinations; axe was enabled.
 - **measured — warning noise:** 1,626 warnings, all `thumbnail 404 (seeded fixture fallback, expected)`. The QA runner emits these for intentionally synthetic fixture thumbnails; no other warning category appeared. The current UI-QA config has no supported control for this console-warning path, so no ineffective allowlist entry was added.
-- **measured — gate integrity:** no UI-QA states, viewports, thresholds, or allowlist entries changed. `gate-guard.mjs` passed; the original base commit has no UI-QA config, so the guard reported that config comparison was unavailable.
+- **measured — gate integrity:** no UI-QA states, viewports, thresholds, or allowlist entries changed. `gate-guard.mjs` passed against the recorded base commit.
 - The final `qa:ui` process exited 0 and reported 0 gate errors. Windows logged a non-fatal Proactor `ConnectionResetError [WinError 10054]` during harness shutdown.
 
 ## Findings and triage
