@@ -274,7 +274,8 @@
           <div class="row faint">
             <Badge tone={statusTone(job.status)}>{statusLabel(job.status)}</Badge>
             <span class="mono">{job.configuration?.general?.source}</span>
-            <span>· updated {formatDateTime(job.updated_at)}</span>
+            <span class="job-meta-separator" aria-hidden="true">·</span>
+            <span class="job-meta-updated">updated {formatDateTime(job.updated_at)}</span>
           </div>
         </div>
       </div>

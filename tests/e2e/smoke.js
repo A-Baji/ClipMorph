@@ -121,6 +121,27 @@ async function main() {
     const cardsBeforeBoardOnly = await page.$$eval('main.main article.card', (n) => n.length);
     assert.ok(cardsBeforeBoardOnly > 0, 'board cards are present');
 
+    const reviewCard = page.locator(
+      "article.card:has-text('Status fixture: awaiting_review') .card-main",
+    ).first();
+    await reviewCard.click();
+    await page.waitForSelector('.detail-modal .row.faint', { timeout: 15000 });
+    const meta = page.locator('.detail-modal .row.faint').first();
+    const separator = meta.locator('.job-meta-separator');
+    assert.equal(await separator.count(), 1, 'job metadata separator is its own item');
+    const metaGaps = await meta.evaluate((row) => {
+      const source = row.querySelector('.mono').getBoundingClientRect();
+      const dot = row.querySelector('.job-meta-separator').getBoundingClientRect();
+      const updated = row.querySelector('.job-meta-updated').getBoundingClientRect();
+      return [dot.left - source.right, updated.left - dot.right];
+    });
+    assert.ok(
+      Math.abs(metaGaps[0] - metaGaps[1]) <= 1,
+      `job metadata separator spacing is uneven: ${metaGaps.join('px, ')}px`,
+    );
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('.detail-modal', { state: 'detached', timeout: 15000 });
+
     // Create flow (item 3): the New action opens the wizard modal.
     await page.click('button:has-text("New")');
     await page.waitForSelector('.wizard-modal div.clip-grid', { timeout: 15000 });
