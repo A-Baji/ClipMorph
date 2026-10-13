@@ -216,7 +216,7 @@
                 <span class="jcard-art" aria-hidden="true">
                   <Thumbnail name={sourceName} size={110} alt="" />
                 </span>
-                <span class="jcard-title truncate">{jobTitle(job)}</span>
+                <span class="jcard-title truncate" title={jobTitle(job)}>{jobTitle(job)}</span>
                 <span class="jcard-badges">
                   <Badge tone={statusTone(job.status)}>{humanize(job.status)}</Badge>
                   {#if attempt}
@@ -320,7 +320,7 @@
                   <!-- C5: real poster frame; the icon is the fallback only. -->
                   <Thumbnail name={sourceName} size={48} alt="" />
                   <span class="card-text">
-                    <span class="card-title truncate">
+                    <span class="card-title truncate" title={jobTitle(job)}>
                       {jobTitle(job)}
                     </span>
                     <span class="card-meta">

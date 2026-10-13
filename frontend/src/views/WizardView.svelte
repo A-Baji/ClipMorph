@@ -119,7 +119,7 @@
               />
               <Thumbnail name={source.name} size={52} alt={`Poster frame for ${source.name}`} />
               <span class="clip-main">
-                <b>{source.name}</b>
+                <b title={source.name}>{source.name}</b>
                 <small class="faint">{formatBytes(source.size)}</small>
               </span>
             </label>
@@ -314,6 +314,14 @@
 
   .clip-main {
     display: grid;
+  }
+
+  .clip-main b {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
   }
 
   .transient {
