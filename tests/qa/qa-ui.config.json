@@ -19,6 +19,13 @@
       "crops": [".jobs-head", ".column-full"]
     },
     {
+      "name": "running-card-spinner",
+      "scenario": "states",
+      "promote": true,
+      "ready": ".card-actions [role='status'][aria-label='Processing Status fixture: running']",
+      "crops": [".jobs-head", "article.card:has-text('Status fixture: running')"]
+    },
+    {
       "name": "long-content",
       "scenario": "long",
       "ready": ".board article.card .card-main",
