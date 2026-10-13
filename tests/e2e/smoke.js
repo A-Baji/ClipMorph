@@ -11,10 +11,11 @@
 'use strict';
 
 const assert = require('node:assert');
+const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { startServer } = require('./harness.js');
+const { PYTHON, startServer } = require('./harness.js');
 
 const FRONTEND_DIR = path.join(__dirname, '..', '..', 'frontend');
 
@@ -76,6 +77,76 @@ function cleanup(clip) {
   }
 }
 
+async function assertReviewActionLayout(page, title, secondaryLabel, primaryLabel) {
+  await page.locator(`article.card:has-text('${title}') .card-main`).click();
+  await page.waitForSelector('.detail-modal', { timeout: 15000 });
+  await page.click('.detail-modal button.tab:has-text("Review")');
+  const toolbar = page.locator('.detail-modal .review-action-bar');
+  await toolbar.waitFor({ timeout: 15000 });
+  const secondary = toolbar.getByRole('button', { name: secondaryLabel });
+  const primary = toolbar.getByRole('button', { name: primaryLabel });
+  assert.equal(await secondary.count(), 1, `${secondaryLabel} is in the shared review toolbar`);
+  assert.equal(await primary.count(), 1, `${primaryLabel} is in the shared review toolbar`);
+  const positions = await toolbar.evaluate((bar) => {
+    const barRect = bar.getBoundingClientRect();
+    const bounds = (selector) => {
+      const rect = bar.querySelector(selector).getBoundingClientRect();
+      return {
+        left: rect.left,
+        right: rect.right,
+        top: rect.top,
+        bottom: rect.bottom,
+      };
+    };
+    return {
+      bar: { left: barRect.left, right: barRect.right },
+      buttons: bounds('.review-action-buttons'),
+      secondary: bounds('.review-action-buttons .btn-secondary'),
+      primary: bounds('.review-action-buttons .btn-primary'),
+      context: bar.querySelector('.review-action-context')
+        ? bounds('.review-action-context')
+        : null,
+      renderVariant: bar.querySelector('.variant-picker select')
+        ? bounds('.variant-picker select')
+        : null,
+    };
+  });
+  assert.ok(
+    Math.abs(positions.secondary.top - positions.primary.top) <= 1,
+    `${primaryLabel} stays on the secondary-action row`,
+  );
+  assert.ok(
+    positions.secondary.right <= positions.primary.left,
+    `${secondaryLabel} is left of ${primaryLabel}`,
+  );
+  assert.ok(
+    Math.abs(positions.buttons.right - positions.bar.right) <= 1,
+    `review actions are aligned to the toolbar's right edge`,
+  );
+  assert.ok(
+    Math.abs(positions.primary.right - positions.bar.right) <= 1,
+    `${primaryLabel} is aligned to the review toolbar's right edge`,
+  );
+  if (secondaryLabel === 'Re-render' && page.viewportSize().width > 1400) {
+    const actionCenter = (positions.buttons.top + positions.buttons.bottom) / 2;
+    const selectorCenter = (positions.renderVariant.top + positions.renderVariant.bottom) / 2;
+    const centerDelta = Math.abs(actionCenter - selectorCenter);
+    assert.ok(
+      centerDelta <= 2,
+      `conversion actions align vertically with the render-variant control; offset ${centerDelta}px`,
+    );
+  }
+  if (secondaryLabel === 'Save draft') {
+    const fieldGap = await toolbar.evaluate((bar) => {
+      const next = bar.nextElementSibling;
+      return next.getBoundingClientRect().top - bar.getBoundingClientRect().bottom;
+    });
+    assert.ok(fieldGap >= 16, `Upload draft fields need 16px after the toolbar; got ${fieldGap}px`);
+  }
+  await page.keyboard.press('Escape');
+  await page.waitForSelector('.detail-modal', { state: 'detached', timeout: 15000 });
+}
+
 async function main() {
   const server = await startServer({ scenario: 'states' });
   // The harness reports the base URL with a trailing slash; API paths below
@@ -85,6 +156,10 @@ async function main() {
   let browserRef = null;
   try {
     await waitForFixture(base);
+    execFileSync(PYTHON, [
+      path.join(__dirname, '..', 'qa', 'seed_states.py'),
+      server.dataDir,
+    ], { stdio: 'inherit' });
     browserRef = await playwright[BROWSER].launch();
     const page = await browserRef.newPage({
       viewport: server.viewports.desktop,
@@ -120,6 +195,29 @@ async function main() {
     await page.waitForSelector('article.card .card-actions', { timeout: 15000 });
     const cardsBeforeBoardOnly = await page.$$eval('main.main article.card', (n) => n.length);
     assert.ok(cardsBeforeBoardOnly > 0, 'board cards are present');
+
+    for (const viewport of [server.viewports.desktop, { width: 375, height: 812 }]) {
+      await page.setViewportSize(viewport);
+      await assertReviewActionLayout(
+        page,
+        'Status fixture: awaiting_review',
+        'Save edits',
+        'Accept transcript',
+      );
+      await assertReviewActionLayout(
+        page,
+        'Checkpoint fixture: awaiting_review',
+        'Re-render',
+        'Accept composition',
+      );
+      await assertReviewActionLayout(
+        page,
+        'Status fixture: completed',
+        'Save draft',
+        'Submit upload',
+      );
+    }
+    await page.setViewportSize(server.viewports.desktop);
 
     const reviewCard = page.locator(
       "article.card:has-text('Status fixture: awaiting_review') .card-main",

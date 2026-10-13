@@ -370,18 +370,18 @@
       <!-- E17: review affordances for the current gate only. -->
       {#if reviewGate === 'transcript'}        <Card title="Transcript" description="Edit timing and text, then save a new revision.">
           <!-- E11: one standard action bar, primary/secondary separated. -->
-          <div class="action-bar action-lead-row">
-            <span class="action-lead faint">
-              {app.transcript ? `${app.transcript.segments.length} segments` : ''}
-            </span>
-            <div class="action-group">
+          <div class="action-bar review-action-bar">
+            <div class="review-action-context">
+              <span class="faint">
+                {app.transcript ? `${app.transcript.segments.length} segments` : ''}
+              </span>
+            </div>
+            <div class="review-action-buttons">
               <button
                 class="btn btn-secondary"
                 disabled={!app.transcript}
                 onclick={saveTranscript}
               >Save edits</button>
-            </div>
-            <div class="action-group">
               <button
                 class="btn btn-primary"
                 disabled={job.checkpoints?.transcript?.status !== 'awaiting_review'}
@@ -439,27 +439,30 @@
             title="Composition"
             description="The conversion layout this job renders."
           >
-            <div class="action-bar action-lead-row">
-              <span class="action-lead faint">
-                {app.transcript
-                  ? `${app.transcript.segments.length} caption line${app.transcript.segments.length === 1 ? '' : 's'}`
-                  : ''}
-              </span>
-              {#if renderGroupOptions.length}
-                <!-- F15: human labels — "All variants" plus one entry per
-                     group, labeled by the platform list sharing that render
-                     variant; the raw group id is the value only. -->
-                <span class="variant-picker">
-                  <select aria-label="Render variant" bind:value={renderGroup}>
-                    <option value="">All variants</option>
-                    {#each renderGroupOptions as option (option.id)}
-                      <option value={option.id}>{platformListLabel(option.platforms)}</option>
-                    {/each}
-                  </select>
-                  <small class="faint">Each group is one render variant shared by the platforms it lists.</small>
+            <div class="action-bar review-action-bar review-action-bar-conversion">
+              <div class="review-action-context">
+                <span class="faint">
+                  {app.transcript
+                    ? `${app.transcript.segments.length} caption line${app.transcript.segments.length === 1 ? '' : 's'}`
+                    : ''}
                 </span>
-              {/if}
-              <div class="action-group">
+                {#if renderGroupOptions.length}
+                  <!-- F15: human labels — "All variants" plus one entry per
+                       group, labeled by the platform list sharing that render
+                       variant; the raw group id is the value only. -->
+                  <label class="variant-picker">
+                    <span>Render variant</span>
+                    <select aria-label="Render variant" bind:value={renderGroup}>
+                      <option value="">All variants</option>
+                      {#each renderGroupOptions as option (option.id)}
+                        <option value={option.id}>{platformListLabel(option.platforms)}</option>
+                      {/each}
+                    </select>
+                    <small class="faint">Each group is one render variant shared by the platforms it lists.</small>
+                  </label>
+                {/if}
+              </div>
+              <div class="review-action-buttons">
                 <!-- Issue #261 item 18: the button is no longer a no-op —
                      edited config is PATCHed into the job (hash-guarded) and
                      the re-render produces the new output; with no edits it
@@ -472,8 +475,6 @@
                   <Icon name="refresh" />
                   {reviewDirty() ? 'Apply changes & re-render' : 'Re-render'}
                 </button>
-              </div>
-              <div class="action-group">
                 <button
                   class="btn btn-primary"
                   disabled={job.checkpoints?.conversion?.status !== 'awaiting_review' || reviewDirty()}
@@ -528,6 +529,16 @@
              here, and its separate tab is gone. -->
         <div class="grid-2">
         <Card title="Upload draft" description="What each selected platform will receive.">
+          <div class="action-bar review-action-bar review-action-bar-upload">
+            <div class="review-action-buttons">
+              <button class="btn btn-secondary" onclick={saveUploadDraft}>
+                <Icon name="check" /> Save draft
+              </button>
+              <button class="btn btn-primary" disabled={app.busy} onclick={submitUpload}>
+                <Icon name="upload" /> Submit upload
+              </button>
+            </div>
+          </div>
           <div class="stack">
             <Field label="Title">
               <input aria-label="Upload title" bind:value={app.publish.draft.title} />
@@ -570,18 +581,6 @@
               </Field>
             {/if}
 
-            <div class="action-bar">
-              <div class="action-group">
-                <button class="btn btn-secondary" onclick={saveUploadDraft}>
-                  <Icon name="check" /> Save draft
-                </button>
-              </div>
-              <div class="action-group">
-                <button class="btn btn-primary" disabled={app.busy} onclick={submitUpload}>
-                  <Icon name="upload" /> Submit upload
-                </button>
-              </div>
-            </div>
           </div>
         </Card>
 

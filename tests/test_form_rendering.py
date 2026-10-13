@@ -345,10 +345,10 @@ class Phase2CViewTests(unittest.TestCase):
         self.assertIn("field-error", config_form)
 
     def test_modal_action_bars_use_the_shared_gap(self):
-        """E11: action bars share one gap with group separation."""
+        """E11: action bars share a gap and review gates pair their actions."""
         detail = source(self.DETAIL)
         self.assertIn('class="action-bar', detail)
-        self.assertGreaterEqual(detail.count('class="action-group"'), 4)
+        self.assertEqual(detail.count('class="review-action-buttons"'), 3)
         styles = (FRONTEND_SRC / "styles.css").read_text(encoding="utf-8")
         self.assertIn(".action-bar {", styles)
         gap_block = styles[styles.index(".action-bar {"):styles.index(".action-group {")]

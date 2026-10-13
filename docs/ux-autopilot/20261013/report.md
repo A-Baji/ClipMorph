@@ -42,3 +42,16 @@ The independent `ui-reviewer` passed its canary (6/6). Five visual-review dispat
 ## Not verified
 
 No live uploads or credentials; no production SSE/status-outage truthfulness; dark-mode contrast; full keyboard journeys or actual screen-reader speech. The specific Approve focus path and spinner role/name were checked.
+
+## Follow-up: AP-028 shared review actions
+
+After the round, the user approved consistent review-action placement across transcript, conversion, and upload review: contextual controls remain on the left, while the secondary/primary button pair stays together at the right of the top-of-panel toolbar, in that order. The composition divider was removed. The QA fixture and gate now include an upload-review state. A refreshed visual pass initially found a 7px vertical offset between conversion actions and the Render variant control; after adjustment, the browser assertion passes at <=2px and the reviewer confirmed the alignment.
+
+- `npm --prefix frontend run build` — passed.
+- `npm --prefix frontend run check` — passed, 0 errors and 0 warnings.
+- `npm --prefix frontend run qa:ui` — passed, 90 state/viewport combinations, 0 errors. All 1,856 warnings were expected seeded-thumbnail 404s.
+- `node tests/e2e/smoke.js` in the activated `clipmorph` Conda environment — passed; all three review surfaces keep secondary and primary actions together at the toolbar's right edge at desktop and 375px, with the conversion pair within 2px of the selector's vertical center.
+- `python -m unittest discover -s tests -v` in the activated `clipmorph` Conda environment — passed, 715 tests. The source-structure regression assertion was updated to match the new review-action grouping.
+- `node .github/skills/ui-dev-qa/scripts/gate-guard.mjs --base a1b3c799f08e59ce32cf57e1837380ff7935f9c6` — passed.
+
+The reviewer repeated the known full-page backdrop seam and modal-bottom visibility observations. The former is a full-page screenshot artifact; the latter remains reachable by scrolling (AP-030). Neither was reopened.

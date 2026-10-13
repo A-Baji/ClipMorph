@@ -90,6 +90,19 @@
       "crops": [".detail-modal .action-bar", ".detail-modal .segment"]
     },
     {
+      "name": "review-upload",
+      "scenario": "states",
+      "promote": true,
+      "ready": ".detail-modal .review-action-bar button:has-text('Submit upload')",
+      "actions": [
+        { "click": "article.card:has-text('Status fixture: completed') .card-main" },
+        { "wait": 300 },
+        { "click": ".detail-modal button.tab:has-text('Review')" },
+        { "wait": 400 }
+      ],
+      "crops": [".detail-modal .review-action-bar", ".detail-modal .checks"]
+    },
+    {
       "name": "review-conversion",
       "scenario": "states",
       "promote": true,

@@ -38,6 +38,20 @@ def _promote_running_fixture(service: JobService) -> None:
     print(f"promoted running action fixture: {manifest.job_id}")
 
 
+def _promote_upload_review_fixture(service: JobService) -> None:
+    manifest = next(
+        item for item in service.list_jobs()
+        if item.configuration.get("upload", {}).get("content", {}).get("title")
+        == "Status fixture: completed")
+    checkpoint = manifest.checkpoints["upload"]
+    checkpoint["status"] = "awaiting_review"
+    checkpoint.pop("completed_at", None)
+    checkpoint.pop("error", None)
+    manifest.status = "awaiting_review"
+    manifest.save(service.jobs_dir)
+    print(f"promoted upload review fixture: {manifest.job_id}")
+
+
 def main(data_dir: str) -> None:
     from verify_phase2c import _promote_conversion_review_fixture
 
@@ -66,6 +80,7 @@ def main(data_dir: str) -> None:
             manifest.job_id, session, expected_revision=1,
             expected_checkpoint_revision=manifest.checkpoints["transcript"]["revision"])
         _promote_running_fixture(service)
+        _promote_upload_review_fixture(service)
         print(f"seeded transcript session for {manifest.job_id}")
     finally:
         service.close()
