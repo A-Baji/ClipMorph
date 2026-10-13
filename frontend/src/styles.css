@@ -1576,7 +1576,7 @@ details.advanced .advanced-body {
 
   /* F6 (spec review): the non-checkbox row's label is text-only (no nested
      interactive reset button); it truncates like the checkbox label. */
-  .config-label > label {
+  .config-label > label:not(.check) {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1584,9 +1584,8 @@ details.advanced .advanced-body {
   }
 
   .config-label > .check span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   .badges {

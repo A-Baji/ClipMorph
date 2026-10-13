@@ -58,3 +58,11 @@ Unsupported-upload-target actions disabled (smoke `assertEmptyUploadState`); rev
 - Poll exhaustion (faithful reproduction, event stream blocked, accept mocked, job GET forced to queued): spinner and "Processing" status while polling; after 10 GETs the "Status unconfirmed" badge shows, spinner cleared, no Approve button, one accept POST. Now a smoke regression. The earlier "false positive" reading was the real stream settling the guard.
 - Dismissed after measurement: card action icons use `space-evenly` (positions equal for equal icon counts; design); "All stages" back link shares x with the hint, the 13px icon offset is button padding; native checkboxes use the teal accent-color; modal bodies are scrollable (AP-030).
 - Still not measured: real screen-reader output, live uploads, review-conversion label truncation at 1024/1366, zoom/text-scaling, reduced-motion.
+
+## Addendum: coverage-closing round 3
+
+- AP-039 (P3, measured, approved option A): conversion-config toggle labels in the job detail Review tab were clipped with an ellipsis and no tooltip (up to +101px at 1024px). Root cause: the `.config-label > label` truncation rule also matched checkbox labels. It is now `label:not(.check)` and toggle labels wrap. Regression: `assertConversionLabelsReadable` in `tests/e2e/smoke.js` (red before, green after).
+- Measured, no issue: lowest contrast in the detail modal is 5.41:1; hover states change as expected; with events blocked at 375px there is no overflow or error alert.
+- Deferred by user: zoom, large text, reduced motion, high contrast.
+- Not verified: real screen-reader output, live uploads, zoom/text scaling/reduced motion/high contrast, extreme long-title and many-job stress cases.
+- Gates: build, check (0 errors), qa:ui (95 combinations), unittest (718), compileall, check_structure, check_docs, smoke, gate-guard (base a75ba9e) all pass.
