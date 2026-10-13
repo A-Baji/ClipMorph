@@ -294,6 +294,30 @@ async function main() {
     await page.keyboard.press('Escape');
     await page.waitForSelector('.detail-modal', { state: 'detached', timeout: 15000 });
 
+    // AP-033: a double-clicked board Approve sends exactly one accept request.
+    let acceptRequests = 0;
+    await page.route('**/api/v1/jobs/*/checkpoints/*/accept', async (route) => {
+      acceptRequests += 1;
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ resumed: true, checkpoints: {} }),
+      });
+    });
+    await page
+      .locator("article.card:has-text('Status fixture: awaiting_review') button.btn-primary.btn-icon")
+      .first()
+      .dblclick();
+    await page.waitForTimeout(800);
+    await page.unroute('**/api/v1/jobs/*/checkpoints/*/accept');
+    assert.equal(acceptRequests, 1, 'double-clicking Approve sends one accept request');
+    assert.equal(
+      await page.evaluate(() => document.activeElement?.getAttribute('data-open-job') !== null),
+      true,
+      'focus lands on the card after Approve instead of <body>',
+    );
+
     // Create flow (item 3): the New action opens the wizard modal.
     await page.click('button:has-text("New")');
     await page.waitForSelector('.wizard-modal div.clip-grid', { timeout: 15000 });

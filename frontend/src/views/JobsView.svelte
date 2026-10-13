@@ -1,4 +1,5 @@
 <script>
+  import { tick } from 'svelte';
   import Icon from '../components/Icon.svelte';
   import Badge from '../components/Badge.svelte';
   import Progress from '../components/Progress.svelte';
@@ -76,6 +77,13 @@
   }
 
   let focused = $state('');
+
+  // AP-034: the approve button unmounts once the job advances; hand focus to the card.
+  async function approveFromCard(job, step) {
+    await advanceJob(job, step);
+    await tick();
+    document.querySelector(`[data-open-job="${job.job_id}"]`)?.focus();
+  }
 
   function setFocused(id) {
     focused = id;
@@ -225,6 +233,7 @@
               <button
                 class="jcard-main"
                 aria-label={`Open ${jobTitle(job)}`}
+                data-open-job={job.job_id}
                 onclick={() => openJob(job.job_id)}
               >
                 <span class="jcard-art" aria-hidden="true">
@@ -277,7 +286,7 @@
                     class="btn btn-primary btn-icon"
                     title={stepLabel(job, step)}
                     aria-label={stepLabel(job, step)}
-                    onclick={() => advanceJob(job, step)}
+                    onclick={() => approveFromCard(job, step)}
                   >
                     <Icon name="check" size={14} />
                   </button>
@@ -287,7 +296,7 @@
                     title={stepLabel(job, step)}
                     aria-label={stepLabel(job, step)}
                   disabled={!hasUploadTargets(job, app.platforms, app.configuration.job_defaults || {})}
-                  onclick={() => advanceJob(job, step)}
+                  onclick={() => approveFromCard(job, step)}
                   >
                     <Icon name="arrowUp" size={14} />
                   </button>
@@ -367,6 +376,7 @@
                 <button
                   class="card-main"
                   aria-label={`Open ${jobTitle(job)}`}
+                data-open-job={job.job_id}
                   onclick={() => openJob(job.job_id)}
                 >
                   <!-- C5: real poster frame; the icon is the fallback only. -->
@@ -416,7 +426,7 @@
                       class="btn btn-primary btn-icon"
                       title={stepLabel(job, step)}
                       aria-label={stepLabel(job, step)}
-                      onclick={() => advanceJob(job, step)}
+                      onclick={() => approveFromCard(job, step)}
                     >
                       <Icon name="check" size={14} />
                     </button>
@@ -426,7 +436,7 @@
                       title={stepLabel(job, step)}
                       aria-label={stepLabel(job, step)}
                       disabled={!hasUploadTargets(job, app.platforms, app.configuration.job_defaults || {})}
-                      onclick={() => advanceJob(job, step)}
+                      onclick={() => approveFromCard(job, step)}
                     >
                       <Icon name="arrowUp" size={14} />
                     </button>

@@ -10,6 +10,9 @@ Visual review covered 95 screenshots in 3 batches; the reviewer's coordinates ar
 | ID | Sev | Evidence | Status |
 |---|---|---|---|
 | AP-032 | P1 | measured | Approved by the user (badge with config id instead of repeated sentence); fixed and verified. |
+| AP-033 | P1 | measured | Objective bug; fixed test-first. |
+| AP-034 | P2 | measured | Approved by the user; fixed test-first. |
+| AP-035 | P2 | measured | Pending: user asked whether nowrap would cut the text. |
 
 **AP-032** — Per-platform summary sublines in upload review were clipped (nowrap + ellipsis, no tooltip). The text was 752px wide against 732/477/320/247px of space at 1920/1366/1024/375, and the same sentence repeated on all five rows. Fix: each row now shows a short subline plus a `config <12-hex id>` badge; the subline may wrap. Evidence: `tests/qa/qa-out/review-upload__1920.png`, `review-upload__375.png`, `review-upload-no-platforms__1920.png`; copy at `evidence/AP-032-after.png`. Red: smoke assertion failed ("clipped by 20px"). Green: smoke passes at desktop and 375px.
 
@@ -29,3 +32,11 @@ Visual review covered 95 screenshots in 3 batches; the reviewer's coordinates ar
 ## Regression rechecks (all passed)
 
 Unsupported-upload-target actions disabled (smoke `assertEmptyUploadState`); review action placement across transcript/conversion/upload (smoke `assertReviewActionLayout`, desktop and 375px); mobile Settings Save and 9:16 preview covered by the qa:ui gate (no errors). AP-001/002/003/015, AP-014/020, AP-029 not reopened.
+
+## Extended pass (Playwright measurements)
+
+- **AP-033** - double-clicking a board card Approve sent two accept requests (no in-flight guard in `acceptJobCheckpoint`). Fix: per job+stage in-flight set. Red: smoke `actual: 2, expected: 1`. Green: passes.
+- **AP-034** - after Approve the button unmounts and `document.activeElement` was BODY. Fix: `approveFromCard` in JobsView refocuses the card's Open button (`data-open-job`). Red/green via smoke.
+- **AP-035 (pending)** - `0 override(s)` wraps to 2 lines in a 73px slot at every viewport. Evidence: `tests/qa/qa-out/new-modal-configure__1920.png`, `new-modal-configure__375.png`. Proposed `flex-shrink:0; white-space:nowrap` on that span so the heading yields instead of the hint being cut off; not applied.
+- Measured OK: 9:16 review preview is 320x568 (0.563) at 1920 and 307x546 at 375; at 1024x768 and 812x375 the max-height cap makes the frame 0.595 / 1.219 (video stays `object-fit: contain`). Settings Save at 375 is one line, 34.8px high, inside the 103px sticky header. Card titles carry tooltips.
+- Poll exhaustion: Playwright mock could not reproduce the exhausted state faithfully (list refresh restores real status); relies on existing store logic and was not re-verified end to end.

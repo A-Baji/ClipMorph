@@ -1025,8 +1025,13 @@ export async function advanceJob(job, step) {
   }
 }
 
+const acceptsInFlight = new Set();
+
 async function acceptJobCheckpoint(job, stage, group) {
   if (!job) return false;
+  const key = `${job.job_id}:${stage}`;
+  if (acceptsInFlight.has(key)) return false;
+  acceptsInFlight.add(key);
   try {
     const result = await api.acceptCheckpoint(
       job.job_id, stage, job.checkpoints[stage].revision, group);
@@ -1058,6 +1063,8 @@ async function acceptJobCheckpoint(job, stage, group) {
   } catch (error) {
     report(error);
     return false;
+  } finally {
+    acceptsInFlight.delete(key);
   }
 }
 
