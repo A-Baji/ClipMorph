@@ -190,7 +190,17 @@
       "scenario": "states",
       "offline": true,
       "ready": ".alert[role='alert']",
-      "crops": [".topbar", ".sidebar-foot", ".alert-slot"]
+      "crops": [".topbar", ".alert-slot"]
+    },
+    {
+      "name": "offline-mobile-navigation",
+      "scenario": "states",
+      "offline": true,
+      "actions": [
+        { "click": "button.menu-toggle", "onlyIfVisible": true }
+      ],
+      "ready": ".alert[role='alert']",
+      "crops": [".sidebar"]
     }
   ]
 }

@@ -115,67 +115,65 @@ error alert. Focused Playwright regressions were added to
 `tests/e2e/smoke.js`; the existing Python empty-state expectation was updated
 to the new Metrics title.
 
-## Independent post-fix visual review — Q&A pending
+## Approved review findings — implemented
 
-The reviewer inspected a 15-image batch. Findings below are visual-only; no
-DOM, computed-style, or pixel measurements were made. No changes have been
-implemented for these items. Each needs a per-item approval or rejection
-before any subjective UI adjustment.
+### AP-048 — P1, approved and fixed
 
-### AP-048 — P1, visual-only
+The **Retry connection** action now uses the primary button treatment and is
+start-aligned in the alert body instead of stretching across the available
+width. The E2E regression checks it remains at most 220px wide at desktop and
+mobile viewports.
 
-At 1920px, the **Retry connection** control looks more like a text field than
-a button.
-
-Evidence: `tests/qa/qa-out/offline__1920.png`.
-
-Q&A: Approve or reject adjusting the desktop Retry connection control so it
-reads clearly as a button?
-
-### AP-049 — P2, visual-only
-
-The offline screen shows two retry actions with different labels and visual
-weight.
-
-Evidence: `tests/qa/qa-out/offline__1920.png`;
+Current evidence: `tests/qa/qa-out/offline__1920.png` and
 `tests/qa/qa-out/offline__1920___alert_slot.png`.
 
-Q&A: Approve or reject making the two retry actions consistent in label and
-visual weight?
+### AP-049 — P2, approved and fixed
 
-### AP-050 — P2, visual-only
+The redundant Jobs-board **Retry** button was removed. The alert's
+**Retry connection** action calls `loadWorkspace()`, which retries the jobs
+and other workspace endpoints together. The regression verifies there is no
+second Jobs-panel Retry button and that a successful connection retry issues a
+new jobs request and restores the board.
 
-The offline empty-state message, “The local service didn't respond, so the job
-list is unknown,” sounds internal and does not clearly tell users what to do.
+Current evidence: `tests/qa/qa-out/offline__1920.png` and
+`tests/qa/qa-out/offline__1920___alert_slot.png`.
 
-Evidence: `tests/qa/qa-out/offline__1920.png`.
+### AP-050 — P2, rejected
 
-Q&A: Approve or reject revising the offline empty-state copy to use
-user-facing recovery guidance?
+The Jobs empty-state copy was not changed, per the user's decision.
 
-### AP-051 — P2, visual-only
+### AP-051 — P2, approved and fixed
 
-The file named as the 320px offline sidebar-footer capture appears to show the
-top of the Jobs page instead. The intended sidebar-footer state is therefore
-not evidenced by that capture; this may be a capture/filename mismatch.
+The offline QA gate now has separate closed-navigation and mobile
+open-navigation states. At mobile widths the open-navigation state captures
+the full sidebar, including the footer. The E2E regression verifies the 320px
+offline footer is visible within the viewport. The independent re-review
+confirmed the full-page screenshot shows the open drawer and that the sidebar
+crop contains sufficient navigation context.
 
-Evidence: `tests/qa/qa-out/offline__320___sidebar_foot.png`.
+Current evidence: `tests/qa/qa-out/offline-mobile-navigation__320.png` and
+`tests/qa/qa-out/offline-mobile-navigation__320___sidebar.png`.
 
-Q&A: Approve or reject investigating and correcting the capture or manifest
-so the 320px sidebar-footer state has valid evidence?
+### AP-052 — P2, approved and fixed
 
-### AP-052 — P2, visual-only
+At the existing 520px breakpoint, the top bar aligns its children to the top.
+At 320px this keeps the Offline pill above, rather than vertically alongside
+the multi-line subtitle. The E2E regression asserts that the subtitle and
+badge no longer overlap.
 
-At 320px, the subtitle beside the Offline pill wraps to three lines and sits
-tightly against the pill.
+Current evidence: `tests/qa/qa-out/offline__320___topbar.png`.
+The corrected independent review confirmed the title, subtitle, and Offline
+badge are visible and readable without the drawer covering the header.
 
-Evidence: `tests/qa/qa-out/offline__320___topbar.png`.
+The corrected six-image post-fix review batch is listed in
+`C:\Users\bidab\.copilot\session-state\09c766f7-72cd-47fd-b52c-892f42c40d8c\files\20261014-r6\approved-fixes-r2\review-manifest.json`.
 
-Q&A: Approve or reject adjusting the narrow-screen subtitle/pill spacing and
-wrapping?
+The full-page mobile drawer screenshot also shows a thin grey strip at the
+viewport edges. The reviewer could not tell whether it is a scrollbar or a
+capture artifact, so it is not treated as a confirmed UI defect.
 
 ### Not confirmed
 
-The possible Layouts card overlap with the sticky-header border is
+The possible Layouts card overlap with the sticky-header border remains
 indeterminate from one screenshot and is not raised as an actionable AP item.
 Evidence: `tests/qa/qa-out/layouts__320___content.png`.

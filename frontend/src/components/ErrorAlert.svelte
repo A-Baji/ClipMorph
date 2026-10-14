@@ -28,7 +28,7 @@
       {#each app.errors as error}<div>{error}</div>{/each}
       {#if !app.online && app.errors.includes(CONNECTION_ERROR_MESSAGE)}
         <button
-          class="btn btn-secondary"
+          class="btn btn-primary alert-retry"
           disabled={retrying}
           onclick={retryConnection}
         >{retrying ? 'Retrying…' : 'Retry connection'}</button>
@@ -48,5 +48,9 @@
     min-width: 0;
     display: grid;
     gap: var(--space-2);
+  }
+
+  .alert-retry {
+    justify-self: start;
   }
 </style>

@@ -10,7 +10,6 @@
     advanceJob,
     cardAction,
     cancelScheduledAttempt,
-    loadWorkspace,
     openJob,
     openJobFolder,
     PRERUN_STATUSES,
@@ -224,7 +223,6 @@
   {#if !app.online && !app.jobs.length}
     <div class="column-full" data-load-error>
       <EmptyState icon="queue" title="Couldn't load jobs" message="The local service didn't respond, so the job list is unknown.">
-        <button class="btn btn-primary" onclick={loadWorkspace}>Retry</button>
       </EmptyState>
     </div>
   {:else if focused}

@@ -527,13 +527,18 @@ async function assertEmptyStateCopyWrapping(browser, base) {
 }
 
 async function assertOfflineRetryFeedback(browser, base) {
-  const page = await browser.newPage({ viewport: { width: 375, height: 812 } });
+  const page = await browser.newPage({ viewport: { width: 320, height: 812 } });
   try {
     await page.addInitScript(() => {
       window.__clipMorphOffline = true;
+      window.__clipMorphApiRequests = {};
       const originalFetch = window.fetch.bind(window);
       window.fetch = (input, init) => {
         const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+        if (url.pathname.startsWith('/api/v1/')) {
+          window.__clipMorphApiRequests[url.pathname] =
+            (window.__clipMorphApiRequests[url.pathname] || 0) + 1;
+        }
         if (window.__clipMorphOffline && url.pathname.startsWith('/api/v1/')) {
           return Promise.reject(new TypeError('Failed to fetch'));
         }
@@ -548,6 +553,55 @@ async function assertOfflineRetryFeedback(browser, base) {
     assert.doesNotMatch(text, /failed to fetch/i, 'offline alert hides the raw browser error');
     const retry = alert.getByRole('button', { name: 'Retry connection' });
     await retry.waitFor({ timeout: 5000 });
+    assert.equal(
+      await page.getByRole('button', { name: /^retry$/i }).count(),
+      0,
+      'the Jobs load-error panel does not duplicate the connection retry action',
+    );
+    const retryBounds = await retry.evaluate((button) => {
+      const rect = button.getBoundingClientRect();
+      return { width: rect.width, alertWidth: button.closest('.alert').getBoundingClientRect().width };
+    });
+    assert.ok(
+      retryBounds.width <= 220 && retryBounds.width < retryBounds.alertWidth * 0.75,
+      `Retry connection stays compact instead of spanning the alert: ${JSON.stringify(retryBounds)}`,
+    );
+
+    const subtitle = page.locator('.topbar-title p');
+    const offlineBadge = page.locator('.topbar-actions .badge');
+    const headerBounds = await Promise.all([
+      subtitle.boundingBox(),
+      offlineBadge.boundingBox(),
+    ]);
+    const [subtitleBounds, badgeBounds] = headerBounds;
+    assert.ok(
+      badgeBounds.y + badgeBounds.height <= subtitleBounds.y ||
+        badgeBounds.y >= subtitleBounds.y + subtitleBounds.height,
+      `offline badge should not sit alongside subtitle lines: ${JSON.stringify(headerBounds)}`,
+    );
+
+    await page.locator('button.menu-toggle').click();
+    const sidebarFoot = page.locator('.sidebar-foot');
+    await sidebarFoot.waitFor({ state: 'visible' });
+    await page.waitForFunction(
+      () => {
+        const footer = document.querySelector('.sidebar-foot').getBoundingClientRect();
+        return footer.left >= 0 && footer.right <= innerWidth;
+      },
+      null,
+      { timeout: 5000 },
+    );
+    const footerBounds = await sidebarFoot.boundingBox();
+    assert.ok(
+      footerBounds.x >= 0 && footerBounds.x + footerBounds.width <= 320 &&
+        (await sidebarFoot.innerText()).includes('Local service offline'),
+      `mobile offline navigation exposes its footer in the viewport: ${JSON.stringify(footerBounds)}`,
+    );
+    await page.locator('.sidebar-scrim').click({ position: { x: 280, y: 400 } });
+
+    const jobsRequestsBeforeRetry = await page.evaluate(
+      () => window.__clipMorphApiRequests['/api/v1/jobs'] || 0,
+    );
     await page.evaluate(() => { window.__clipMorphOffline = false; });
     await retry.click();
     await page.waitForFunction(
@@ -555,7 +609,43 @@ async function assertOfflineRetryFeedback(browser, base) {
       null,
       { timeout: 15000 },
     );
+    const jobsRequestsAfterRetry = await page.evaluate(
+      () => window.__clipMorphApiRequests['/api/v1/jobs'] || 0,
+    );
+    assert.ok(
+      jobsRequestsAfterRetry > jobsRequestsBeforeRetry,
+      'Retry connection re-requests the jobs endpoint after connectivity returns',
+    );
     await alert.waitFor({ state: 'detached', timeout: 5000 });
+  } finally {
+    await page.close();
+  }
+}
+
+async function assertDesktopRetryButtonIsCompact(browser, base) {
+  const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
+  try {
+    await page.addInitScript(() => {
+      const originalFetch = window.fetch.bind(window);
+      window.fetch = (input, init) => {
+        const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+        if (url.pathname.startsWith('/api/v1/')) {
+          return Promise.reject(new TypeError('Failed to fetch'));
+        }
+        return originalFetch(input, init);
+      };
+    });
+    await page.goto(base, { waitUntil: 'domcontentloaded' });
+    const retry = page.getByRole('button', { name: 'Retry connection' });
+    await retry.waitFor({ timeout: 15000 });
+    const bounds = await retry.evaluate((button) => ({
+      width: button.getBoundingClientRect().width,
+      alertWidth: button.closest('.alert').getBoundingClientRect().width,
+    }));
+    assert.ok(
+      bounds.width <= 220 && bounds.width < bounds.alertWidth / 2,
+      `desktop Retry connection must remain a compact button: ${JSON.stringify(bounds)}`,
+    );
   } finally {
     await page.close();
   }
@@ -576,6 +666,7 @@ async function main() {
     ], { stdio: 'inherit' });
     browserRef = await playwright[BROWSER].launch();
     await assertOfflineRetryFeedback(browserRef, base);
+    await assertDesktopRetryButtonIsCompact(browserRef, base);
     await assertEmptyStateCopyWrapping(browserRef, base);
     await assertMobileNavigationNotTabbable(browserRef, base);
     await assertJobsEventStreamReconnects(browserRef, base);
@@ -784,8 +875,13 @@ async function main() {
     await failing.goto(base, { waitUntil: 'domcontentloaded' });
     await failing.waitForSelector('[data-load-error]', { timeout: 15000 });
     assert.equal(await failing.locator('section.column').count(), 0, 'no empty columns on load error');
+    assert.equal(
+      await failing.locator('[data-load-error] button').count(),
+      0,
+      'the load-error panel does not duplicate the connection retry action',
+    );
     await failing.unroute('**/api/v1/jobs');
-    await failing.click('[data-load-error] button:has-text("Retry")');
+    await failing.getByRole('button', { name: 'Retry connection' }).click();
     await failing.waitForSelector('section.column', { timeout: 15000 });
     assert.equal(await failing.locator('[data-load-error]').count(), 0, 'load error clears after Retry');
     await failing.close();

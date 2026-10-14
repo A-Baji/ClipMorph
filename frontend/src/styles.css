@@ -1475,6 +1475,10 @@ details.advanced .advanced-body {
 }
 
 @media (max-width: 520px) {
+  .topbar {
+    align-items: flex-start;
+  }
+
   .content {
     padding: var(--space-4);
     gap: var(--space-6);
