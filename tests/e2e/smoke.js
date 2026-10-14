@@ -155,6 +155,53 @@ async function assertReviewActionLayout(page, title, secondaryLabel, primaryLabe
   await page.waitForSelector('.detail-modal', { state: 'detached', timeout: 15000 });
 }
 
+async function assertPrimaryButtonPressFeedback(page) {
+  const button = page.getByRole('button', { name: 'New', exact: true });
+  await button.waitFor({ state: 'visible', timeout: 15000 });
+  await page.evaluate(() => document.fonts.ready);
+  await button.hover();
+  await page.waitForTimeout(160);
+  const boundsBefore = await button.boundingBox();
+  const hover = await button.evaluate((node) => ({
+    background: getComputedStyle(node).backgroundColor,
+    matches: node.matches(':hover'),
+  }));
+  await page.mouse.down();
+  try {
+    await page.waitForTimeout(160);
+    const pressed = await button.evaluate((node) => {
+      const style = getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return {
+        background: style.backgroundColor,
+        matches: node.matches(':active'),
+        bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+      };
+    });
+    const outputDir = path.join(__dirname, '..', 'qa', 'qa-out', 'accessibility');
+    fs.mkdirSync(outputDir, { recursive: true });
+    await button.screenshot({
+      path: path.join(outputDir, 'active-primary-button__375.png'),
+    });
+    assert.notEqual(
+      pressed.background,
+      hover.background,
+      `primary button press feedback must be visually distinct from hover (hover=${JSON.stringify(hover)}, pressed=${JSON.stringify(pressed)})`,
+    );
+    for (const key of ['x', 'y', 'width', 'height']) {
+      assert.ok(
+        Math.abs(pressed.bounds[key] - boundsBefore[key]) <= 0.5,
+        `primary button press feedback shifted ${key}: before=${JSON.stringify(boundsBefore)}, pressed=${JSON.stringify(pressed.bounds)}`,
+      );
+    }
+  } finally {
+    await page.mouse.up();
+  }
+  await page.waitForSelector('.wizard-modal', { timeout: 15000 });
+  await page.keyboard.press('Escape');
+  await page.waitForSelector('.wizard-modal', { state: 'detached', timeout: 15000 });
+}
+
 async function assertEmptyUploadState(page) {
   await page.locator(
     "article.card:has-text('Status fixture: completed') .card-main",
@@ -470,6 +517,7 @@ async function main() {
     // Issue #261: one board, no Completed/Queue sub-tabs — the six-column
     // pipeline board is the default (items 4/5/6).
     await page.waitForSelector('div.board', { timeout: 15000 });
+    await assertPrimaryButtonPressFeedback(page);
     const columnLabels = await page.$$eval(
       'section.column .column-title',
       (nodes) => nodes.map((node) => node.textContent.trim()),
