@@ -445,6 +445,10 @@ a {
   gap: var(--space-4);
 }
 
+.grid-2 > * {
+  min-width: 0;
+}
+
 .stack {
   display: grid;
   gap: var(--space-4);
@@ -453,6 +457,7 @@ a {
 .stack-tight {
   display: grid;
   gap: var(--space-2);
+  min-width: 0;
 }
 
 .row {
@@ -1323,6 +1328,7 @@ details.advanced .advanced-body {
   gap: var(--space-3);
   padding: var(--space-3) 0;
   border-top: 1px solid var(--color-border);
+  min-width: 0;
 }
 
 .health-row:first-child {
@@ -1476,7 +1482,20 @@ details.advanced .advanced-body {
 
 @media (max-width: 520px) {
   .topbar {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
     align-items: flex-start;
+    background: var(--color-bg);
+  }
+
+  .topbar-title {
+    grid-column: 2;
+    min-width: 0;
+  }
+
+  .topbar-actions {
+    grid-column: 2;
+    justify-content: flex-end;
   }
 
   .content {

@@ -444,6 +444,96 @@ async function assertLargeTextReflow(browser, base) {
   }
 }
 
+async function assertSettingsReflowAtLargeRootFont(browser, base) {
+  const context = await browser.newContext({
+    viewport: { width: 320, height: 812 },
+    reducedMotion: 'reduce',
+  });
+  try {
+    const page = await context.newPage();
+    await page.goto(base, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('.shell', { timeout: 15000 });
+    await page.locator('button.menu-toggle').click();
+    await page.locator("button.nav-item:has-text('Settings')").click();
+    await page.waitForSelector('.content .grid-2', { timeout: 15000 });
+    const headerBackgroundAlpha = await page.locator('.topbar').evaluate((header) => {
+      const canvas = document.createElement('canvas');
+      const context = canvas.getContext('2d');
+      context.fillStyle = getComputedStyle(header).backgroundColor;
+      context.fillRect(0, 0, 1, 1);
+      return context.getImageData(0, 0, 1, 1).data[3] / 255;
+    });
+    assert.ok(
+      headerBackgroundAlpha >= 0.99,
+      `the mobile sticky header should be opaque, got alpha ${headerBackgroundAlpha}`,
+    );
+    const subtitleLines = await page.locator('.topbar-title p').evaluate((subtitle) => {
+      const range = document.createRange();
+      range.selectNodeContents(subtitle);
+      return range.getClientRects().length;
+    });
+    assert.ok(
+      subtitleLines <= 2,
+      `the Settings subtitle should not collapse into ${subtitleLines} lines at 320px`,
+    );
+    await page.addStyleTag({ content: 'html { font-size: 200% !important; }' });
+    const layout = await page.evaluate(() => {
+      const grid = document.querySelector('.content .grid-2').getBoundingClientRect();
+      const title = document.querySelector('.topbar-title h1');
+      const titleRange = document.createRange();
+      titleRange.selectNodeContents(title);
+      const titleRects = [...titleRange.getClientRects()];
+      const actionRects = [...document.querySelectorAll('.topbar-actions button')]
+        .map((button) => button.getBoundingClientRect());
+      const credentials = [...document.querySelectorAll('.content .card')]
+        .find((card) => card.querySelector('h3')?.textContent.trim() === 'Credentials')
+        ?.getBoundingClientRect();
+      const probeButtons = [...document.querySelectorAll('.content .health-row .verdict button')]
+        .map((button) => button.getBoundingClientRect());
+      return {
+        viewport: innerWidth,
+        documentWidth: document.documentElement.scrollWidth,
+        gridRight: grid.right,
+        rootFontSize: getComputedStyle(document.documentElement).fontSize,
+        titleOverlapsActions: titleRects.some((titleRect) => actionRects.some((actionRect) =>
+          titleRect.left < actionRect.right &&
+          titleRect.right > actionRect.left &&
+          titleRect.top < actionRect.bottom &&
+          titleRect.bottom > actionRect.top)),
+        probeButtonsWithinCard:
+          credentials && probeButtons.length > 0 &&
+          probeButtons.every((button) => button.right <= credentials.right + 1),
+      };
+    });
+    const outputDir = path.join(__dirname, '..', 'qa', 'qa-out', 'accessibility');
+    fs.mkdirSync(outputDir, { recursive: true });
+    await page.screenshot({
+      path: path.join(outputDir, 'settings-root-font-200-320-after.png'),
+      fullPage: true,
+    });
+    assert.equal(
+      layout.titleOverlapsActions,
+      false,
+      'the Settings heading must not overlap the Save app.yml action at large root text',
+    );
+    assert.equal(
+      layout.probeButtonsWithinCard,
+      true,
+      'Settings credential Probe buttons must stay within the Credentials card at large root text',
+    );
+    assert.ok(
+      layout.gridRight <= layout.viewport + 1,
+      `Settings grid extends ${layout.gridRight - layout.viewport}px beyond ${layout.viewport}px at ${layout.rootFontSize} root text`,
+    );
+    assert.ok(
+      layout.documentWidth <= layout.viewport,
+      `document overflows by ${layout.documentWidth - layout.viewport}px at ${layout.rootFontSize} root text`,
+    );
+  } finally {
+    await context.close();
+  }
+}
+
 async function assertSlowInitialLoad(browser, base) {
   const page = await browser.newPage({ viewport: { width: 375, height: 812 } });
   let responseReleased = false;
@@ -665,6 +755,7 @@ async function main() {
       server.dataDir,
     ], { stdio: 'inherit' });
     browserRef = await playwright[BROWSER].launch();
+    await assertSettingsReflowAtLargeRootFont(browserRef, base);
     await assertOfflineRetryFeedback(browserRef, base);
     await assertDesktopRetryButtonIsCompact(browserRef, base);
     await assertEmptyStateCopyWrapping(browserRef, base);
