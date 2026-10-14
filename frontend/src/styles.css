@@ -60,6 +60,14 @@ a {
   border-radius: var(--radius-sm);
 }
 
+@media (forced-colors: active) {
+  :focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+    box-shadow: none;
+  }
+}
+
 .mono {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
@@ -1391,9 +1399,20 @@ details.advanced .advanced-body {
     transition: transform var(--duration-base) var(--ease-standard);
   }
 
+  .sidebar .nav-group {
+    visibility: hidden;
+    transition: visibility 0s linear var(--duration-base);
+  }
+
   .sidebar.open {
     transform: translateX(0);
     box-shadow: var(--shadow-md);
+    transition-delay: 0s;
+  }
+
+  .sidebar.open .nav-group {
+    visibility: visible;
+    transition-delay: 0s;
   }
 
   .sidebar-scrim {
@@ -1417,7 +1436,7 @@ details.advanced .advanced-body {
 
   .review-grid,
   .grid-2 {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .review-action-bar {

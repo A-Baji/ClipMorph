@@ -136,6 +136,14 @@ async function assertReviewActionLayout(page, title, secondaryLabel, primaryLabe
       `conversion actions align vertically with the render-variant control; offset ${centerDelta}px`,
     );
   }
+  if (secondaryLabel === 'Re-render' && page.viewportSize().width === 375) {
+    const frame = await page.locator('video.review-player').boundingBox();
+    assert.ok(frame, 'conversion preview is present at mobile width');
+    assert.ok(
+      Math.abs(frame.width / frame.height - 9 / 16) <= 0.015,
+      `mobile conversion preview ratio is ${frame.width / frame.height}, expected 9:16`,
+    );
+  }
   if (secondaryLabel === 'Save draft') {
     const fieldGap = await toolbar.evaluate((bar) => {
       const next = bar.nextElementSibling;
@@ -229,6 +237,194 @@ async function assertConversionLabelsReadable(page) {
   await page.waitForSelector('.detail-modal', { state: 'detached', timeout: 15000 });
 }
 
+async function assertForcedColorsFocusVisible(browser, base) {
+  const context = await browser.newContext({
+    viewport: { width: 375, height: 812 },
+    forcedColors: 'active',
+    reducedMotion: 'reduce',
+  });
+  try {
+    const page = await context.newPage();
+    await page.goto(base, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('.shell', { timeout: 15000 });
+    await page.keyboard.press('Tab');
+    const focus = await page.evaluate(() => {
+      const active = document.activeElement;
+      const style = getComputedStyle(active);
+      return {
+        forcedColors: matchMedia('(forced-colors: active)').matches,
+        focused: active !== document.body,
+        name: active.getAttribute('aria-label') || active.textContent.trim(),
+        outlineStyle: style.outlineStyle,
+        outlineWidth: style.outlineWidth,
+        boxShadow: style.boxShadow,
+      };
+    });
+    const outputDir = path.join(__dirname, '..', 'qa', 'qa-out', 'accessibility');
+    fs.mkdirSync(outputDir, { recursive: true });
+    await page.screenshot({
+      path: path.join(outputDir, `forced-colors-focus-${BROWSER}__375.png`),
+      fullPage: true,
+    });
+    assert.equal(focus.forcedColors, true, 'the browser is emulating forced colors');
+    assert.equal(focus.focused, true, 'Tab moves focus to a control');
+    const visibleOutline = focus.outlineStyle !== 'none' && parseFloat(focus.outlineWidth) > 0;
+    assert.ok(
+      visibleOutline || focus.boxShadow !== 'none',
+      `forced-colors keyboard focus has no visible ring on ${focus.name || 'the focused control'} ` +
+        `(outline: ${focus.outlineStyle} ${focus.outlineWidth}; box-shadow: ${focus.boxShadow})`,
+    );
+  } finally {
+    await context.close();
+  }
+}
+
+async function assertMobileNavigationNotTabbable(browser, base) {
+  const page = await browser.newPage({
+    viewport: { width: 375, height: 812 },
+    reducedMotion: 'reduce',
+  });
+  try {
+    await page.goto(base, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('.shell', { timeout: 15000 });
+    await page.keyboard.press('Tab');
+    const focus = await page.evaluate(() => {
+      const active = document.activeElement;
+      const bounds = active.getBoundingClientRect();
+      return {
+        inSidebar: Boolean(active.closest('.sidebar')),
+        left: bounds.left,
+        right: bounds.right,
+        viewportWidth: innerWidth,
+        name: active.getAttribute('aria-label') || active.textContent.trim(),
+      };
+    });
+    assert.equal(
+      focus.inSidebar,
+      false,
+      `collapsed mobile navigation must not receive focus (focused ${focus.name}, x=${focus.left}..${focus.right})`,
+    );
+    assert.equal(focus.name, 'Open navigation', 'the first mobile tab stop opens navigation');
+    assert.ok(
+      focus.left >= 0 && focus.right <= focus.viewportWidth,
+      `first mobile tab stop must be on-screen: ${JSON.stringify(focus)}`,
+    );
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.sidebar.open', { timeout: 5000 });
+    await page.getByRole('button', { name: 'Jobs' }).waitFor({ state: 'visible' });
+    assert.equal(
+      await page.getByRole('button', { name: 'Jobs' }).isVisible(),
+      true,
+      'opening mobile navigation exposes its links to keyboard and accessibility queries',
+    );
+  } finally {
+    await page.close();
+  }
+}
+
+async function assertJobsEventStreamReconnects(browser, base) {
+  const page = await browser.newPage({ viewport: { width: 375, height: 812 } });
+  let requests = 0;
+  try {
+    await page.route('**/api/v1/events', async (route) => {
+      requests += 1;
+      if (requests === 1) {
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/event-stream',
+          body: 'retry: 50\n\n',
+        });
+        return;
+      }
+      await route.continue();
+    });
+    await page.goto(base, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('section.column', { timeout: 15000 });
+    const deadline = Date.now() + 10000;
+    while (requests < 2 && Date.now() < deadline) {
+      await page.waitForTimeout(100);
+    }
+    assert.ok(
+      requests >= 2,
+      `the aggregate jobs event stream should reconnect after a drop; requests=${requests}`,
+    );
+  } finally {
+    await page.close();
+  }
+}
+
+async function assertLargeTextReflow(browser, base) {
+  const context = await browser.newContext({
+    viewport: { width: 320, height: 812 },
+    reducedMotion: 'reduce',
+  });
+  try {
+    const page = await context.newPage();
+    await page.goto(base, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('.shell', { timeout: 15000 });
+    const cdp = await context.newCDPSession(page);
+    await cdp.send('Page.setFontSizes', { fontSizes: { standard: 32, fixed: 26 } });
+    await page.locator('button.menu-toggle').click();
+    await page.locator("button.nav-item:has-text('Settings')").click();
+    await page.waitForSelector('.content .grid-2', { timeout: 15000 });
+    await page.waitForTimeout(100);
+    const layout = await page.evaluate(() => {
+      const grid = document.querySelector('.content .grid-2').getBoundingClientRect();
+      return {
+        viewport: innerWidth,
+        documentWidth: document.documentElement.scrollWidth,
+        gridRight: grid.right,
+        rootFontSize: getComputedStyle(document.documentElement).fontSize,
+      };
+    });
+    const outputDir = path.join(__dirname, '..', 'qa', 'qa-out', 'accessibility');
+    fs.mkdirSync(outputDir, { recursive: true });
+    await page.screenshot({
+      path: path.join(outputDir, 'settings-large-text-320.png'),
+      fullPage: true,
+    });
+    assert.ok(
+      layout.gridRight <= layout.viewport + 1,
+      `Settings grid extends ${layout.gridRight - layout.viewport}px beyond ${layout.viewport}px at ${layout.rootFontSize} root text`,
+    );
+    assert.ok(
+      layout.documentWidth <= layout.viewport,
+      `document overflows by ${layout.documentWidth - layout.viewport}px at ${layout.rootFontSize} root text`,
+    );
+    await cdp.detach();
+  } finally {
+    await context.close();
+  }
+}
+
+async function assertSlowInitialLoad(browser, base) {
+  const page = await browser.newPage({ viewport: { width: 375, height: 812 } });
+  let responseReleased = false;
+  try {
+    await page.route('**/api/v1/jobs', async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 750));
+      responseReleased = true;
+      await route.continue();
+    });
+    await page.goto(base, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(
+      () => document.querySelector('.content p')?.textContent.trim() === 'Loading workspace…',
+      null,
+      { timeout: 5000 },
+    );
+    const loadingState = await page.evaluate(() => ({
+      text: document.querySelector('.content p')?.textContent.trim() || '',
+      boardColumns: document.querySelectorAll('section.column').length,
+    }));
+    assert.equal(loadingState.text, 'Loading workspace…', 'slow load keeps the loading state visible');
+    assert.equal(loadingState.boardColumns, 0, 'slow load does not report a false empty board');
+    await page.waitForSelector('section.column', { timeout: 15000 });
+    assert.equal(responseReleased, true, 'the delayed jobs response eventually completes');
+  } finally {
+    await page.close();
+  }
+}
+
 async function main() {
   const server = await startServer({ scenario: 'states' });
   // The harness reports the base URL with a trailing slash; API paths below
@@ -243,6 +439,8 @@ async function main() {
       server.dataDir,
     ], { stdio: 'inherit' });
     browserRef = await playwright[BROWSER].launch();
+    await assertMobileNavigationNotTabbable(browserRef, base);
+    await assertJobsEventStreamReconnects(browserRef, base);
     const page = await browserRef.newPage({
       viewport: server.viewports.desktop,
     });
@@ -337,6 +535,36 @@ async function main() {
     await page.keyboard.press('Escape');
     await page.waitForSelector('.detail-modal', { state: 'detached', timeout: 15000 });
 
+    // Approval is exposed as a named button and can be activated from the keyboard.
+    let keyboardAcceptRequests = 0;
+    await page.route('**/api/v1/jobs/*/checkpoints/*/accept', async (route) => {
+      keyboardAcceptRequests += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ resumed: true, checkpoints: {} }),
+      });
+    });
+    const keyboardApprove = page
+      .locator("article.card:has-text('Checkpoint fixture: awaiting_review')")
+      .first()
+      .getByRole('button', { name: /^Approve / });
+    assert.equal(await keyboardApprove.count(), 1, 'approval has a named button role');
+    await keyboardApprove.focus();
+    assert.equal(
+      await keyboardApprove.evaluate((button) => document.activeElement === button),
+      true,
+      'the approval button can receive keyboard focus',
+    );
+    await page.keyboard.press('Space');
+    await page.waitForFunction(
+      () => document.activeElement?.getAttribute('data-open-job') !== null,
+      null,
+      { timeout: 5000 },
+    );
+    await page.unroute('**/api/v1/jobs/*/checkpoints/*/accept');
+    assert.equal(keyboardAcceptRequests, 1, 'Space activates approval exactly once');
+
     // AP-033: a double-clicked board Approve sends exactly one accept request.
     let acceptRequests = 0;
     await page.route('**/api/v1/jobs/*/checkpoints/*/accept', async (route) => {
@@ -391,12 +619,24 @@ async function main() {
     const saveMetrics = await settingsSave.evaluate((button) => ({
       height: button.getBoundingClientRect().height,
       whiteSpace: getComputedStyle(button).whiteSpace,
+      left: button.getBoundingClientRect().left,
+      right: button.getBoundingClientRect().right,
+      top: button.getBoundingClientRect().top,
+      bottom: button.getBoundingClientRect().bottom,
+      headerTop: button.closest('.topbar').getBoundingClientRect().top,
+      headerBottom: button.closest('.topbar').getBoundingClientRect().bottom,
+      viewport: innerWidth,
     }));
     assert.ok(
       saveMetrics.height <= 44,
       `Settings Save should stay a single-line toolbar action, height ${saveMetrics.height}px`,
     );
     assert.equal(saveMetrics.whiteSpace, 'nowrap', 'Settings Save stays on one line');
+    assert.ok(
+      saveMetrics.left >= 0 && saveMetrics.right <= saveMetrics.viewport &&
+        saveMetrics.top >= saveMetrics.headerTop && saveMetrics.bottom <= saveMetrics.headerBottom,
+      `Settings Save must fit inside the visible header and viewport: ${JSON.stringify(saveMetrics)}`,
+    );
 
     // AP-031: a failed job-list load shows a load-error state with Retry,
     // not six "No jobs" columns.
@@ -411,6 +651,8 @@ async function main() {
     assert.equal(await failing.locator('[data-load-error]').count(), 0, 'load error clears after Retry');
     await failing.close();
 
+    await assertSlowInitialLoad(browserRef, base);
+
     // Poll exhaustion: spinner while polling, then "Status unconfirmed" with
     // no Approve button (no duplicate approval) once the poll gives up.
     const stuck = await browserRef.newPage({ viewport: server.viewports.desktop });
@@ -420,6 +662,7 @@ async function main() {
     await stuck.waitForSelector('article.card', { timeout: 15000 });
     let stuckJob = null;
     let stuckPosts = 0;
+    let transientGetFailures = 0;
     stuck.on('request', (request) => {
       const match = request.url().match(/jobs\/([0-9a-f]+)\/checkpoints/);
       if (match) { stuckJob = match[1]; stuckPosts += 1; }
@@ -428,6 +671,11 @@ async function main() {
       status: 200, contentType: 'application/json', body: '{"resumed":true,"checkpoints":{}}',
     }));
     await stuck.route(/\/api\/v1\/jobs\/[0-9a-f]+$/, async (route) => {
+      if (transientGetFailures < 2) {
+        transientGetFailures += 1;
+        await route.abort();
+        return;
+      }
       const response = await route.fetch();
       const body = await response.json();
       if (body.job_id === stuckJob) body.status = 'queued';
@@ -440,7 +688,13 @@ async function main() {
     assert.equal(await stuckCard.locator('.spinner').count(), 0, 'spinner clears when the poll gives up');
     assert.equal(await stuckCard.locator('button.btn-primary.btn-icon').count(), 0, 'no Approve button after poll exhaustion');
     assert.equal(stuckPosts, 1, 'poll exhaustion sends no duplicate approval');
+    assert.equal(transientGetFailures, 2, 'transient status request failures do not stop polling early');
     await stuck.close();
+
+    await assertForcedColorsFocusVisible(browserRef, base);
+    if (BROWSER === 'chromium') {
+      await assertLargeTextReflow(browserRef, base);
+    }
 
     assert.deepEqual(pageErrors, [], 'no uncaught page errors during the flow');
     console.log('smoke.js: fixtures -> board -> create flow OK');
