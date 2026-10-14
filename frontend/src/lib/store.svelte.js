@@ -206,8 +206,16 @@ export function notify(message) {
   }, 3200);
 }
 
+export const CONNECTION_ERROR_MESSAGE =
+  "Can't connect to ClipMorph. Check your connection or local service, then try again.";
+
 export function report(error) {
-  app.errors = [error?.message || String(error)];
+  const message = error?.message || String(error);
+  const networkFailure =
+    /^(failed to fetch|load failed|networkerror when attempting to fetch resource\.?)$/i.test(
+      message.trim(),
+    );
+  app.errors = [networkFailure ? CONNECTION_ERROR_MESSAGE : message];
 }
 
 export function clearErrors() {

@@ -159,7 +159,7 @@
         <EmptyState
           icon="layers"
           title="No presets yet"
-          message="Save your first layout and it becomes available when creating a job."
+          message="Save a preset for future jobs."
         />
       {/if}
     </Card>

@@ -472,6 +472,95 @@ async function assertSlowInitialLoad(browser, base) {
   }
 }
 
+async function assertNoOrphanedLastWord(locator, description) {
+  const result = await locator.evaluate((element) => {
+    const textNode = [...element.childNodes].find(
+      (node) => node.nodeType === Node.TEXT_NODE && node.textContent.trim(),
+    );
+    if (!textNode) return { sameLine: false, wordCount: 0, previous: '', last: '' };
+    const words = [...textNode.textContent.matchAll(/\S+/g)];
+    if (words.length < 2) {
+      return { sameLine: false, wordCount: words.length, previous: '', last: words[0]?.[0] || '' };
+    }
+    const topFor = (word) => {
+      const range = document.createRange();
+      range.setStart(textNode, word.index);
+      range.setEnd(textNode, word.index + word[0].length);
+      return range.getBoundingClientRect().top;
+    };
+    const previous = words[words.length - 2];
+    const last = words[words.length - 1];
+    return {
+      sameLine: Math.abs(topFor(previous) - topFor(last)) <= 1,
+      wordCount: words.length,
+      previous: previous[0],
+      last: last[0],
+    };
+  });
+  assert.ok(result.wordCount >= 2, `${description} contains fewer than two words`);
+  assert.ok(
+    result.sameLine,
+    `${description} leaves "${result.last}" alone after "${result.previous}"`,
+  );
+}
+
+async function assertEmptyStateCopyWrapping(browser, base) {
+  const page = await browser.newPage({ viewport: { width: 320, height: 812 } });
+  try {
+    await page.goto(base, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('.shell', { timeout: 15000 });
+    await page.waitForSelector('section.column', { timeout: 15000 });
+    const visit = async (name) => {
+      await page.locator('button.menu-toggle').click();
+      await page.locator(`button.nav-item:has-text('${name}')`).click();
+      await page.locator('.content .empty strong').waitFor({ timeout: 15000 });
+    };
+
+    await visit('Metrics');
+    await assertNoOrphanedLastWord(page.locator('.content .empty strong'), 'Metrics empty-state title');
+    await assertNoOrphanedLastWord(page.locator('.content .empty p'), 'Metrics empty-state message');
+    await visit('Layouts');
+    await assertNoOrphanedLastWord(page.locator('.content .empty p'), 'Layouts empty-state message');
+  } finally {
+    await page.close();
+  }
+}
+
+async function assertOfflineRetryFeedback(browser, base) {
+  const page = await browser.newPage({ viewport: { width: 375, height: 812 } });
+  try {
+    await page.addInitScript(() => {
+      window.__clipMorphOffline = true;
+      const originalFetch = window.fetch.bind(window);
+      window.fetch = (input, init) => {
+        const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+        if (window.__clipMorphOffline && url.pathname.startsWith('/api/v1/')) {
+          return Promise.reject(new TypeError('Failed to fetch'));
+        }
+        return originalFetch(input, init);
+      };
+    });
+    await page.goto(base, { waitUntil: 'domcontentloaded' });
+    await page.locator('.alert[role="alert"]').waitFor({ timeout: 15000 });
+    const alert = page.locator('.alert[role="alert"]');
+    const text = await alert.innerText();
+    assert.match(text, /check your connection/i, 'offline alert gives a useful recovery step');
+    assert.doesNotMatch(text, /failed to fetch/i, 'offline alert hides the raw browser error');
+    const retry = alert.getByRole('button', { name: 'Retry connection' });
+    await retry.waitFor({ timeout: 5000 });
+    await page.evaluate(() => { window.__clipMorphOffline = false; });
+    await retry.click();
+    await page.waitForFunction(
+      () => document.querySelector('.sidebar-foot')?.textContent.includes('Local service connected'),
+      null,
+      { timeout: 15000 },
+    );
+    await alert.waitFor({ state: 'detached', timeout: 5000 });
+  } finally {
+    await page.close();
+  }
+}
+
 async function main() {
   const server = await startServer({ scenario: 'states' });
   // The harness reports the base URL with a trailing slash; API paths below
@@ -486,6 +575,8 @@ async function main() {
       server.dataDir,
     ], { stdio: 'inherit' });
     browserRef = await playwright[BROWSER].launch();
+    await assertOfflineRetryFeedback(browserRef, base);
+    await assertEmptyStateCopyWrapping(browserRef, base);
     await assertMobileNavigationNotTabbable(browserRef, base);
     await assertJobsEventStreamReconnects(browserRef, base);
     const page = await browserRef.newPage({

@@ -99,7 +99,7 @@ def run_empty_board(page, url: str, report: Reporter) -> None:
     titles = page.locator("section.column .column-title").all_inner_texts()
     report.check("B2 empty: exactly the six pipeline columns render",
                  titles == COLUMNS, f"titles={titles}")
-    empties = page.locator("section.column .column-empty",
+    empties = page.locator("section.column .empty.compact",
                            has_text="No jobs").count()
     report.check("B2 empty: each column shows its 'No jobs' placeholder",
                  empties == 6, f"empties={empties}")
@@ -206,7 +206,7 @@ def run_empty_prompts(page, url: str, report: Reporter) -> None:
     page.get_by_text("Metrics", exact=True).first.click()
     page.wait_for_timeout(150)
     report.check("A1 metrics: empty state prompts the user",
-                 page.get_by_text("No published posts with metrics yet")
+                 page.get_by_text("No metrics yet")
                  .count() >= 1, "metrics empty prompt missing")
     page.get_by_text("Layouts", exact=True).first.click()
     page.wait_for_timeout(150)

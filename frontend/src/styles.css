@@ -796,11 +796,13 @@ details.advanced .advanced-body {
 .empty strong {
   color: var(--color-text);
   font-weight: var(--weight-semibold);
+  text-wrap: balance;
 }
 
 .empty p {
   font-size: var(--text-sm);
   max-width: 42ch;
+  text-wrap: balance;
 }
 
 /* Compact variant: the same icon / title anatomy at board-column scale. */

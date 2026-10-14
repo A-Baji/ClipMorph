@@ -1,6 +1,6 @@
 # UI findings — 2026-10-14, continuation r6
 
-Starting branch: `ui/autopilot-20261013-r5`
+Starting branch: `ui/autopilot-20261014`
 
 Starting HEAD: `9b79a922e3862ceb882e3618b5c4d5485dae2b9e`
 
@@ -34,49 +34,59 @@ Evidence:
 
 - `tests/qa/qa-out/accessibility/active-primary-button__375.png`
 
-## AP-045 — P2, measured; decision needed
+## AP-045 — P2, measured; approved and fixed
 
 At 320×812, the Metrics empty-state heading ends with “yet” on a line by
 itself, and its body ends with “here.” on a line by itself. The same wraps
-were measured in Chromium, Firefox, and WebKit. This is a copy/layout
-adjustment, so no change was made without approval.
+were measured in Chromium, Firefox, and WebKit. The user approved a focused
+copy/layout adjustment. The title is now “No metrics yet,” the message is
+shorter (“Open a clip to view its metrics.”), and empty-state text uses
+balanced wrapping.
 
-Evidence:
+Before/after evidence:
 
-- `tests/qa/qa-out/empty-metrics__320___empty.png`
-- `tests/qa/qa-out/empty-metrics__320.png`
+- Before: `evidence/AP-045-before.png`
+- After: `evidence/AP-045-after.png`
+- Current UI gate crop: `tests/qa/qa-out/empty-metrics__320___empty.png`
 
-**Q&A:** Do you approve a focused copy/layout adjustment to avoid the two
-one-word lines in the Metrics empty state, or should the current wrapping stay?
+The end-to-end regression checks the final rendered line of both the heading
+and message at 320px in Chromium, Firefox, and WebKit.
 
-## AP-046 — P2, measured; decision needed
+## AP-046 — P2, measured; approved and fixed
 
-At 320×812, the Layouts empty-state text ends with “a job.” on a line by
-itself. The same wrap was measured in Chromium, Firefox, and WebKit. No change
-was made because changing copy or layout requires approval.
+At 320×812, the Layouts empty-state text ended with “a job.” on a line by
+itself in Chromium, Firefox, and WebKit. The user approved a focused
+copy/layout adjustment. The message is now “Save a preset for future jobs.”
+and uses balanced wrapping.
 
-Evidence:
+Before/after evidence:
 
-- `tests/qa/qa-out/layouts__320___content.png`
-- `tests/qa/qa-out/layouts__320.png`
+- Before: `evidence/AP-046-before.png`
+- After: `evidence/AP-046-after.png`
+- Current UI gate crop: `tests/qa/qa-out/layouts__320___content.png`
 
-**Q&A:** Do you approve a focused copy/layout adjustment to avoid the
-one-line “a job.” ending in the Layouts empty state, or should it remain?
+The end-to-end regression checks that the final rendered line has more than
+one word at 320px in Chromium, Firefox, and WebKit.
 
-## AP-047 — P3, measured; decision needed
+## AP-047 — P3, measured; approved and fixed
 
-In the simulated offline state, the `role="alert"` message exposes the raw
-browser error “Failed to fetch”. The page also presents a separate explanation
-of the offline condition, but the alert itself gives no user-facing next step.
-No copy change was made.
+In the simulated offline state, the `role="alert"` message exposed the raw
+browser error “Failed to fetch” without a recovery action. The user approved
+clearer, actionable feedback. Known browser fetch-failure messages are now
+replaced with “Can't connect to ClipMorph. Check your connection or local
+service, then try again.” The alert provides a **Retry connection** button;
+successful workspace reload clears the alert, and failed retries leave the
+error visible.
 
-Evidence:
+Before/after evidence:
 
-- `tests/qa/qa-out/offline__320___alert_slot.png`
-- `tests/qa/qa-out/offline__320.png`
+- Before: `evidence/AP-047-before.png`
+- After: `evidence/AP-047-after.png`
+- Current UI gate crop: `tests/qa/qa-out/offline__320___alert_slot.png`
 
-**Q&A:** Do you approve replacing the raw “Failed to fetch” alert with
-user-facing, actionable feedback, or should the raw request error remain?
+The end-to-end regression verifies the friendly alert, absence of the raw
+error, keyboard-accessible retry action, and recovery after the simulated
+connection returns.
 
 ## Triaged; not filed as new defects
 
@@ -99,5 +109,73 @@ user-facing, actionable feedback, or should the raw request error remain?
   interactive content or a behavior regression. Prior resolved items were
   not reopened.
 
-No source or test changes were made in this continuation. AP-045 through
-AP-047 remain unimplemented pending the decisions above.
+The approved changes were implemented in the Metrics and Layouts empty states,
+the shared empty-state text styles, network error reporting, and the app-level
+error alert. Focused Playwright regressions were added to
+`tests/e2e/smoke.js`; the existing Python empty-state expectation was updated
+to the new Metrics title.
+
+## Independent post-fix visual review — Q&A pending
+
+The reviewer inspected a 15-image batch. Findings below are visual-only; no
+DOM, computed-style, or pixel measurements were made. No changes have been
+implemented for these items. Each needs a per-item approval or rejection
+before any subjective UI adjustment.
+
+### AP-048 — P1, visual-only
+
+At 1920px, the **Retry connection** control looks more like a text field than
+a button.
+
+Evidence: `tests/qa/qa-out/offline__1920.png`.
+
+Q&A: Approve or reject adjusting the desktop Retry connection control so it
+reads clearly as a button?
+
+### AP-049 — P2, visual-only
+
+The offline screen shows two retry actions with different labels and visual
+weight.
+
+Evidence: `tests/qa/qa-out/offline__1920.png`;
+`tests/qa/qa-out/offline__1920___alert_slot.png`.
+
+Q&A: Approve or reject making the two retry actions consistent in label and
+visual weight?
+
+### AP-050 — P2, visual-only
+
+The offline empty-state message, “The local service didn't respond, so the job
+list is unknown,” sounds internal and does not clearly tell users what to do.
+
+Evidence: `tests/qa/qa-out/offline__1920.png`.
+
+Q&A: Approve or reject revising the offline empty-state copy to use
+user-facing recovery guidance?
+
+### AP-051 — P2, visual-only
+
+The file named as the 320px offline sidebar-footer capture appears to show the
+top of the Jobs page instead. The intended sidebar-footer state is therefore
+not evidenced by that capture; this may be a capture/filename mismatch.
+
+Evidence: `tests/qa/qa-out/offline__320___sidebar_foot.png`.
+
+Q&A: Approve or reject investigating and correcting the capture or manifest
+so the 320px sidebar-footer state has valid evidence?
+
+### AP-052 — P2, visual-only
+
+At 320px, the subtitle beside the Offline pill wraps to three lines and sits
+tightly against the pill.
+
+Evidence: `tests/qa/qa-out/offline__320___topbar.png`.
+
+Q&A: Approve or reject adjusting the narrow-screen subtitle/pill spacing and
+wrapping?
+
+### Not confirmed
+
+The possible Layouts card overlap with the sticky-header border is
+indeterminate from one screenshot and is not raised as an actionable AP item.
+Evidence: `tests/qa/qa-out/layouts__320___content.png`.
