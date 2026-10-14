@@ -234,3 +234,21 @@ clipmorph-version-manager*.pem
 # committed.
 .opencode/
 .agents/
+
+# Untracked generated/agent artifacts (kept locally)
+docs/ux-audit-259/
+docs/ux-audit-259.md
+docs/ux-audit-round4.md
+docs/ux-autopilot/
+quality/*
+!quality/research/
+.github/skills/banner-design/
+.github/skills/brand/
+.github/skills/design-system/
+.github/skills/design/
+.github/skills/slides/
+.github/skills/ui-styling/
+.github/skills/ui-ux-pro-max/
+
+# Built dashboard (frontend/vite.config.js outDir); CI and the release workflow rebuild it
+clipmorph/web_assets/

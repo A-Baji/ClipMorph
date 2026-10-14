@@ -11,10 +11,10 @@ This repository’s structure is intentionally derived from the project’s actu
   - `clipmorph/conversion_pipeline/` contains conversion and media-processing logic.
   - `clipmorph/upload_pipeline/` contains upload orchestration and platform-specific behavior.
   - `clipmorph/ffmpeg/` holds bundled FFmpeg/FFprobe assets and runtime helpers.
-  - `clipmorph/resources/` and `clipmorph/web_assets/` store packaged runtime assets.
+  - `clipmorph/resources/` stores packaged runtime assets; `clipmorph/web_assets/` is untracked frontend build output.
 - `tests/` contains the project’s automated unittest coverage and should remain the home for verification code.
 - `docs/` contains project documentation, operating guidance, release flow, and architecture notes.
-- `quality/` contains the committed Quality Playbook system: requirements, contracts, functional and regression tests, review protocols, audit findings, and reproducible validation evidence.
+- `quality/` holds the maintainer probes under `quality/research/`; Quality Playbook output (requirements, reviews, audits, results) is generated locally and untracked.
 - `frontend/` contains the optional local browser dashboard and its build configuration. It is a separate app from the Python package and should not absorb Python runtime responsibilities.
 - Root-level files such as `README.md`, `pyproject.toml`, `requirements.txt`, `AGENTS.md`, and `LICENSE` define package metadata, user-facing documentation, and repo conventions.
 - Local data directories such as `input/`, `output/`, and `uploads/` are runtime working folders for examples and generated assets, not source-code locations.
@@ -28,7 +28,7 @@ This repository’s structure is intentionally derived from the project’s actu
 - Keep the CLI contract and config logic in `clipmorph/cli.py` and `clipmorph/__main__.py` instead of scattering workflow logic across the repo.
 - Keep tests in `tests/` and name them after the feature or module under test.
 - Add documentation under `docs/` when a behavior is user-facing or operationally relevant.
-- Keep durable quality artifacts under `quality/`; do not move them into `tests/` or `docs/` because they are consumed as a connected playbook rather than as ordinary application tests or user documentation.
+- Keep generated playbook, UX-audit, and vendored agent-skill output untracked (see `.gitignore`); only `quality/research/` is committed.
 - Avoid creating new top-level directories for ordinary source code. If new runtime data directories are needed, prefer existing local data locations or user-specified paths rather than introducing additional repo-root buckets.
 
 ## Dependency and architecture constraints
@@ -36,7 +36,7 @@ This repository’s structure is intentionally derived from the project’s actu
 - The Python package remains the runtime boundary. Frontend code under `frontend/` is an adjacent app, not a parallel implementation of the CLI.
 - The conversion pipeline and upload pipeline remain internal modules of the package; they should not become root-level services.
 - Source code should not be edited inside generated packaging directories or local runtime-output directories unless the work is intentionally part of a release or a developer-local workflow.
-- `quality/` is a committed project-quality boundary, but machine-local audit checkpoints under `docs/audit/` and temporary quality-run output should remain ignored unless intentionally promoted into durable evidence.
+- `quality/` is a committed boundary only for `quality/research/`; machine-local audit checkpoints under `docs/audit/` and quality-run output stay ignored.
 - Structural changes are justified only when they map to a real architectural boundary, reduce actual coupling, or reflect existing project conventions.
 
 ## Validation

@@ -142,8 +142,7 @@ when these markers and the registry disagree, in either direction.
    which the store seeds from `configuration.job_defaults.platforms` with
    `FALLBACK_PLATFORMS` in `frontend/src/lib/store.svelte.js` as the fallback,
    so do not add a second literal for an upload surface. Rebuild the packaged
-   dashboard with `npm --prefix frontend run build`, which regenerates
-   `clipmorph/web_assets/`, when the change needs a rebuilt asset.
+   dashboard with `npm --prefix frontend run build`, which regenerates the untracked `clipmorph/web_assets/` for local verification; do not commit it.
    *Fails without it:*
    `PlatformCoverageDriftTests.test_frontend_platform_registry_lists_every_platform`
    and `PlatformCoverageDriftTests.test_frontend_platform_badges_cover_every_platform`.
