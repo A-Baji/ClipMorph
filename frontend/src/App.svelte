@@ -13,6 +13,8 @@
   import SettingsView from './views/SettingsView.svelte';
   import { app, loadWorkspace } from './lib/store.svelte.js';
 
+  let settingsSaveAction = $state(null);
+
   const PAGE = {
     jobs: {
       // A1: the workspace's canonical name for the Jobs tab.
@@ -41,8 +43,11 @@
 
   <main class="main">
     <Topbar title={page.title} subtitle={page.subtitle}>
+      {#if app.view === 'settings' && settingsSaveAction}
+        <button class="btn btn-primary" onclick={settingsSaveAction}>Save app.yml</button>
+      {/if}
       {#if !app.online}
-        <span class="badge badge-danger">offline</span>
+        <span class="badge badge-danger">Offline</span>
       {/if}
     </Topbar>
     <div class="alert-slot">
@@ -56,7 +61,7 @@
     {:else if app.view === 'layouts'}
       <LayoutsView />
     {:else if app.view === 'settings'}
-      <SettingsView />
+      <SettingsView bind:saveAction={settingsSaveAction} />
     {:else}
       <JobsView />
     {/if}

@@ -192,11 +192,23 @@ class CardCompositionTests(unittest.TestCase):
         jobs = source(JOBS_VIEW)
         # Issue #261 item 5: both card anatomies render the humanized status
         # badge — status lives on the card chips, not in a column (item 4).
-        self.assertEqual(jobs.count("{humanize(job.status)}"), 2)
+        self.assertEqual(jobs.count("{statusLabel(job.status)}"), 2)
+        self.assertNotIn("{humanize(job.status)}", jobs)
         # The stage lives in the pipeline column, not in a redundant chip.
         self.assertNotIn("{humanize(job.current_checkpoint)}", jobs)
         # No raw enum key reaches a card chip.
         self.assertNotIn("{job.status}", jobs)
+
+    def test_primary_action_follows_the_job_state(self):
+        jobs = source(JOBS_VIEW)
+        # AP-021: both card anatomies render the state-driven primary action.
+        self.assertEqual(jobs.count("nextStepAction(job)"), 2)
+        for kind in ("processing", "accept", "upload"):
+            self.assertEqual(jobs.count(f"step?.kind === '{kind}'"), 2, kind)
+        self.assertIn('class="spinner"', jobs)
+        self.assertIn('role="status"', jobs)
+        self.assertIn('name="arrowUp"', jobs)
+        self.assertIn("arrowUp", source(ICON))
 
     def test_calendarX_icon_exists_for_the_cancel_attempt_action(self):
         self.assertIn("calendarX", source(ICON))
@@ -278,6 +290,39 @@ class Phase2CViewTests(unittest.TestCase):
         self.assertIn('controls', player)
         self.assertIn('api.previewUrl', player)
         self.assertIn('reviewArtifact', player)
+        styles = (FRONTEND_SRC / "styles.css").read_text(encoding="utf-8")
+        player_styles = styles[styles.index(".review-player {"):styles.index(".composition-block {")]
+        self.assertIn("aspect-ratio: 9 / 16", player_styles)
+        self.assertIn("object-fit: contain", player_styles)
+
+    def test_upload_requires_at_least_one_selected_platform(self):
+        """AP-023: the review and one-click upload actions reject empty targets."""
+        detail = source(self.DETAIL)
+        self.assertIn("disabled={app.busy || !app.publish.selectedPlatforms.length}", detail)
+        self.assertIn("Choose at least one platform to enable upload.", detail)
+        store = source(self.STORE)
+        self.assertIn("if (!app.publish.selectedPlatforms.length)", store)
+        self.assertIn("Choose at least one platform to enable upload.", store)
+        jobs = source(JOBS_VIEW)
+        self.assertIn("hasUploadTargets(job, app.platforms", jobs)
+
+    def test_resume_poll_exhaustion_marks_status_unconfirmed(self):
+        """AP-024: an expected Running status remains visible without a stuck spinner."""
+        store = source(self.STORE)
+        self.assertIn("statusUpdateUnavailable", store)
+        self.assertIn("updateResumeStatusUnavailable", store)
+        jobs = source(JOBS_VIEW)
+        self.assertIn("job.statusUpdateUnavailable", jobs)
+        self.assertIn("Status unconfirmed", jobs)
+
+    def test_settings_save_is_in_the_topbar_action_slot(self):
+        """AP-026: Settings save stays in the page header, not a separate row."""
+        app = source(FRONTEND_SRC / "App.svelte")
+        settings = source(FRONTEND_SRC / "views" / "SettingsView.svelte")
+        self.assertIn("bind:saveAction={settingsSaveAction}", app)
+        self.assertIn("saveAction = $bindable(null)", settings)
+        self.assertNotIn('class="section-head head-end"', settings)
+        self.assertIn("Save app.yml", app)
 
     def test_no_raw_json_on_any_review_surface(self):
         """E22: composition data renders as labeled sections, never JSON."""
@@ -333,10 +378,10 @@ class Phase2CViewTests(unittest.TestCase):
         self.assertIn("field-error", config_form)
 
     def test_modal_action_bars_use_the_shared_gap(self):
-        """E11: action bars share one gap with group separation."""
+        """E11: action bars share a gap and review gates pair their actions."""
         detail = source(self.DETAIL)
         self.assertIn('class="action-bar', detail)
-        self.assertGreaterEqual(detail.count('class="action-group"'), 4)
+        self.assertEqual(detail.count('class="review-action-buttons"'), 3)
         styles = (FRONTEND_SRC / "styles.css").read_text(encoding="utf-8")
         self.assertIn(".action-bar {", styles)
         gap_block = styles[styles.index(".action-bar {"):styles.index(".action-group {")]

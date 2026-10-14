@@ -2,7 +2,10 @@
   import Card from '../components/Card.svelte';
   import Field from '../components/Field.svelte';
   import HealthRow from '../components/HealthRow.svelte';
+  import { onDestroy } from 'svelte';
   import { app, saveSettings, probeCredential } from '../lib/store.svelte.js';
+
+  let { saveAction = $bindable(null) } = $props();
 
   /** Workspace configuration. Paths and credentials first; defaults advanced. */
   let settings = $state({
@@ -32,14 +35,17 @@
     app.configuration = configuration;
     saveSettings();
   }
+
+  $effect(() => {
+    saveAction = save;
+  });
+
+  onDestroy(() => {
+    saveAction = null;
+  });
 </script>
 
 <div class="content">
-  <!-- U3: the Topbar renders the page's single header. -->
-  <div class="section-head head-end">
-    <button class="btn btn-primary" onclick={save}>Save app.yml</button>
-  </div>
-
   <div class="grid-2">
     <Card title="Paths">
       <div class="stack">
@@ -80,10 +86,3 @@
     </details>
   </Card>
 </div>
-
-<style>
-  /* U3: the lone toolbar action aligns with the Topbar's trailing edge. */
-  .head-end {
-    justify-content: flex-end;
-  }
-</style>

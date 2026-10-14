@@ -99,6 +99,7 @@
 
   --color-primary: var(--teal-400);
   --color-primary-hover: var(--teal-300);
+  --color-primary-active: var(--teal-500);
   --color-primary-muted: rgba(45, 212, 191, 0.12);
   --color-on-primary: var(--slate-950);
 
@@ -122,6 +123,7 @@
   --button-radius: var(--radius-md);
   --button-primary-bg: var(--color-primary);
   --button-primary-bg-hover: var(--color-primary-hover);
+  --button-primary-bg-active: var(--color-primary-active);
   --button-primary-fg: var(--color-on-primary);
   --button-ghost-fg: var(--color-text-muted);
   --button-ghost-bg-hover: var(--color-surface-hover);

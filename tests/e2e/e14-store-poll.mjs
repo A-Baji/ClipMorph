@@ -106,6 +106,28 @@ function check(name, condition) {
   if (!condition) failures.push(name);
 }
 
+const { hasUploadTargets } = await import(formatAbsolute);
+check(
+  'unsupported configured platforms do not count as upload targets',
+  !hasUploadTargets(
+    { configuration: { platforms: { unsupported: { upload: { skip: false } } } } },
+    ['youtube'],
+    { platforms: { youtube: { upload: { skip: true } } } },
+  ),
+);
+check(
+  'a supported per-platform setting overrides the global upload skip',
+  hasUploadTargets(
+    {
+      configuration: {
+        upload: { skip: true },
+        platforms: { youtube: { upload: { skip: false } } },
+      },
+    },
+    ['youtube'],
+  ),
+);
+
 /* --- Scenario A: accepted -> resumed run (202) --------------------------- */
 
 api.acceptCheckpoint = async () => ({
@@ -187,6 +209,40 @@ if (displayed('e14-job') !== 'awaiting_review') {
     'selected=', app.selectedJobId,
     'first-job-keys=', app.jobs[0] ? Object.keys(app.jobs[0]).join(',') : 'none');
 }
+
+/* --- Scenario C: bounded post-accept polling exhausts -------------------- */
+
+api.acceptCheckpoint = async () => ({
+  ...JOB,
+  status: 'running',
+  resumed: true,
+  checkpoints: { transcript: { status: 'completed' } },
+});
+let failedPolls = 0;
+api.getJob = async () => {
+  failedPolls += 1;
+  throw new Error('status unavailable');
+};
+app.jobs = [{ ...JOB }];
+app.selectedJobId = 'e14-job';
+const nativeSetTimeout = globalThis.setTimeout;
+globalThis.setTimeout = (callback, delay, ...args) =>
+  nativeSetTimeout(callback, Math.min(delay, 1), ...args);
+await acceptCheckpoint('transcript');
+for (let attempts = 0; failedPolls < 10 && attempts < 100; attempts += 1) {
+  await new Promise((resolve) => nativeSetTimeout(resolve, 2));
+}
+globalThis.setTimeout = nativeSetTimeout;
+check('bounded status polling made all ten attempts', failedPolls === 10);
+check('expected Running status is retained after all status polls fail',
+  displayed('e14-job') === 'running');
+check('poll exhaustion marks that Running status unconfirmed',
+  app.jobs[0]?.statusUpdateUnavailable === true);
+
+api.listJobs = async () => [{ ...JOB, status: 'running' }];
+await loadWorkspace();
+check('a successful status refresh clears the unconfirmed marker',
+  app.jobs[0]?.statusUpdateUnavailable !== true);
 
 if (!process.env.E14_KEEP_TEST_MODULE) {
   rmSync(moduleDir, { recursive: true, force: true });

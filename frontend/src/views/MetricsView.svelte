@@ -38,8 +38,8 @@
     {:else}
       <EmptyState
         icon="chart"
-        title="No published posts with metrics yet"
-        message="Once a clip is published, pull metrics from its job detail to see engagement here."
+        title="No metrics yet"
+        message="Open a clip to view its metrics."
       />
     {/if}
   </Card>
