@@ -8,8 +8,9 @@ Completed the large-text Settings reflow continuation on
 Five measured Settings defects were fixed (AP-053–057), each with a
 before/after screenshot pair in [`evidence/`](./evidence/). No upload was
 attempted.
-The fixes and this dated report are committed locally in one commit; nothing
-was pushed and no pull request was opened.
+The fixes and QA record are committed locally; the subsequent AP decision
+updates are in a follow-up documentation commit. Nothing was pushed and no
+pull request was opened.
 
 Confidence in the depth of this automated/browser QA: **93/100**. The complete
 configured UI matrix passed in Chromium, Firefox, and WebKit, and focused E2E
@@ -17,7 +18,8 @@ checks exercised the changed Settings behavior and the existing workflow
 smoke cases. This is not 100%: the matrix is finite and fixture-driven; it
 does not establish behavior with real production data, a real service outage,
 screen readers, native browser zoom, or native OS high-contrast settings.
-AP-058–060 remain visual-only design decisions.
+AP-058 was not substantiated in the user's review; AP-059 and AP-060 were
+rejected. No changes were made for these items.
 
 ## Coverage
 

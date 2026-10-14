@@ -107,7 +107,7 @@ Other observations were checked against rendered behavior and existing intent:
   content. The dialog itself has an overflow-scrolling container; no gate
   errors or page overflow were reported.
 
-## Visual-only follow-ups — no code change
+## Visual-only follow-ups — decisions recorded
 
 These are design preferences rather than reproduced functional defects. They
 were not changed without a maintainer decision.
@@ -116,19 +116,19 @@ were not changed without a maintainer decision.
   wrap within credential rows, producing uneven row heights. Evidence:
   `tests/qa/qa-out/settings__320___content.png` and
   `tests/qa/qa-out/accessibility/settings-root-font-200-320-after-chromium.png`.
-  Decision prompt: should these labels continue to wrap for reflow, or should
-  the credential rows use a denser treatment?
+  **Outcome: not substantiated; no change.** The user did not observe wrapping
+  and initially could not locate the cited screenshot. Both files were
+  verified present in the repository, but this visual-only observation was
+  not approved for change.
 - **AP-059 — P2, visual-only:** With large root text, the menu icon and
   Settings title do not appear vertically centered, and the Save action uses
   its own row. Evidence:
   `tests/qa/qa-out/accessibility/settings-root-font-200-320-after-chromium.png`.
-  Decision prompt: keep the current responsive grid, or prefer a different
-  large-text header arrangement?
+  **Outcome: rejected.** Keep the current responsive header arrangement.
 - **AP-060 — P2, visual-only:** At desktop width the Paths card has unused
   vertical space beside the Credentials card. Evidence:
   `tests/qa/qa-out/settings__1920___content.png`.
-  Decision prompt: keep equal-height paired cards, or top-align the shorter
-  Paths card?
+  **Outcome: rejected.** Keep the equal-height paired cards.
 
 No assistive technology, native OS accessibility settings, or live upload was
 used in this continuation.
