@@ -510,7 +510,7 @@ jobs:
         if [ ! -f "$ISCC" ]; then
           ISCC="/c/Program Files/Inno Setup 6/ISCC.exe"
         fi
-        "$ISCC" "/DAppVersion=$VERSION" "scripts/installer/clipmorph.iss"
+        MSYS2_ARG_CONV_EXCL='/D' "$ISCC" "/DAppVersion=$VERSION" "scripts/installer/clipmorph.iss"
         test -f dist/installer/clipmorph-ui-windows-setup.exe
         ls -lh dist/installer/clipmorph-ui-windows-setup.exe
 
