@@ -31,5 +31,7 @@
   .health-name {
     display: grid;
     gap: var(--space-1);
+    min-width: 0;
+    flex: 1 1 0;
   }
 </style>

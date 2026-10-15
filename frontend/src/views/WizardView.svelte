@@ -82,7 +82,7 @@
       </ol>
     </div>
     <div class="row">
-      <button class="btn btn-ghost" onclick={confirmDiscard}>Discard draft</button>
+      <button class="btn btn-danger" onclick={confirmDiscard}>Discard draft</button>
       {#if app.wizard.step === 2}
         <button class="btn btn-primary" disabled={app.busy} onclick={create}>
           <Icon name="check" /> Create {selected.length} job{selected.length === 1 ? '' : 's'}
@@ -98,12 +98,12 @@
           <h2>Select clips</h2>
           <p>Only clip selection lives here. Configuration is the next step.</p>
         </div>
-        <div class="row">
+        <div class="row select-actions">
           <button class="btn btn-ghost btn-sm" onclick={() => wizardSelectAll(app.sources.map((s) => s.name))}>
             Select all
           </button>
           <button class="btn btn-ghost btn-sm" onclick={wizardClearSelection}>Clear</button>
-          <span class="mono faint">{selected.length} selected</span>
+          <span class="selected-count">{selected.length} selected</span>
         </div>
       </div>
 
@@ -119,7 +119,7 @@
               />
               <Thumbnail name={source.name} size={52} alt={`Poster frame for ${source.name}`} />
               <span class="clip-main">
-                <b>{source.name}</b>
+                <b title={source.name}>{source.name}</b>
                 <small class="faint">{formatBytes(source.size)}</small>
               </span>
             </label>
@@ -267,6 +267,10 @@
     z-index: 2;
   }
 
+  .wizard-head > .row:last-child {
+    margin-left: auto;
+  }
+
   .steps {
     display: flex;
     gap: var(--space-4);
@@ -276,6 +280,12 @@
     color: var(--color-text-muted);
   }
 
+  .steps li {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
   .steps li.active {
     color: var(--color-text);
     font-weight: 600;
@@ -283,13 +293,30 @@
 
   .step-num {
     display: inline-flex;
-    width: 20px;
-    height: 20px;
+    width: 22px;
+    height: 22px;
     border-radius: 50%;
     align-items: center;
     justify-content: center;
     background: var(--color-border);
     font-size: var(--text-xs);
+  }
+
+  .steps li.active .step-num {
+    background: var(--color-primary);
+    color: var(--color-on-primary, #fff);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary) 25%, transparent);
+  }
+
+  .selected-count {
+    font-size: var(--text-sm);
+    font-weight: var(--weight-medium);
+    color: var(--color-text);
+  }
+
+  .select-actions :global(.btn) {
+    color: var(--color-text);
+    border: 1px solid var(--color-border-strong, var(--color-border));
   }
 
   .clip-grid {
@@ -299,7 +326,8 @@
   }
 
   .clip-card {
-    display: flex;
+    display: grid;
+    grid-template-columns: 20px 52px minmax(0, 1fr);
     align-items: center;
     gap: var(--space-3);
     padding: var(--space-3);
@@ -308,12 +336,27 @@
     cursor: pointer;
   }
 
+  .clip-card input[type='checkbox'] {
+    width: 20px;
+    height: 20px;
+    margin: 0;
+  }
+
   .clip-card.selected {
     border-color: var(--color-primary);
   }
 
   .clip-main {
     display: grid;
+  }
+
+  .clip-main b {
+    display: -webkit-box;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
   }
 
   .transient {
@@ -400,7 +443,13 @@
     display: flex;
     justify-content: space-between;
     align-items: baseline;
+    gap: var(--space-2);
     margin-bottom: var(--space-2);
+  }
+
+  .pane-head .faint {
+    flex-shrink: 0;
+    white-space: nowrap;
   }
 
   .job-error {
@@ -414,6 +463,13 @@
   @media (max-width: 860px) {
     .wizard-body {
       grid-template-columns: 1fr;
+    }
+  }
+
+  @media (max-width: 520px) {
+    .transient input {
+      min-width: 0;
+      flex: 1 1 0;
     }
   }
 </style>

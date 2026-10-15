@@ -1,0 +1,71 @@
+{
+  "baseUrl": "http://localhost:5173",
+  "startCommand": "npm run dev",
+  "readyUrl": "http://localhost:5173",
+  "viewports": [
+    {
+      "name": "desktop",
+      "width": 1920,
+      "height": 1080
+    },
+    {
+      "name": "laptop",
+      "width": 1366,
+      "height": 768
+    },
+    {
+      "name": "small",
+      "width": 1024,
+      "height": 768
+    }
+  ],
+  "states": [
+    {
+      "name": "jobs-completed",
+      "path": "/",
+      "ready": "[data-qa=app-ready]"
+    },
+    {
+      "name": "jobs-queue",
+      "path": "/",
+      "actions": [
+        {
+          "click": "[role=tab]:has-text('Queue')"
+        }
+      ],
+      "ready": "[data-qa=app-ready]"
+    },
+    {
+      "name": "settings",
+      "path": "/",
+      "actions": [
+        {
+          "click": "nav >> text=Settings"
+        }
+      ],
+      "ready": "[data-qa=app-ready]"
+    }
+  ],
+  "components": [
+    {
+      "name": "card",
+      "selector": "[data-qa=job-card]"
+    },
+    {
+      "name": "modal",
+      "selector": "[role=dialog]"
+    }
+  ],
+  "minGap": 4,
+  "minTarget": 24,
+  "spacingUnit": 4,
+  "allowlist": [
+    {
+      "check": "small-target",
+      "selector": "input[type=checkbox]",
+      "reason": "native checkboxes are exempt under WCAG 2.5.8"
+    }
+  ],
+  "focusCheck": true,
+  "maxTabStops": 25
+}

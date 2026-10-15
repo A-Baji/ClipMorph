@@ -8,7 +8,12 @@
  */
 
 import { api } from './api.js';
-import { toLocalInput, toUtcTimestamp, platformListLabel } from './format.js';
+import {
+  hasUploadTargets,
+  toLocalInput,
+  toUtcTimestamp,
+  platformListLabel,
+} from './format.js';
 
 const FALLBACK_CONFIGURATION = {
   source_dir: 'sources',
@@ -130,13 +135,32 @@ function settleResumeGuard(job) {
   if (resumeGuards.has(job.job_id) && !PRERUN_STATUSES.includes(job.status)) {
     resumeGuards.delete(job.job_id);
     stopResumePoll(job.job_id);
+    updateResumeStatusUnavailable(job.job_id, false);
+  }
+}
+
+function updateResumeStatusUnavailable(jobId, unavailable) {
+  const index = app.jobs.findIndex((item) => item.job_id === jobId);
+  if (index >= 0 && app.jobs[index].statusUpdateUnavailable !== unavailable) {
+    app.jobs[index] = {
+      ...app.jobs[index],
+      statusUpdateUnavailable: unavailable,
+    };
   }
 }
 
 /** Apply one fetched job into the board with the guard applied. */
 function acceptFetchedJob(job) {
+  const previouslyUnavailable = app.jobs.find(
+    (item) => item.job_id === job.job_id,
+  )?.statusUpdateUnavailable;
   settleResumeGuard(job);
-  const normalized = { ...job, status: displayStatus(job) };
+  const normalized = {
+    ...job,
+    status: displayStatus(job),
+    statusUpdateUnavailable:
+      resumeGuards.has(job.job_id) && previouslyUnavailable === true,
+  };
   const index = app.jobs.findIndex((item) => item.job_id === job.job_id);
   if (index < 0) {
     app.jobs = [...app.jobs, normalized];
@@ -162,8 +186,10 @@ function startResumePoll(jobId) {
     }).finally(() => {
       if (resumeGuards.has(jobId) && attempts < RESUME_POLL_MAX_ATTEMPTS) {
         resumePollTimers.set(jobId, setTimeout(tick, RESUME_POLL_MS));
+      } else if (resumeGuards.has(jobId)) {
+        updateResumeStatusUnavailable(jobId, true);
+        stopResumePoll(jobId);
       } else {
-        resumeGuards.delete(jobId);
         stopResumePoll(jobId);
       }
     });
@@ -180,8 +206,16 @@ export function notify(message) {
   }, 3200);
 }
 
+export const CONNECTION_ERROR_MESSAGE =
+  "Can't connect to ClipMorph. Check your connection or local service, then try again.";
+
 export function report(error) {
-  app.errors = [error?.message || String(error)];
+  const message = error?.message || String(error);
+  const networkFailure =
+    /^(failed to fetch|load failed|networkerror when attempting to fetch resource\.?)$/i.test(
+      message.trim(),
+    );
+  app.errors = [networkFailure ? CONNECTION_ERROR_MESSAGE : message];
 }
 
 export function clearErrors() {
@@ -267,8 +301,16 @@ export async function loadWorkspace() {
     ]);
     app.jobs = jobs.map((item) => {
       // E14: guard a fetched pre-run status for accepted-and-resuming jobs.
+      const previouslyUnavailable = app.jobs.find(
+        (job) => job.job_id === item.job_id,
+      )?.statusUpdateUnavailable;
       settleResumeGuard(item);
-      return { ...item, status: displayStatus(item) };
+      return {
+        ...item,
+        status: displayStatus(item),
+        statusUpdateUnavailable:
+          resumeGuards.has(item.job_id) && previouslyUnavailable === true,
+      };
     });
     app.sources = sources;
     app.layouts = layouts;
@@ -423,8 +465,16 @@ function openJobsStream() {
       if (!Array.isArray(jobs)) return;
       app.jobs = jobs.map((item) => {
         // E14: keep the accepted -> queued passthrough unobservable here too.
+        const previouslyUnavailable = app.jobs.find(
+          (job) => job.job_id === item.job_id,
+        )?.statusUpdateUnavailable;
         settleResumeGuard(item);
-        return { ...item, status: displayStatus(item) };
+        return {
+          ...item,
+          status: displayStatus(item),
+          statusUpdateUnavailable:
+            resumeGuards.has(item.job_id) && previouslyUnavailable === true,
+        };
       });
     } catch {
       /* ignore malformed events */
@@ -957,8 +1007,39 @@ export async function retryCheckpoint(stage) {
 }
 
 export async function acceptCheckpoint(stage, group) {
-  const job = selectedJob();
+  return acceptJobCheckpoint(selectedJob(), stage, group);
+}
+
+/** A job card's approve button: accept the gate, or upload with the draft's defaults. */
+export async function advanceJob(job, step) {
+  if (step.kind === 'accept') {
+    await acceptJobCheckpoint(job, step.stage);
+    return;
+  }
+  if (!hasUploadTargets(job, app.platforms, app.configuration.job_defaults || {})) {
+    report(new Error('Choose at least one platform to enable upload.'));
+    return;
+  }
+  try {
+    const submitted = await api.submitUpload(job.job_id, {});
+    await refreshJob(job.job_id);
+    notify(
+      submitted.scheduled
+        ? 'Upload attempts scheduled for the chosen time'
+        : 'Upload attempts started',
+    );
+  } catch (error) {
+    report(error);
+  }
+}
+
+const acceptsInFlight = new Set();
+
+async function acceptJobCheckpoint(job, stage, group) {
   if (!job) return false;
+  const key = `${job.job_id}:${stage}`;
+  if (acceptsInFlight.has(key)) return false;
+  acceptsInFlight.add(key);
   try {
     const result = await api.acceptCheckpoint(
       job.job_id, stage, job.checkpoints[stage].revision, group);
@@ -967,7 +1048,13 @@ export async function acceptCheckpoint(stage, group) {
       // unobservable and follow the resumed run until a real status lands.
       resumeGuards.add(job.job_id);
       const index = app.jobs.findIndex((item) => item.job_id === job.job_id);
-      if (index >= 0) app.jobs[index] = { ...app.jobs[index], status: 'running' };
+      if (index >= 0) {
+        app.jobs[index] = {
+          ...app.jobs[index],
+          status: 'running',
+          statusUpdateUnavailable: false,
+        };
+      }
       startResumePoll(job.job_id);
     } else {
       resumeGuards.delete(job.job_id);
@@ -984,6 +1071,8 @@ export async function acceptCheckpoint(stage, group) {
   } catch (error) {
     report(error);
     return false;
+  } finally {
+    acceptsInFlight.delete(key);
   }
 }
 
@@ -1235,6 +1324,10 @@ export async function saveSuggestionEdits(platform) {
 export async function submitUpload() {
   const job = selectedJob();
   if (!job) return;
+  if (!app.publish.selectedPlatforms.length) {
+    report(new Error('Choose at least one platform to enable upload.'));
+    return false;
+  }
   try {
     const saved = await saveUploadDraft();
     if (saved === false) return;

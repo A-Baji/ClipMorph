@@ -53,8 +53,7 @@ Colour is dropped automatically when output is redirected. `--data-dir` and
 between a group and its subcommand).
 ### Local dashboard
 
-Install the optional web dependencies from the tagged GitHub repository with `python -m pip install "clipmorph[web] @ git+https://github.com/A-Baji/ClipMorph.git@vX.Y.Z"` (the base package and its `web` extra are currently distributed from tagged GitHub releases; PyPI publication is planned but not yet available),
-then run `clipmorph web`. The service binds to `127.0.0.1:8000` and serves the
+The dashboard ships only in the `clipmorph-ui-*` release downloads (the built frontend is not committed). A git-installed `clipmorph[web] @ git+https://github.com/A-Baji/ClipMorph.git@vX.Y.Z` provides the headless API only; to get the dashboard from source, run `npm install && npm run build` in `frontend/` first. Then run `clipmorph web`. The service binds to `127.0.0.1:8000` and serves the
 local dashboard plus `/api/v1/` without authentication. Jobs, credentials,
 artifacts, captions, and upload state remain on the local machine. Stop the
 service with `Ctrl+C`.
